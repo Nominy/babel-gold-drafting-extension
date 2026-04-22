@@ -53,4 +53,14 @@ The packaged manifest strips local development host permissions and keeps only:
 ## Release
 
 - GitHub Releases are the canonical home for packaged ZIPs.
-- The manual GitHub Actions workflow builds `.artifacts/babel-gold-drafting-extension-<version>.zip`, commits the version bump, tags the released commit as `v<version>`, and uploads the ZIP asset to that release.
+- `.github/workflows/deploy-gold-drafting-extension.yml` is the manual Chrome Web Store deployment workflow. It validates the extension, builds the release ZIP, publishes it to the Chrome Web Store, commits the version bump, and then publishes the GitHub Release asset.
+- Required GitHub Actions secrets:
+  - `CWS_CLIENT_ID`
+  - `CWS_CLIENT_SECRET`
+  - `CWS_REFRESH_TOKEN`
+  - `CWS_PUBLISHER_ID`
+  - `CWS_EXTENSION_ID`
+- Optional GitHub Actions secret:
+  - `CWS_ACCESS_TOKEN`
+- For local publishing helpers, keep Chrome Web Store credentials in `.env.cws.local` and start from `.env.cws.example`.
+- To seed the GitHub Actions secrets from the local dotenv file, run `node scripts/setup-github-secrets.mjs OWNER/REPO`.

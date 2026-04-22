@@ -1,17 +1,29 @@
-name: Release Gold Drafting Extension
+name: Deploy Gold Drafting Extension
 
 on:
   workflow_dispatch:
+    inputs:
+      publish_type:
+        description: Chrome Web Store publish mode
+        type: choice
+        options:
+          - DEFAULT_PUBLISH
+          - STAGED_PUBLISH
+        default: DEFAULT_PUBLISH
+      skip_review:
+        description: Request skipReview=true when the item is eligible
+        type: boolean
+        default: false
 
 permissions:
   contents: write
 
 concurrency:
-  group: gold-drafting-extension-release
+  group: gold-drafting-extension-deploy
   cancel-in-progress: false
 
 jobs:
-  release:
+  deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -36,6 +48,8 @@ jobs:
           npm test
 
       - name: Build release ZIP
+        env:
+          BABEL_EXTENSION_ZIP_DIR: ${{ github.workspace }}/.artifacts
         run: npm run build:zip
 
       - name: Capture release metadata
@@ -46,17 +60,30 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "zip_path=${ZIP_PATH}" >> "$GITHUB_OUTPUT"
 
-      - name: Upload workflow artifact
+      - name: Upload release artifact
         uses: actions/upload-artifact@v4
         with:
           name: babel-gold-drafting-extension-${{ steps.metadata.outputs.version }}
           path: ${{ steps.metadata.outputs.zip_path }}
           if-no-files-found: error
 
+      - name: Publish to Chrome Web Store
+        env:
+          CWS_CLIENT_ID: ${{ secrets.CWS_CLIENT_ID }}
+          CWS_CLIENT_SECRET: ${{ secrets.CWS_CLIENT_SECRET }}
+          CWS_REFRESH_TOKEN: ${{ secrets.CWS_REFRESH_TOKEN }}
+          CWS_ACCESS_TOKEN: ${{ secrets.CWS_ACCESS_TOKEN }}
+          CWS_PUBLISHER_ID: ${{ secrets.CWS_PUBLISHER_ID }}
+          CWS_EXTENSION_ID: ${{ secrets.CWS_EXTENSION_ID }}
+          CWS_PUBLISH_TYPE: ${{ inputs.publish_type }}
+          CWS_SKIP_REVIEW: ${{ inputs.skip_review }}
+          CWS_ZIP_PATH: ${{ steps.metadata.outputs.zip_path }}
+        run: node scripts/publish-cws.mjs
+
       - name: Commit version bump
         run: |
           if git diff --quiet -- package.json package-lock.json manifest.json; then
-            echo "Version files already match the release state."
+            echo "Version files already match the deployed state."
             exit 0
           fi
 

@@ -8,6 +8,8 @@
     "build": "node esbuild.config.mjs",
     "build:watch": "node esbuild.config.mjs --watch",
     "build:zip": "node scripts/pack.mjs",
+    "publish:cws": "node scripts/publish-cws.mjs",
+    "setup:github-secrets": "node scripts/setup-github-secrets.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test tests/*.test.ts"
   },

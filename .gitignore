@@ -1,4 +1,7 @@
 node_modules/
+.env
+.env.*
+!.env.cws.example
 .artifacts/
 dist.zip
 babel-gold-drafting-extension-*.zip
