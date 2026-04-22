@@ -1,0 +1,23 @@
+{
+  "name": "babel-gold-drafting-extension",
+  "version": "0.1.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "prebuild": "node scripts/increment-version.mjs",
+    "build": "node esbuild.config.mjs",
+    "build:watch": "node esbuild.config.mjs --watch",
+    "build:zip": "node scripts/pack.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test tests/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.1.24",
+    "@types/jsdom": "^21.1.7",
+    "@types/node": "^24.6.0",
+    "esbuild": "^0.25.10",
+    "jsdom": "^26.1.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.3"
+  }
+}

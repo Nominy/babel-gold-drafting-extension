@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Babel Gold Drafting Options</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f6f1e7;
+        --panel: #fffdf7;
+        --ink: #17221f;
+        --muted: #5d6d67;
+        --accent: #0b6e4f;
+        --border: #d9d1c0;
+      }
+
+      body {
+        margin: 0;
+        font-family: Georgia, "Times New Roman", serif;
+        background:
+          radial-gradient(circle at top left, rgba(11, 110, 79, 0.1), transparent 32%),
+          linear-gradient(180deg, #fbf7ee 0%, var(--bg) 100%);
+        color: var(--ink);
+      }
+
+      main {
+        max-width: 760px;
+        margin: 32px auto;
+        padding: 0 20px 32px;
+      }
+
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 18px;
+        box-shadow: 0 18px 60px rgba(23, 34, 31, 0.08);
+        padding: 24px;
+      }
+
+      h1 {
+        margin: 0 0 8px;
+        font-size: 34px;
+        line-height: 1.05;
+      }
+
+      p {
+        margin: 0 0 18px;
+        color: var(--muted);
+        font-size: 16px;
+      }
+
+      label {
+        display: block;
+        margin: 18px 0 8px;
+        font-weight: 700;
+      }
+
+      input,
+      select,
+      button {
+        font: inherit;
+      }
+
+      input,
+      select {
+        width: 100%;
+        box-sizing: border-box;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: white;
+        padding: 12px 14px;
+      }
+
+      button {
+        margin-top: 20px;
+        border: 0;
+        border-radius: 999px;
+        padding: 12px 18px;
+        background: var(--accent);
+        color: white;
+        cursor: pointer;
+      }
+
+      [data-role="status"] {
+        margin-top: 14px;
+        color: var(--muted);
+        min-height: 20px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="panel">
+        <h1>Babel Gold Drafting</h1>
+        <p>Configure the drafting backend and the active project preset for Silver-to-Gold generation.</p>
+
+        <label for="backendBaseUrl">Backend Base URL</label>
+        <input id="backendBaseUrl" name="backendBaseUrl" placeholder="https://reviewgen.ovh" />
+
+        <label for="projectPreset">Project Preset</label>
+        <select id="projectPreset" name="projectPreset">
+          <option value="ru-gold-2sp-v1">Russian Gold 2-speaker v1</option>
+        </select>
+
+        <button type="button" data-role="save">Save Settings</button>
+        <div data-role="status"></div>
+      </section>
+    </main>
+    <script src="dist/options/options.js"></script>
+  </body>
+</html>
