@@ -1,8 +1,50 @@
 "use strict";
 (() => {
+  // ../../shared/babel-extension-platform/packages/babel-extension-frontend/src/index.mjs
+  function normalizeBaseUrl(value) {
+    return String(value || "").trim().replace(/\/+$/, "");
+  }
+  function createSettingsStore(config) {
+    const getStorageArea2 = config.getStorageArea ?? defaultGetStorageArea;
+    return {
+      async loadSettings() {
+        const storage = getStorageArea2();
+        const fallback = config.normalize(config.defaults);
+        if (!storage) {
+          return fallback;
+        }
+        return new Promise((resolve) => {
+          storage.get(config.storageKey, (items) => {
+            const runtime = globalThis.chrome?.runtime;
+            if (runtime?.lastError) {
+              resolve(fallback);
+              return;
+            }
+            resolve(config.normalize(items?.[config.storageKey]));
+          });
+        });
+      },
+      async saveSettings(value) {
+        const normalized = config.normalize(value);
+        const storage = getStorageArea2();
+        if (!storage) {
+          return normalized;
+        }
+        return new Promise((resolve) => {
+          storage.set({ [config.storageKey]: normalized }, () => {
+            resolve(normalized);
+          });
+        });
+      }
+    };
+  }
+  function defaultGetStorageArea() {
+    return globalThis.chrome?.storage?.local ?? null;
+  }
+
   // src/core/backend-client.ts
   function getEndpointUrl(backendBaseUrl, path) {
-    return `${backendBaseUrl.replace(/\/+$/, "")}${path}`;
+    return `${normalizeBaseUrl(backendBaseUrl)}${path}`;
   }
   async function parseJsonResponse(response) {
     const text = await response.text();
@@ -124,21 +166,17 @@
       projectPreset
     };
   }
+  var settingsStore = createSettingsStore({
+    storageKey: SETTINGS_STORAGE_KEY,
+    defaults: DEFAULT_SETTINGS,
+    normalize: normalizeSettings,
+    getStorageArea
+  });
   async function loadSettings() {
-    const storage = getStorageArea();
-    if (!storage) {
-      return DEFAULT_SETTINGS;
-    }
-    return new Promise((resolve) => {
-      storage.get(SETTINGS_STORAGE_KEY, (items) => {
-        resolve(normalizeSettings(items?.[SETTINGS_STORAGE_KEY]));
-      });
-    });
+    return settingsStore.loadSettings();
   }
 
-  // src/core/dom.ts
-  var TRANSCRIPT_ROW_SELECTOR = "tbody tr";
-  var ROW_TEXTAREA_SELECTOR = 'textarea[placeholder^="What was said"]';
+  // ../../shared/babel-extension-platform/packages/babel-babel-runtime/src/index.mjs
   function normalizeText(element) {
     if (!(element instanceof HTMLElement)) {
       return "";
@@ -146,6 +184,52 @@
     const rawText = typeof element.innerText === "string" ? element.innerText : element.textContent || "";
     return rawText.replace(/\s+/g, " ").trim();
   }
+  function setEditableValue(element, value) {
+    if (!(element instanceof HTMLElement)) {
+      return false;
+    }
+    const nextValue = typeof value === "string" ? value : String(value ?? "");
+    const prototype = element instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : element instanceof HTMLInputElement ? HTMLInputElement.prototype : null;
+    const setter = prototype ? Object.getOwnPropertyDescriptor(prototype, "value")?.set : null;
+    if (typeof setter === "function") {
+      setter.call(element, nextValue);
+    } else if ("value" in element) {
+      element.value = nextValue;
+    } else {
+      return false;
+    }
+    try {
+      element.dispatchEvent(
+        new InputEvent("input", {
+          bubbles: true,
+          cancelable: false,
+          data: null,
+          inputType: "insertText"
+        })
+      );
+    } catch {
+      element.dispatchEvent(new Event("input", { bubbles: true, cancelable: false }));
+    }
+    return true;
+  }
+  function getReactInternalValue(element, prefix) {
+    if (!(element instanceof HTMLElement)) {
+      return null;
+    }
+    for (const name of Object.getOwnPropertyNames(element)) {
+      if (typeof name === "string" && name.startsWith(prefix)) {
+        return element[name];
+      }
+    }
+    return null;
+  }
+  function getReactFiber(element) {
+    return getReactInternalValue(element, "__reactFiber$");
+  }
+
+  // src/core/dom.ts
+  var TRANSCRIPT_ROW_SELECTOR = "tbody tr";
+  var ROW_TEXTAREA_SELECTOR = 'textarea[placeholder^="What was said"]';
   function parseTimeValue(value) {
     const trimmed = value.trim();
     if (!trimmed) {
@@ -163,36 +247,8 @@
       return Number.isFinite(numeric) ? total * 60 + numeric : null;
     }, 0);
   }
-  function getReactFiber(element) {
-    if (!(element instanceof HTMLElement)) {
-      return null;
-    }
-    for (const name of Object.getOwnPropertyNames(element)) {
-      if (name.startsWith("__reactFiber$")) {
-        return element[name];
-      }
-    }
-    return null;
-  }
   function setControlledTextareaValue(textarea, value) {
-    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
-    if (typeof setter === "function") {
-      setter.call(textarea, value);
-    } else {
-      textarea.value = value;
-    }
-    try {
-      textarea.dispatchEvent(
-        new InputEvent("input", {
-          bubbles: true,
-          cancelable: false,
-          data: null,
-          inputType: "insertText"
-        })
-      );
-    } catch {
-      textarea.dispatchEvent(new Event("input", { bubbles: true, cancelable: false }));
-    }
+    setEditableValue(textarea, value);
     textarea.dispatchEvent(new Event("change", { bubbles: true, cancelable: false }));
   }
   function getTranscriptRowElements(root = document) {

@@ -1,3 +1,4 @@
+import { createJsonClient, normalizeBaseUrl } from '@nominy/babel-extension-frontend';
 import type {
   GenerateDraftErrorEvent,
   GenerateDraftRequest,
@@ -7,7 +8,7 @@ import type {
 } from './types';
 
 function getEndpointUrl(backendBaseUrl: string, path: string): string {
-  return `${backendBaseUrl.replace(/\/+$/, '')}${path}`;
+  return `${normalizeBaseUrl(backendBaseUrl)}${path}`;
 }
 
 async function parseJsonResponse(response: Response): Promise<unknown> {
@@ -34,25 +35,10 @@ export async function generateDraft(
   backendBaseUrl: string,
   payload: GenerateDraftRequest
 ): Promise<GenerateDraftResponse> {
-  const response = await fetch(getEndpointUrl(backendBaseUrl, '/api/draft/generate'), {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(payload)
+  const client = createJsonClient({
+    getBaseCandidates: () => [normalizeBaseUrl(backendBaseUrl)]
   });
-
-  const data = await parseJsonResponse(response);
-
-  if (!response.ok) {
-    throw new Error(getErrorMessage(response.status, data));
-  }
-
-  if (!data || typeof data !== 'object') {
-    throw new Error('Draft backend returned non-JSON payload.');
-  }
-
-  return data as GenerateDraftResponse;
+  return client.post<GenerateDraftResponse>('/api/draft/generate', payload);
 }
 
 export async function generateDraftStream(

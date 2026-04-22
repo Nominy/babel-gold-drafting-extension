@@ -1,33 +1,27 @@
-import { build, context } from 'esbuild';
+import { buildExtension, defineExtensionBuild } from '@nominy/babel-extension-build';
 
 const watch = process.argv.includes('--watch');
 
-const shared = {
-  bundle: true,
-  minify: false,
-  sourcemap: true,
-  target: 'chrome114',
-  format: 'iife',
-  logLevel: 'info'
-};
-
-const tasks = [
-  {
-    ...shared,
-    entryPoints: ['src/content/entry.ts'],
-    outfile: 'dist/content/entry.js'
+const config = defineExtensionBuild({
+  watch,
+  sharedOptions: {
+    minify: false,
+    sourcemap: true,
+    target: 'chrome114',
+    format: 'iife',
+    logLevel: 'info'
   },
-  {
-    ...shared,
-    entryPoints: ['src/options/options.ts'],
-    outfile: 'dist/options/options.js'
-  }
-];
+  tasks: [
+    {
+      entryPoints: ['src/content/entry.ts'],
+      outfile: 'dist/content/entry.js'
+    },
+    {
+      entryPoints: ['src/options/options.ts'],
+      outfile: 'dist/options/options.js'
+    }
+  ],
+  watchMessage: 'Watching gold drafting extension bundles...'
+});
 
-if (watch) {
-  const contexts = await Promise.all(tasks.map((options) => context(options)));
-  await Promise.all(contexts.map((ctx) => ctx.watch()));
-  console.log('Watching gold drafting extension bundles...');
-} else {
-  await Promise.all(tasks.map((options) => build(options)));
-}
+await buildExtension(config);

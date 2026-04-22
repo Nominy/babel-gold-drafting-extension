@@ -1,14 +1,9 @@
+import { getReactFiber, normalizeText, setEditableValue } from '@nominy/babel-babel-runtime';
+
 export const TRANSCRIPT_ROW_SELECTOR = 'tbody tr';
 export const ROW_TEXTAREA_SELECTOR = 'textarea[placeholder^="What was said"]';
 
-export function normalizeText(element: Element | null | undefined): string {
-  if (!(element instanceof HTMLElement)) {
-    return '';
-  }
-
-  const rawText = typeof element.innerText === 'string' ? element.innerText : element.textContent || '';
-  return rawText.replace(/\s+/g, ' ').trim();
-}
+export { getReactFiber, normalizeText };
 
 export function parseTimeValue(value: string): number | null {
   const trimmed = value.trim();
@@ -31,41 +26,8 @@ export function parseTimeValue(value: string): number | null {
   }, 0);
 }
 
-export function getReactFiber(element: HTMLElement | null): unknown {
-  if (!(element instanceof HTMLElement)) {
-    return null;
-  }
-
-  for (const name of Object.getOwnPropertyNames(element)) {
-    if (name.startsWith('__reactFiber$')) {
-      return (element as unknown as Record<string, unknown>)[name];
-    }
-  }
-
-  return null;
-}
-
 export function setControlledTextareaValue(textarea: HTMLTextAreaElement, value: string): void {
-  const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
-  if (typeof setter === 'function') {
-    setter.call(textarea, value);
-  } else {
-    textarea.value = value;
-  }
-
-  try {
-    textarea.dispatchEvent(
-      new InputEvent('input', {
-        bubbles: true,
-        cancelable: false,
-        data: null,
-        inputType: 'insertText'
-      })
-    );
-  } catch {
-    textarea.dispatchEvent(new Event('input', { bubbles: true, cancelable: false }));
-  }
-
+  setEditableValue(textarea, value);
   textarea.dispatchEvent(new Event('change', { bubbles: true, cancelable: false }));
 }
 

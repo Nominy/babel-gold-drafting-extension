@@ -1,5 +1,44 @@
 "use strict";
 (() => {
+  // ../../shared/babel-extension-platform/packages/babel-extension-frontend/src/index.mjs
+  function createSettingsStore(config) {
+    const getStorageArea2 = config.getStorageArea ?? defaultGetStorageArea;
+    return {
+      async loadSettings() {
+        const storage = getStorageArea2();
+        const fallback = config.normalize(config.defaults);
+        if (!storage) {
+          return fallback;
+        }
+        return new Promise((resolve) => {
+          storage.get(config.storageKey, (items) => {
+            const runtime = globalThis.chrome?.runtime;
+            if (runtime?.lastError) {
+              resolve(fallback);
+              return;
+            }
+            resolve(config.normalize(items?.[config.storageKey]));
+          });
+        });
+      },
+      async saveSettings(value) {
+        const normalized = config.normalize(value);
+        const storage = getStorageArea2();
+        if (!storage) {
+          return normalized;
+        }
+        return new Promise((resolve) => {
+          storage.set({ [config.storageKey]: normalized }, () => {
+            resolve(normalized);
+          });
+        });
+      }
+    };
+  }
+  function defaultGetStorageArea() {
+    return globalThis.chrome?.storage?.local ?? null;
+  }
+
   // src/core/settings.ts
   var SETTINGS_STORAGE_KEY = "babel_gold_drafting_settings";
   var DEFAULT_SETTINGS = {
@@ -19,26 +58,17 @@
       projectPreset
     };
   }
+  var settingsStore = createSettingsStore({
+    storageKey: SETTINGS_STORAGE_KEY,
+    defaults: DEFAULT_SETTINGS,
+    normalize: normalizeSettings,
+    getStorageArea
+  });
   async function loadSettings() {
-    const storage = getStorageArea();
-    if (!storage) {
-      return DEFAULT_SETTINGS;
-    }
-    return new Promise((resolve) => {
-      storage.get(SETTINGS_STORAGE_KEY, (items) => {
-        resolve(normalizeSettings(items?.[SETTINGS_STORAGE_KEY]));
-      });
-    });
+    return settingsStore.loadSettings();
   }
   async function saveSettings(settings) {
-    const normalized = normalizeSettings(settings);
-    const storage = getStorageArea();
-    if (!storage) {
-      return normalized;
-    }
-    return new Promise((resolve) => {
-      storage.set({ [SETTINGS_STORAGE_KEY]: normalized }, () => resolve(normalized));
-    });
+    return settingsStore.saveSettings(settings);
   }
 
   // src/options/options.ts

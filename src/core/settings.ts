@@ -1,3 +1,4 @@
+import { createSettingsStore } from '@nominy/babel-extension-frontend';
 import type { ExtensionSettings } from './types';
 
 export const SETTINGS_STORAGE_KEY = 'babel_gold_drafting_settings';
@@ -26,27 +27,17 @@ export function normalizeSettings(input: unknown): ExtensionSettings {
   };
 }
 
-export async function loadSettings(): Promise<ExtensionSettings> {
-  const storage = getStorageArea();
-  if (!storage) {
-    return DEFAULT_SETTINGS;
-  }
+const settingsStore = createSettingsStore<ExtensionSettings>({
+  storageKey: SETTINGS_STORAGE_KEY,
+  defaults: DEFAULT_SETTINGS,
+  normalize: normalizeSettings,
+  getStorageArea
+});
 
-  return new Promise((resolve) => {
-    storage.get(SETTINGS_STORAGE_KEY, (items) => {
-      resolve(normalizeSettings(items?.[SETTINGS_STORAGE_KEY]));
-    });
-  });
+export async function loadSettings(): Promise<ExtensionSettings> {
+  return settingsStore.loadSettings();
 }
 
 export async function saveSettings(settings: ExtensionSettings): Promise<ExtensionSettings> {
-  const normalized = normalizeSettings(settings);
-  const storage = getStorageArea();
-  if (!storage) {
-    return normalized;
-  }
-
-  return new Promise((resolve) => {
-    storage.set({ [SETTINGS_STORAGE_KEY]: normalized }, () => resolve(normalized));
-  });
+  return settingsStore.saveSettings(settings);
 }
