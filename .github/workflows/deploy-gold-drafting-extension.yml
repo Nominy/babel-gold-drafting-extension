@@ -42,6 +42,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Bump release version
+        run: npm run version:patch
+
       - name: Validate extension
         run: |
           npm run typecheck
