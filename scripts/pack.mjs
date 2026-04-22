@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { execSync } from 'node:child_process';
-import { readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { createDeflateRaw } from 'node:zlib';
 
@@ -17,7 +17,12 @@ const manifestPath = join(ROOT, 'manifest.json');
 const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8').replace(/^\uFEFF/, ''));
 const version = manifest.version;
 const zipName = `babel-gold-drafting-extension-${version}.zip`;
-const zipPath = resolve(ROOT, '..', zipName);
+const zipOutputDir = process.env.BABEL_EXTENSION_ZIP_DIR
+  ? resolve(ROOT, process.env.BABEL_EXTENSION_ZIP_DIR)
+  : resolve(ROOT, '.artifacts');
+const zipPath = process.env.BABEL_EXTENSION_ZIP_PATH
+  ? resolve(ROOT, process.env.BABEL_EXTENSION_ZIP_PATH)
+  : resolve(zipOutputDir, zipName);
 
 function collectFiles(dir, base) {
   const results = [];
@@ -103,6 +108,7 @@ async function deflate(data) {
 }
 
 async function createZip(outPath, entries) {
+  mkdirSync(zipOutputDir, { recursive: true });
   const centralHeaders = [];
   const parts = [];
   let offset = 0;

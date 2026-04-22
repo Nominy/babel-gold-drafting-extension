@@ -1,4 +1,5 @@
 node_modules/
+.artifacts/
 dist.zip
 babel-gold-drafting-extension-*.zip
 .tmp.store.manifest.json

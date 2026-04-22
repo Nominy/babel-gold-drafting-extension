@@ -24,7 +24,7 @@ npm run build:zip
 This will:
 - bump the patch version
 - build the bundled scripts
-- create a Chrome Web Store ZIP one directory above the extension root
+- create a Chrome Web Store ZIP in `.artifacts/`
 
 The ZIP includes only:
 - `manifest.json`
@@ -49,3 +49,8 @@ The packaged manifest strips local development host permissions and keeps only:
 - `npm run typecheck`
 - `npm test`
 - `npm run build`
+
+## Release
+
+- GitHub Releases are the canonical home for packaged ZIPs.
+- The manual GitHub Actions workflow builds `.artifacts/babel-gold-drafting-extension-<version>.zip`, commits the version bump, tags the released commit as `v<version>`, and uploads the ZIP asset to that release.
