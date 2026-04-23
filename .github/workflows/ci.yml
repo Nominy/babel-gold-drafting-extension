@@ -35,6 +35,10 @@ jobs:
           cache: npm
           cache-dependency-path: package-lock.json
 
+      - name: Install shared platform dependencies
+        working-directory: ../../shared/babel-extension-platform
+        run: npm ci
+
       - name: Install dependencies
         run: npm ci
 
