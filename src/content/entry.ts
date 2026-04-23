@@ -1,39 +1,21 @@
 import { DraftingOverlayController } from './overlay';
+import { registerLifecycle } from '../core/lifecycle';
 
-let controller: DraftingOverlayController | null = null;
-
-function isTranscriptionRoute(): boolean {
-  return /^\/transcription(?:\/|$)/.test(window.location.pathname || '');
-}
-
-function syncController(): void {
-  if (isTranscriptionRoute()) {
-    controller ??= new DraftingOverlayController();
-    controller.mount();
-    return;
+declare global {
+  interface Window {
+    __babelGoldDraftingInstalled?: boolean;
   }
-
-  controller?.unmount();
-}
-
-function patchHistoryMethod(methodName: 'pushState' | 'replaceState'): void {
-  const original = window.history[methodName];
-  if (typeof original !== 'function') {
-    return;
-  }
-
-  window.history[methodName] = function patchedHistoryMethod(this: History, ...args: Parameters<History['pushState']>) {
-    const result = original.apply(this, args);
-    window.setTimeout(syncController, 0);
-    return result;
-  } as History['pushState'];
 }
 
 function boot(): void {
-  syncController();
-  patchHistoryMethod('pushState');
-  patchHistoryMethod('replaceState');
-  window.addEventListener('popstate', () => window.setTimeout(syncController, 0), true);
+  if (window.__babelGoldDraftingInstalled) {
+    return;
+  }
+
+  window.__babelGoldDraftingInstalled = true;
+  const controller = new DraftingOverlayController();
+  controller.mount();
+  registerLifecycle(controller);
 }
 
 if (document.readyState === 'loading') {

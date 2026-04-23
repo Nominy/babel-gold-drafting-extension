@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
+import { registerLifecycle } from '../src/core/lifecycle';
 import { applyDraftRows, buildDiffPreviewItems, captureTranscriptJob, restoreCapturedRows } from '../src/core/transcript';
 
 function installDom(html: string) {
@@ -12,7 +13,8 @@ function installDom(html: string) {
     HTMLTextAreaElement: dom.window.HTMLTextAreaElement,
     InputEvent: dom.window.InputEvent,
     Event: dom.window.Event,
-    Location: dom.window.Location
+    Location: dom.window.Location,
+    MutationObserver: dom.window.MutationObserver
   });
   return dom;
 }
@@ -150,4 +152,22 @@ test('restoreCapturedRows replays original snapshot and diff preview shows chang
   assert.equal(diff.length, 1);
   assert.equal(diff[0].before, 'privet');
   assert.equal(diff[0].after, 'Privet.');
+});
+
+test('drafting lifecycle re-ensures mount target on DOM churn without teardown', async () => {
+  const dom = installDom('<main></main>');
+  let ensureCount = 0;
+
+  registerLifecycle({
+    ensureMagicButton: () => {
+      ensureCount += 1;
+    }
+  });
+
+  assert.equal(ensureCount, 1);
+
+  dom.window.document.querySelector('main')?.appendChild(dom.window.document.createElement('section'));
+  await new Promise((resolve) => dom.window.setTimeout(resolve, 0));
+
+  assert.equal(ensureCount, 2);
 });

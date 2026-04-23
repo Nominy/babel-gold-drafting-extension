@@ -89,3 +89,7 @@ export interface DraftSessionState {
   draftResponse: GenerateDraftResponse | null;
   lastApplyResult: ApplyDraftResult | null;
 }
+
+export interface DraftingMountController {
+  ensureMagicButton(): void;
+}

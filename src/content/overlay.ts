@@ -406,14 +406,17 @@ export class DraftingOverlayController {
   private streamedCompletedRows = 0;
   private streamedTotalRows = 0;
   private busy = false;
-  private observer: MutationObserver | null = null;
 
   mount(): void {
     ensureStyles();
-    this.ensureButton();
+    this.ensureMagicButton();
     this.ensureOverlay();
-    this.ensureObserver();
     this.render();
+  }
+
+  ensureMagicButton(): void {
+    ensureStyles();
+    this.ensureButton();
   }
 
   unmount(): void {
@@ -428,8 +431,6 @@ export class DraftingOverlayController {
     this.applyButton = null;
     this.restoreButton = null;
     this.closeButton = null;
-    this.observer?.disconnect();
-    this.observer = null;
   }
 
   private ensureButton(): void {
@@ -469,21 +470,6 @@ export class DraftingOverlayController {
     }
 
     return anchor.parentElement instanceof HTMLElement ? anchor.parentElement : null;
-  }
-
-  private ensureObserver(): void {
-    if (this.observer || typeof MutationObserver === 'undefined') {
-      return;
-    }
-
-    this.observer = new MutationObserver(() => {
-      this.ensureButton();
-    });
-
-    const root = document.body || document.documentElement;
-    if (root) {
-      this.observer.observe(root, { childList: true, subtree: true });
-    }
   }
 
   private ensureOverlay(): void {

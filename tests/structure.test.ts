@@ -6,6 +6,7 @@ const REQUIRED_FILES = [
   'src/core/types.ts',
   'src/core/settings.ts',
   'src/core/dom.ts',
+  'src/core/lifecycle.ts',
   'src/core/transcript.ts',
   'src/core/backend-client.ts',
   'src/content/entry.ts',
