@@ -1,6 +1,9 @@
 name: Deploy Gold Drafting Extension
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       publish_type:
@@ -84,8 +87,8 @@ jobs:
           CWS_ACCESS_TOKEN: ${{ secrets.CWS_ACCESS_TOKEN }}
           CWS_PUBLISHER_ID: ${{ secrets.CWS_PUBLISHER_ID }}
           CWS_EXTENSION_ID: ${{ secrets.CWS_EXTENSION_ID }}
-          CWS_PUBLISH_TYPE: ${{ inputs.publish_type }}
-          CWS_SKIP_REVIEW: ${{ inputs.skip_review }}
+          CWS_PUBLISH_TYPE: ${{ inputs.publish_type || 'DEFAULT_PUBLISH' }}
+          CWS_SKIP_REVIEW: ${{ inputs.skip_review || 'false' }}
           CWS_ZIP_PATH: ${{ steps.metadata.outputs.zip_path }}
         run: node scripts/publish-cws.mjs
 
