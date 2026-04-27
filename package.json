@@ -1,11 +1,12 @@
 {
   "name": "babel-gold-drafting-extension",
-  "version": "0.1.4",
+  "version": "0.1.6",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {
-    "build": "node esbuild.config.mjs",
+    "build": "npm run version:patch && npm run build:core",
+    "build:core": "node esbuild.config.mjs",
     "build:watch": "node esbuild.config.mjs --watch",
     "build:zip": "node scripts/pack.mjs",
     "version:patch": "node scripts/increment-version.mjs",

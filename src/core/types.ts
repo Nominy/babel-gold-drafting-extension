@@ -3,6 +3,8 @@ export type ProjectPresetId = 'ru-gold-2sp-v1';
 export interface ExtensionSettings {
   backendBaseUrl: string;
   projectPreset: ProjectPresetId;
+  openRouterApiKey: string;
+  model: string;
 }
 
 export interface TranscriptRow {
@@ -46,6 +48,8 @@ export interface GenerateDraftRequest {
   projectPreset: ProjectPresetId;
   jobId: string;
   rows: TranscriptRow[];
+  openRouterApiKey: string;
+  model?: string;
 }
 
 export interface GenerateDraftResponse {

@@ -8,12 +8,12 @@ Standalone MV3 extension for Silver-to-Gold transcript drafting on the Babel tra
 2. `npm run build`
 3. Load unpacked from `gold-drafting-extension/` in `chrome://extensions`
 
-`npm run build` is pure and does not change version files.
-
-Use `npm run version:patch` when you want to advance the next release version in:
+`npm run build` automatically advances the patch version in:
 - [`package.json`](/C:/Users/User/Desktop/dev/babel/drafting/gold-drafting-extension/package.json)
 - [`manifest.json`](/C:/Users/User/Desktop/dev/babel/drafting/gold-drafting-extension/manifest.json)
 - [`package-lock.json`](/C:/Users/User/Desktop/dev/babel/drafting/gold-drafting-extension/package-lock.json)
+
+Use `npm run build:core` when you need to rebuild bundles without changing version files.
 
 ## Store Package
 
@@ -24,6 +24,7 @@ npm run build:zip
 ```
 
 This will:
+- advance the patch version through `npm run build`
 - build the bundled scripts
 - create a Chrome Web Store ZIP in `.artifacts/`
 
@@ -40,7 +41,9 @@ The packaged manifest strips local development host permissions and keeps only:
 ## Behavior
 
 - Captures the current Babel transcription rows as a locked job snapshot
-- Sends the snapshot to the dedicated drafting backend
+- Sends the snapshot to the dedicated drafting backend with the user's OpenRouter API key
+- Requires BYOK for drafting; there is no shared backend key fallback for regular generation
+- Lets the user choose a model, or leave the model blank to use the backend `OPENROUTER_MODEL` default
 - Shows rewrite summary and row-level diff preview
 - Applies the generated draft back into existing Babel textareas only
 - Restores the captured original snapshot on demand
@@ -54,8 +57,8 @@ The packaged manifest strips local development host permissions and keeps only:
 ## Release
 
 - GitHub Releases are the canonical home for packaged ZIPs.
-- `.github/workflows/deploy-gold-drafting-extension.yml` is the manual Chrome Web Store deployment workflow. It validates the extension, builds the release ZIP, publishes it to the Chrome Web Store, commits the version bump, and then publishes the GitHub Release asset.
-- The deploy workflow runs `npm run version:patch` first, so release versioning happens in one place instead of on every local build.
+- `.github/workflows/deploy-gold-drafting-extension.yml` is the manual Chrome Web Store deployment workflow. It validates the extension, builds the release ZIP, publishes it to the Chrome Web Store, and publishes the GitHub Release asset.
+- The release ZIP inherits the automatic patch bump from `npm run build`; do not run `npm run version:patch` separately before `npm run build:zip` unless you intentionally want an extra bump.
 - Required GitHub Actions secrets:
   - `CWS_CLIENT_ID`
   - `CWS_CLIENT_SECRET`

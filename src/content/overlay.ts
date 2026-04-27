@@ -752,12 +752,19 @@ export class DraftingOverlayController {
       this.render();
 
       const settings = await loadSettings();
+      if (!settings.openRouterApiKey) {
+        throw new Error(
+          'OpenRouter API key is required. Add your key in the Babel Gold Drafting extension options. Setup guide: https://youtu.be/F-p45lvkzyU?si=2glvFn-iJnKEs8MI'
+        );
+      }
       this.setStatus(`Starting Gold draft stream for ${capturedJob.rows.length} rows...`);
 
       const draftResponse = await generateDraftStream(settings.backendBaseUrl, {
         projectPreset: settings.projectPreset,
         jobId: capturedJob.jobId,
-        rows: capturedJob.rows
+        rows: capturedJob.rows,
+        openRouterApiKey: settings.openRouterApiKey,
+        model: settings.model || undefined
       }, {
         onStarted: ({ totalRows }) => {
           this.streamedTotalRows = totalRows;
