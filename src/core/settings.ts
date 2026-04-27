@@ -5,7 +5,9 @@ export const SETTINGS_STORAGE_KEY = 'babel_gold_drafting_settings';
 
 export const DEFAULT_SETTINGS: ExtensionSettings = {
   backendBaseUrl: 'https://reviewgen.ovh',
-  projectPreset: 'ru-gold-2sp-v1'
+  projectPreset: 'ru-gold-2sp-v1',
+  openRouterApiKey: '',
+  model: ''
 };
 
 function getStorageArea() {
@@ -20,10 +22,14 @@ export function normalizeSettings(input: unknown): ExtensionSettings {
       ? raw.backendBaseUrl.trim().replace(/\/+$/, '')
       : DEFAULT_SETTINGS.backendBaseUrl;
   const projectPreset = raw.projectPreset === 'ru-gold-2sp-v1' ? raw.projectPreset : DEFAULT_SETTINGS.projectPreset;
+  const openRouterApiKey = typeof raw.openRouterApiKey === 'string' ? raw.openRouterApiKey.trim() : DEFAULT_SETTINGS.openRouterApiKey;
+  const model = typeof raw.model === 'string' ? raw.model.trim() : DEFAULT_SETTINGS.model;
 
   return {
     backendBaseUrl,
-    projectPreset
+    projectPreset,
+    openRouterApiKey,
+    model
   };
 }
 
