@@ -62,8 +62,29 @@ jobs:
       - name: Build release ZIP
         env:
           BABEL_EXTENSION_ZIP_DIR: ${{ github.workspace }}/.artifacts
+          RELEASE_PATCH: ${{ github.run_number }}
         run: |
-          npm run build
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+
+          const files = ['package.json', 'package-lock.json', 'manifest.json'];
+          const packageJson = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const [major, minor, patch] = packageJson.version.split('.').map(Number);
+          const nextPatch = Math.max(patch + 1, Number(process.env.RELEASE_PATCH || 0));
+          const nextVersion = `${major}.${minor}.${nextPatch}`;
+
+          for (const file of files) {
+            const json = JSON.parse(fs.readFileSync(file, 'utf8'));
+            json.version = nextVersion;
+            if (json.packages?.['']) {
+              json.packages[''].version = nextVersion;
+            }
+            fs.writeFileSync(file, `${JSON.stringify(json, null, 2)}\n`);
+          }
+
+          console.log(`Release version: ${packageJson.version} -> ${nextVersion}`);
+          NODE
+          npm run build:core
           npm run build:zip -- --no-build
 
       - name: Capture release metadata
@@ -93,20 +114,6 @@ jobs:
           CWS_SKIP_REVIEW: ${{ inputs.skip_review || 'false' }}
           CWS_ZIP_PATH: ${{ steps.metadata.outputs.zip_path }}
         run: node scripts/publish-cws.mjs
-
-      - name: Commit version bump
-        if: github.ref_type == 'branch'
-        run: |
-          if git diff --quiet -- package.json package-lock.json manifest.json; then
-            echo "Version files already match the deployed state."
-            exit 0
-          fi
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add package.json package-lock.json manifest.json
-          git commit -m "chore: release Gold Drafting extension ${{ steps.metadata.outputs.version }}"
-          git push origin HEAD:${GITHUB_REF_NAME}
 
       - name: Resolve release target
         id: release_target
