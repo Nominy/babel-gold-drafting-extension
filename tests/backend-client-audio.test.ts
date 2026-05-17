@@ -95,7 +95,7 @@ test('generateDraftStream sends plain JSON when no audio tracks are provided', a
   }
 });
 
-test('generateDraftStream reconciles with a payload-only form request when the stream connection drops', async () => {
+test('generateDraftStream retains audio tracks when reconciling after the stream connection drops', async () => {
   const calls: Array<{ url: string; body: unknown; contentType: string }> = [];
   const encoder = new TextEncoder();
   const originalFetch = globalThis.fetch;
@@ -160,7 +160,13 @@ test('generateDraftStream reconciles with a payload-only form request when the s
     assert.ok(calls[1].body instanceof FormData);
     assert.equal(calls[1].contentType, '');
     assert.deepEqual(JSON.parse(String(calls[1].body.get('payload'))), sessionRequest);
-    assert.equal(calls[1].body.get('audioTrack:audio-1'), null);
+    assert.ok(calls[1].body.get('audioTrack:audio-1') instanceof File);
+    assert.deepEqual(JSON.parse(String(calls[1].body.get('audioTrackMeta:audio-1'))), {
+      source: 'https://dashboard.babel.audio/audio.webm',
+      speakerKey: 'speaker-1',
+      trackLabel: 'Speaker 1',
+      mimeType: 'audio/webm'
+    });
   } finally {
     globalThis.fetch = originalFetch;
   }

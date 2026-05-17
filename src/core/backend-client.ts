@@ -68,10 +68,10 @@ export async function generateDraft(
 
 async function reconcileDraftWithFormPayload(
   backendBaseUrl: string,
-  payload: GenerateDraftRequest
+  payload: GenerateDraftRequest,
+  audioTracks: CapturedAudioTrack[] = []
 ): Promise<GenerateDraftResponse> {
-  const body = new FormData();
-  body.set('payload', JSON.stringify(payload));
+  const body = createGenerateDraftFormData(payload, audioTracks);
 
   const response = await fetch(getEndpointUrl(backendBaseUrl, '/api/draft/generate'), {
     method: 'POST',
@@ -108,7 +108,8 @@ async function reconcileDraftSession(
   backendBaseUrl: string,
   payload: GenerateDraftRequest,
   handlers: GenerateDraftStreamHandlers,
-  streamError: Error
+  streamError: Error,
+  audioTracks: CapturedAudioTrack[] = []
 ): Promise<GenerateDraftResponse> {
   let lastError = streamError;
   handlers.onReconnect?.(streamError);
@@ -120,7 +121,7 @@ async function reconcileDraftSession(
     }
 
     try {
-      return await reconcileDraftWithFormPayload(backendBaseUrl, payload);
+      return await reconcileDraftWithFormPayload(backendBaseUrl, payload, audioTracks);
     } catch (error) {
       const normalizedError = normalizeError(error);
       if (!isReconnectableGenerateError(normalizedError)) {
@@ -133,6 +134,28 @@ async function reconcileDraftSession(
   throw lastError;
 }
 
+function createGenerateDraftFormData(
+  payload: GenerateDraftRequest,
+  audioTracks: CapturedAudioTrack[] = []
+): FormData {
+  const body = new FormData();
+  body.set('payload', JSON.stringify(payload));
+  for (const track of audioTracks) {
+    const extension = track.mimeType.includes('wav') ? 'wav' : track.mimeType.includes('mpeg') ? 'mp3' : 'bin';
+    body.append(`audioTrack:${track.trackId}`, track.blob, `${track.trackId}.${extension}`);
+    body.set(
+      `audioTrackMeta:${track.trackId}`,
+      JSON.stringify({
+        source: track.source,
+        speakerKey: track.speakerKey || '',
+        trackLabel: track.trackLabel || '',
+        mimeType: track.mimeType
+      })
+    );
+  }
+  return body;
+}
+
 async function generateDraftStreamCore(
   backendBaseUrl: string,
   payload: GenerateDraftRequest,
@@ -140,27 +163,12 @@ async function generateDraftStreamCore(
   audioTracks: CapturedAudioTrack[] = []
 ): Promise<GenerateDraftResponse> {
   const hasAudioTracks = audioTracks.length > 0;
-  const body = hasAudioTracks ? new FormData() : JSON.stringify(payload);
+  const body = hasAudioTracks ? createGenerateDraftFormData(payload, audioTracks) : JSON.stringify(payload);
   const headers: Record<string, string> = {
     Accept: 'text/event-stream'
   };
 
-  if (hasAudioTracks && body instanceof FormData) {
-    body.set('payload', JSON.stringify(payload));
-    for (const track of audioTracks) {
-      const extension = track.mimeType.includes('wav') ? 'wav' : track.mimeType.includes('mpeg') ? 'mp3' : 'bin';
-      body.append(`audioTrack:${track.trackId}`, track.blob, `${track.trackId}.${extension}`);
-      body.set(
-        `audioTrackMeta:${track.trackId}`,
-        JSON.stringify({
-          source: track.source,
-          speakerKey: track.speakerKey || '',
-          trackLabel: track.trackLabel || '',
-          mimeType: track.mimeType
-        })
-      );
-    }
-  } else {
+  if (!hasAudioTracks) {
     headers['Content-Type'] = 'application/json';
   }
 
@@ -275,6 +283,6 @@ export async function generateDraftStream(
     }
 
     const normalizedError = normalizeError(error);
-    return reconcileDraftSession(backendBaseUrl, payload, handlers, normalizedError);
+    return reconcileDraftSession(backendBaseUrl, payload, handlers, normalizedError, audioTracks);
   }
 }
