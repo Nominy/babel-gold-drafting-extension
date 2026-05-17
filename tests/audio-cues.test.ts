@@ -1,0 +1,200 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { JSDOM } from 'jsdom';
+import { captureAudioTracksForDrafting, installAudioRequestCapture } from '../src/core/audio-cues';
+import { AUDIO_RESPONSE_MESSAGE_TYPE, AUDIO_SOURCE_MESSAGE_TYPE } from '../src/core/audio-intercept-protocol';
+
+function installDom(html: string) {
+  const dom = new JSDOM(html, { url: 'https://dashboard.babel.audio/transcription/RU-transcription?jobId=job-42' });
+  Object.assign(globalThis, {
+    window: dom.window,
+    document: dom.window.document,
+    HTMLMediaElement: dom.window.HTMLMediaElement,
+    Blob: dom.window.Blob,
+    fetch: async (url: string) =>
+      ({
+        ok: true,
+        status: 200,
+        blob: async () => new dom.window.Blob([`bytes:${url}`], { type: 'audio/webm' })
+      })
+  });
+  return dom;
+}
+
+test('captureAudioTracksForDrafting fetches every distinct audio source on the page', async () => {
+  installDom(`
+    <audio src="https://dashboard.babel.audio/a1.webm"></audio>
+    <audio src="https://dashboard.babel.audio/a2.webm"></audio>
+    <audio src="https://dashboard.babel.audio/a1.webm"></audio>
+  `);
+
+  const tracks = await captureAudioTracksForDrafting();
+
+  assert.equal(tracks.length, 2);
+  assert.deepEqual(
+    tracks.map((track) => ({ trackId: track.trackId, source: track.source, mimeType: track.blob.type })),
+    [
+      { trackId: 'audio-1', source: 'https://dashboard.babel.audio/a1.webm', mimeType: 'audio/webm' },
+      { trackId: 'audio-2', source: 'https://dashboard.babel.audio/a2.webm', mimeType: 'audio/webm' }
+    ]
+  );
+});
+
+test('captureAudioTracksForDrafting includes audio bytes intercepted from page requests', async () => {
+  const dom = installDom('<main></main>');
+  installAudioRequestCapture();
+
+  window.dispatchEvent(
+    new dom.window.MessageEvent('message', {
+      source: window,
+      data: {
+        type: AUDIO_RESPONSE_MESSAGE_TYPE,
+        url: 'https://dashboard.babel.audio/api/recordings/r1/audio',
+        mimeType: 'audio/wav',
+        trackId: 'track-a',
+        speakerKey: 'speaker-1',
+        trackLabel: 'Speaker 1',
+        source: 'fetch',
+        capturedAt: 123,
+        bytes: new Uint8Array([1, 2, 3, 4]).buffer
+      }
+    })
+  );
+
+  const tracks = await captureAudioTracksForDrafting();
+
+  assert.equal(tracks.length, 1);
+  assert.equal(tracks[0]?.trackId, 'track-a');
+  assert.equal(tracks[0]?.source, 'https://dashboard.babel.audio/api/recordings/r1/audio');
+  assert.equal(tracks[0]?.speakerKey, 'speaker-1');
+  assert.equal(tracks[0]?.trackLabel, 'Speaker 1');
+  assert.equal(tracks[0]?.mimeType, 'audio/wav');
+  assert.equal(tracks[0]?.blob.size, 4);
+});
+
+test('captureAudioTracksForDrafting fetches lane-mapped audio sources discovered in page world', async () => {
+  const dom = installDom('<main></main>');
+  installAudioRequestCapture();
+
+  window.dispatchEvent(
+    new dom.window.MessageEvent('message', {
+      source: window,
+      data: {
+        type: AUDIO_SOURCE_MESSAGE_TYPE,
+        url: 'https://dashboard.babel.audio/api/files/source-a',
+        mimeType: 'audio/webm',
+        trackId: 'track-a',
+        speakerKey: 'speaker-1',
+        trackLabel: 'Speaker 1',
+        discoveredAt: 124
+      }
+    })
+  );
+
+  const tracks = await captureAudioTracksForDrafting();
+
+  assert.equal(tracks.length, 1);
+  assert.equal(tracks[0]?.trackId, 'track-a');
+  assert.equal(tracks[0]?.speakerKey, 'speaker-1');
+  assert.equal(tracks[0]?.trackLabel, 'Speaker 1');
+  assert.equal(tracks[0]?.source, 'https://dashboard.babel.audio/api/files/source-a');
+  assert.equal(tracks[0]?.blob.type, 'audio/webm');
+});
+
+test('captureAudioTracksForDrafting drops unmapped captures and keeps one source per speaker lane', async () => {
+  const dom = installDom('<main></main>');
+  installAudioRequestCapture();
+
+  const messages = [
+    {
+      url: 'https://clerk.babel.audio/v1/environment?__clerk_api_version=2025-11-10',
+      mimeType: 'application/json',
+      capturedAt: 1,
+      bytes: [1]
+    },
+    {
+      url: 'https://dashboard.babel.audio/api/trpc/transcriptions.getReviewActionDataById?batch=1',
+      mimeType: 'application/json',
+      capturedAt: 2,
+      bytes: [2]
+    },
+    {
+      url: 'https://davidai-audio-recordings.s3.us-east-2.amazonaws.com/transcription-chunks/prod/job/chunk/speaker-2.wav?X-Amz-Signature=test',
+      mimeType: 'audio/wav',
+      trackId: 'speaker-2',
+      speakerKey: 'speaker-2',
+      trackLabel: 'Speaker 2',
+      capturedAt: 3,
+      bytes: [3, 3, 3]
+    },
+    {
+      url: 'blob:https://dashboard.babel.audio/blob-speaker-2',
+      mimeType: 'audio/wav',
+      trackId: 'speaker-2',
+      speakerKey: 'speaker-2',
+      trackLabel: 'Speaker 2',
+      capturedAt: 4,
+      bytes: [4, 4, 4]
+    },
+    {
+      url: 'https://davidai-audio-recordings.s3.us-east-2.amazonaws.com/transcription-chunks/prod/job/chunk/speaker-1.wav?X-Amz-Signature=test',
+      mimeType: 'audio/wav',
+      trackId: 'speaker-1',
+      speakerKey: 'speaker-1',
+      trackLabel: 'Speaker 1',
+      capturedAt: 5,
+      bytes: [5, 5, 5]
+    },
+    {
+      url: 'blob:https://dashboard.babel.audio/blob-speaker-1',
+      mimeType: 'audio/wav',
+      trackId: 'speaker-1',
+      speakerKey: 'speaker-1',
+      trackLabel: 'Speaker 1',
+      capturedAt: 6,
+      bytes: [6, 6, 6]
+    }
+  ];
+
+  for (const message of messages) {
+    window.dispatchEvent(
+      new dom.window.MessageEvent('message', {
+        source: window,
+        data: {
+          type: AUDIO_RESPONSE_MESSAGE_TYPE,
+          source: 'fetch',
+          ...message,
+          bytes: new Uint8Array(message.bytes).buffer
+        }
+      })
+    );
+  }
+
+  const tracks = await captureAudioTracksForDrafting();
+
+  assert.equal(tracks.length, 2);
+  assert.deepEqual(
+    tracks.map((track) => ({
+      trackId: track.trackId,
+      speakerKey: track.speakerKey,
+      trackLabel: track.trackLabel,
+      source: track.source
+    })),
+    [
+      {
+        trackId: 'speaker-2',
+        speakerKey: 'speaker-2',
+        trackLabel: 'Speaker 2',
+        source:
+          'https://davidai-audio-recordings.s3.us-east-2.amazonaws.com/transcription-chunks/prod/job/chunk/speaker-2.wav?X-Amz-Signature=test'
+      },
+      {
+        trackId: 'speaker-1',
+        speakerKey: 'speaker-1',
+        trackLabel: 'Speaker 1',
+        source:
+          'https://davidai-audio-recordings.s3.us-east-2.amazonaws.com/transcription-chunks/prod/job/chunk/speaker-1.wav?X-Amz-Signature=test'
+      }
+    ]
+  );
+});

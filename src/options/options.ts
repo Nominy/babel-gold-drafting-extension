@@ -13,6 +13,7 @@ async function boot(): Promise<void> {
   const projectPresetSelect = requireElement<HTMLSelectElement>('#projectPreset');
   const openRouterApiKeyInput = requireElement<HTMLInputElement>('#openRouterApiKey');
   const modelInput = requireElement<HTMLInputElement>('#model');
+  const audioInputEnabledInput = requireElement<HTMLInputElement>('#audioInputEnabled');
   const saveButton = requireElement<HTMLButtonElement>('[data-role="save"]');
   const status = requireElement<HTMLElement>('[data-role="status"]');
 
@@ -21,6 +22,7 @@ async function boot(): Promise<void> {
   projectPresetSelect.value = settings.projectPreset;
   openRouterApiKeyInput.value = settings.openRouterApiKey;
   modelInput.value = settings.model;
+  audioInputEnabledInput.checked = settings.audioInputEnabled;
 
   saveButton.addEventListener('click', () => {
     status.textContent = 'Saving...';
@@ -28,13 +30,15 @@ async function boot(): Promise<void> {
       backendBaseUrl: backendBaseUrlInput.value,
       projectPreset: projectPresetSelect.value === 'ru-gold-2sp-v1' ? 'ru-gold-2sp-v1' : 'ru-gold-2sp-v1',
       openRouterApiKey: openRouterApiKeyInput.value,
-      model: modelInput.value
+      model: modelInput.value,
+      audioInputEnabled: audioInputEnabledInput.checked
     })
       .then((saved) => {
         backendBaseUrlInput.value = saved.backendBaseUrl;
         projectPresetSelect.value = saved.projectPreset;
         openRouterApiKeyInput.value = saved.openRouterApiKey;
         modelInput.value = saved.model;
+        audioInputEnabledInput.checked = saved.audioInputEnabled;
         status.textContent = 'Saved. Reload Babel tabs to pick up the new settings.';
       })
       .catch((error) => {

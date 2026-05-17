@@ -7,7 +7,8 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
   backendBaseUrl: 'https://reviewgen.ovh',
   projectPreset: 'ru-gold-2sp-v1',
   openRouterApiKey: '',
-  model: ''
+  model: 'google/gemini-3-flash-preview',
+  audioInputEnabled: false
 };
 
 function getStorageArea() {
@@ -23,13 +24,15 @@ export function normalizeSettings(input: unknown): ExtensionSettings {
       : DEFAULT_SETTINGS.backendBaseUrl;
   const projectPreset = raw.projectPreset === 'ru-gold-2sp-v1' ? raw.projectPreset : DEFAULT_SETTINGS.projectPreset;
   const openRouterApiKey = typeof raw.openRouterApiKey === 'string' ? raw.openRouterApiKey.trim() : DEFAULT_SETTINGS.openRouterApiKey;
-  const model = typeof raw.model === 'string' ? raw.model.trim() : DEFAULT_SETTINGS.model;
+  const model = typeof raw.model === 'string' && raw.model.trim() ? raw.model.trim() : DEFAULT_SETTINGS.model;
+  const audioInputEnabled = raw.audioInputEnabled === true;
 
   return {
     backendBaseUrl,
     projectPreset,
     openRouterApiKey,
-    model
+    model,
+    audioInputEnabled
   };
 }
 
