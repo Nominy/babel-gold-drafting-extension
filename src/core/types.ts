@@ -5,6 +5,16 @@ export interface ExtensionSettings {
   projectPreset: ProjectPresetId;
   openRouterApiKey: string;
   model: string;
+  audioInputEnabled: boolean;
+}
+
+export interface CapturedAudioTrack {
+  trackId: string;
+  speakerKey?: string;
+  trackLabel?: string;
+  source: string;
+  blob: Blob;
+  mimeType: string;
 }
 
 export interface TranscriptRow {

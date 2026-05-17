@@ -4,7 +4,8 @@ import type {
   GenerateDraftRequest,
   GenerateDraftResponse,
   GenerateDraftRowEvent,
-  GenerateDraftStartedEvent
+  GenerateDraftStartedEvent,
+  CapturedAudioTrack
 } from './types';
 
 function getEndpointUrl(backendBaseUrl: string, path: string): string {
@@ -48,15 +49,38 @@ export async function generateDraftStream(
     onStarted?: (event: GenerateDraftStartedEvent) => void;
     onRow?: (event: GenerateDraftRowEvent) => void;
     onDone?: (response: GenerateDraftResponse) => void;
-  }
+  },
+  audioTracks: CapturedAudioTrack[] = []
 ): Promise<GenerateDraftResponse> {
+  const hasAudioTracks = audioTracks.length > 0;
+  const body = hasAudioTracks ? new FormData() : JSON.stringify(payload);
+  const headers: Record<string, string> = {
+    Accept: 'text/event-stream'
+  };
+
+  if (hasAudioTracks && body instanceof FormData) {
+    body.set('payload', JSON.stringify(payload));
+    for (const track of audioTracks) {
+      const extension = track.mimeType.includes('wav') ? 'wav' : track.mimeType.includes('mpeg') ? 'mp3' : 'bin';
+      body.append(`audioTrack:${track.trackId}`, track.blob, `${track.trackId}.${extension}`);
+      body.set(
+        `audioTrackMeta:${track.trackId}`,
+        JSON.stringify({
+          source: track.source,
+          speakerKey: track.speakerKey || '',
+          trackLabel: track.trackLabel || '',
+          mimeType: track.mimeType
+        })
+      );
+    }
+  } else {
+    headers['Content-Type'] = 'application/json';
+  }
+
   const response = await fetch(getEndpointUrl(backendBaseUrl, '/api/draft/generate/stream'), {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Accept: 'text/event-stream'
-    },
-    body: JSON.stringify(payload)
+    headers,
+    body
   });
 
   if (!response.ok) {

@@ -17,6 +17,10 @@ const config = defineExtensionBuild({
       outfile: 'dist/content/entry.js'
     },
     {
+      entryPoints: ['src/content/audio-request-interceptor.ts'],
+      outfile: 'dist/content/audio-request-interceptor.js'
+    },
+    {
       entryPoints: ['src/options/options.ts'],
       outfile: 'dist/options/options.js'
     }

@@ -1,5 +1,7 @@
 import { DraftingOverlayController } from './overlay';
 import { registerLifecycle } from '../core/lifecycle';
+import { loadSettings } from '../core/settings';
+import { AUDIO_ENABLE_CAPTURE_MESSAGE_TYPE } from '../core/audio-intercept-protocol';
 
 declare global {
   interface Window {
@@ -17,6 +19,18 @@ function boot(): void {
   controller.mount();
   registerLifecycle(controller);
 }
+
+function enableAudioCaptureIfConfigured(): void {
+  void loadSettings()
+    .then((settings) => {
+      if (settings.audioInputEnabled) {
+        window.postMessage({ type: AUDIO_ENABLE_CAPTURE_MESSAGE_TYPE }, '*');
+      }
+    })
+    .catch(() => undefined);
+}
+
+enableAudioCaptureIfConfigured();
 
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', boot, { once: true });

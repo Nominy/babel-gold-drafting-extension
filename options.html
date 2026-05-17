@@ -87,13 +87,39 @@
         color: var(--muted);
         min-height: 20px;
       }
+
+      .checkbox-row {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        align-items: start;
+        gap: 10px;
+        margin-top: 18px;
+        font-weight: 700;
+      }
+
+      .checkbox-row input {
+        width: auto;
+        margin-top: 3px;
+      }
+
+      .checkbox-row span {
+        display: block;
+      }
+
+      .field-help {
+        margin: 4px 0 0;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.4;
+        font-weight: 400;
+      }
     </style>
   </head>
   <body>
     <main>
       <section class="panel">
         <h1>Babel Gold Drafting</h1>
-        <p>Configure the drafting backend and the active project preset for Silver-to-Gold generation.</p>
+        <p>Configure the drafting backend, project preset, and OpenRouter model for Silver-to-Gold generation.</p>
 
         <label for="backendBaseUrl">Backend Base URL</label>
         <input id="backendBaseUrl" name="backendBaseUrl" placeholder="https://reviewgen.ovh" />
@@ -107,7 +133,17 @@
         <input id="openRouterApiKey" name="openRouterApiKey" type="password" autocomplete="off" placeholder="sk-or-..." />
 
         <label for="model">Model</label>
-        <input id="model" name="model" placeholder="Backend default from OPENROUTER_MODEL" />
+        <input id="model" name="model" placeholder="google/gemini-3-flash-preview" />
+
+        <label class="checkbox-row" for="audioInputEnabled">
+          <input id="audioInputEnabled" name="audioInputEnabled" type="checkbox" />
+          <span>
+            Audio input research preview
+            <span class="field-help">
+              Off by default. When enabled, Babel page audio can be collected and sent with drafting requests for experimental audio cue tags.
+            </span>
+          </span>
+        </label>
 
         <button type="button" data-role="save">Save Settings</button>
         <div data-role="status"></div>

@@ -42,8 +42,10 @@ The packaged manifest strips local development host permissions and keeps only:
 
 - Captures the current Babel transcription rows as a locked job snapshot
 - Sends the snapshot to the dedicated drafting backend with the user's OpenRouter API key
+- Audio input is a research preview and is off by default. In the default mode, the extension does not collect page audio and sends only transcript text to the backend.
+- When the research preview is enabled in extension settings and page audio is available, sends the current audio tracks so the backend can cut row-level clips and add allowed audio-cue tags with an audio-capable OpenRouter model
 - Requires BYOK for drafting; there is no shared backend key fallback for regular generation
-- Lets the user choose a model, or leave the model blank to use the backend `OPENROUTER_MODEL` default
+- Lets the user choose a model; `google/gemini-3-flash-preview` is the default because it supports audio input through OpenRouter
 - Shows rewrite summary and row-level diff preview
 - Applies the generated draft back into existing Babel textareas only
 - Restores the captured original snapshot on demand

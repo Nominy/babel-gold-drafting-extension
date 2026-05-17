@@ -1,4 +1,5 @@
 import { generateDraftStream } from '../core/backend-client';
+import { captureAudioTracksForDrafting } from '../core/audio-cues';
 import { loadSettings } from '../core/settings';
 import { applyDraftRows, buildDiffPreviewItems, captureTranscriptJob, restoreCapturedRows } from '../core/transcript';
 import type { DraftRowResult, DraftSessionState, DraftSummary, GenerateDraftResponse } from '../core/types';
@@ -757,7 +758,29 @@ export class DraftingOverlayController {
           'OpenRouter API key is required. Add your key in the Babel Gold Drafting extension options. Setup guide: https://youtu.be/F-p45lvkzyU?si=2glvFn-iJnKEs8MI'
         );
       }
-      this.setStatus(`Starting Gold draft stream for ${capturedJob.rows.length} rows...`);
+      const audioTracks = settings.audioInputEnabled
+        ? await (async () => {
+            this.setStatus('Capturing available audio for research preview...');
+            const tracks = await captureAudioTracksForDrafting().catch(() => []);
+            console.info(
+              '[Babel Gold Drafting] captured audio tracks',
+              tracks.map((track) => ({
+                trackId: track.trackId,
+                speakerKey: track.speakerKey || '',
+                trackLabel: track.trackLabel || '',
+                source: track.source,
+                bytes: track.blob.size
+              }))
+            );
+            return tracks;
+          })()
+        : [];
+      const streamStatusLabel = audioTracks.length ? 'Streaming Gold draft with audio cues' : 'Streaming Gold draft';
+      this.setStatus(
+        `Starting Gold draft stream for ${capturedJob.rows.length} rows${
+          audioTracks.length ? ` with ${audioTracks.length} audio track(s)` : ''
+        }...`
+      );
 
       const draftResponse = await generateDraftStream(settings.backendBaseUrl, {
         projectPreset: settings.projectPreset,
@@ -768,7 +791,7 @@ export class DraftingOverlayController {
       }, {
         onStarted: ({ totalRows }) => {
           this.streamedTotalRows = totalRows;
-          this.setStatus(`Streaming Gold draft... 0 / ${totalRows} rows complete.`);
+          this.setStatus(`${streamStatusLabel}... 0 / ${totalRows} rows complete.`);
           this.render();
         },
         onRow: ({ row, completedRows, totalRows, summary }) => {
@@ -781,7 +804,7 @@ export class DraftingOverlayController {
           this.streamedCompletedRows = completedRows;
           this.streamedTotalRows = totalRows;
           this.streamedSummary = summary;
-          this.setStatus(`Streaming Gold draft... ${completedRows} / ${totalRows} rows complete.`);
+          this.setStatus(`${streamStatusLabel}... ${completedRows} / ${totalRows} rows complete.`);
           this.render();
         },
         onDone: (response) => {
@@ -790,7 +813,7 @@ export class DraftingOverlayController {
           this.streamedCompletedRows = response.summary.totalRows;
           this.streamedTotalRows = response.summary.totalRows;
         }
-      });
+      }, audioTracks);
 
       this.state.draftResponse = draftResponse;
       this.setStatus(
