@@ -9,6 +9,14 @@ const BUTTON_ID = 'babel-gold-drafting-magic-button';
 const OVERLAY_ID = 'babel-gold-drafting-overlay';
 const TOOLBAR_BUTTON_SELECTOR = 'button[aria-label="Play all tracks"]';
 
+function createDraftSessionId(jobId: string): string {
+  const randomId =
+    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return `${jobId}:${randomId}`;
+}
+
 function createElement<K extends keyof HTMLElementTagNameMap>(
   tagName: K,
   className?: string,
@@ -785,6 +793,7 @@ export class DraftingOverlayController {
       const draftResponse = await generateDraftStream(settings.backendBaseUrl, {
         projectPreset: settings.projectPreset,
         jobId: capturedJob.jobId,
+        draftSessionId: createDraftSessionId(capturedJob.jobId),
         rows: capturedJob.rows,
         openRouterApiKey: settings.openRouterApiKey,
         model: settings.model || undefined
@@ -812,6 +821,10 @@ export class DraftingOverlayController {
           this.streamedSummary = response.summary;
           this.streamedCompletedRows = response.summary.totalRows;
           this.streamedTotalRows = response.summary.totalRows;
+        },
+        onReconnect: () => {
+          this.setStatus('Stream connection lost. Reconciling final draft response...');
+          this.render();
         }
       }, audioTracks);
 

@@ -94,3 +94,73 @@ test('generateDraftStream sends plain JSON when no audio tracks are provided', a
     globalThis.fetch = originalFetch;
   }
 });
+
+test('generateDraftStream reconciles with a plain generate request when the stream connection drops', async () => {
+  const calls: Array<{ url: string; body: unknown; contentType: string }> = [];
+  const encoder = new TextEncoder();
+  const originalFetch = globalThis.fetch;
+  const sessionRequest = {
+    ...request,
+    draftSessionId: 'draft-session-1'
+  } as GenerateDraftRequest & { draftSessionId: string };
+  const finalResponse = {
+    draftRows: [
+      {
+        rowId: 'r1',
+        rewrittenText: 'Привет.',
+        status: 'rewritten',
+        warnings: []
+      }
+    ],
+    summary: { totalRows: 1, rewrittenRows: 1, unchangedRows: 0, failedRows: 0, anomalyCounts: {} },
+    generationMeta: { model: 'test', rulePackVersion: 'test', generatedAt: '2026-05-17T00:00:00.000Z' }
+  };
+
+  globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+    const contentType = String((init?.headers as Record<string, string> | undefined)?.['Content-Type'] || '');
+    calls.push({ url: String(url), body: init?.body, contentType });
+
+    if (String(url).endsWith('/api/draft/generate/stream')) {
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(encoder.encode('event: started\ndata: {"jobId":"job-1","totalRows":1}\n\n'));
+            controller.error(new Error('network lost'));
+          }
+        }),
+        { status: 200, headers: { 'Content-Type': 'text/event-stream' } }
+      );
+    }
+
+    return new Response(JSON.stringify(finalResponse), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }) as unknown as typeof fetch;
+
+  try {
+    const audioTracks: CapturedAudioTrack[] = [
+      {
+        trackId: 'audio-1',
+        speakerKey: 'speaker-1',
+        trackLabel: 'Speaker 1',
+        source: 'https://dashboard.babel.audio/audio.webm',
+        blob: new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/webm' }),
+        mimeType: 'audio/webm'
+      }
+    ];
+
+    const reconciled = await generateDraftStream('http://127.0.0.1:3001', sessionRequest, {}, audioTracks);
+
+    assert.deepEqual(reconciled, finalResponse);
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0].url, 'http://127.0.0.1:3001/api/draft/generate/stream');
+    assert.ok(calls[0].body instanceof FormData);
+    assert.equal(calls[1].url, 'http://127.0.0.1:3001/api/draft/generate');
+    assert.equal(typeof calls[1].body, 'string');
+    assert.equal(calls[1].contentType, 'application/json');
+    assert.deepEqual(JSON.parse(calls[1].body as string), sessionRequest);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

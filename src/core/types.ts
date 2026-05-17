@@ -57,6 +57,7 @@ export interface DraftGenerationMeta {
 export interface GenerateDraftRequest {
   projectPreset: ProjectPresetId;
   jobId: string;
+  draftSessionId?: string;
   rows: TranscriptRow[];
   openRouterApiKey: string;
   model?: string;
