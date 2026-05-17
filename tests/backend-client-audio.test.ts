@@ -95,7 +95,7 @@ test('generateDraftStream sends plain JSON when no audio tracks are provided', a
   }
 });
 
-test('generateDraftStream reconciles with a plain generate request when the stream connection drops', async () => {
+test('generateDraftStream reconciles with a payload-only form request when the stream connection drops', async () => {
   const calls: Array<{ url: string; body: unknown; contentType: string }> = [];
   const encoder = new TextEncoder();
   const originalFetch = globalThis.fetch;
@@ -157,9 +157,69 @@ test('generateDraftStream reconciles with a plain generate request when the stre
     assert.equal(calls[0].url, 'http://127.0.0.1:3001/api/draft/generate/stream');
     assert.ok(calls[0].body instanceof FormData);
     assert.equal(calls[1].url, 'http://127.0.0.1:3001/api/draft/generate');
-    assert.equal(typeof calls[1].body, 'string');
-    assert.equal(calls[1].contentType, 'application/json');
-    assert.deepEqual(JSON.parse(calls[1].body as string), sessionRequest);
+    assert.ok(calls[1].body instanceof FormData);
+    assert.equal(calls[1].contentType, '');
+    assert.deepEqual(JSON.parse(String(calls[1].body.get('payload'))), sessionRequest);
+    assert.equal(calls[1].body.get('audioTrack:audio-1'), null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('generateDraftStream retries form reconcile when the first reconnect request also loses network', async () => {
+  const calls: Array<{ url: string; body: unknown }> = [];
+  const encoder = new TextEncoder();
+  const originalFetch = globalThis.fetch;
+  const sessionRequest = {
+    ...request,
+    draftSessionId: 'draft-session-retry'
+  } as GenerateDraftRequest & { draftSessionId: string };
+  const finalResponse = {
+    draftRows: [
+      {
+        rowId: 'r1',
+        rewrittenText: 'Привет.',
+        status: 'rewritten',
+        warnings: []
+      }
+    ],
+    summary: { totalRows: 1, rewrittenRows: 1, unchangedRows: 0, failedRows: 0, anomalyCounts: {} },
+    generationMeta: { model: 'test', rulePackVersion: 'test', generatedAt: '2026-05-17T00:00:00.000Z' }
+  };
+
+  globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+    calls.push({ url: String(url), body: init?.body });
+
+    if (String(url).endsWith('/api/draft/generate/stream')) {
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(encoder.encode('event: started\ndata: {"jobId":"job-1","totalRows":1}\n\n'));
+            controller.error(new Error('network lost'));
+          }
+        }),
+        { status: 200, headers: { 'Content-Type': 'text/event-stream' } }
+      );
+    }
+
+    if (String(url).endsWith('/api/draft/generate') && calls.filter((call) => call.url.endsWith('/api/draft/generate')).length === 1) {
+      throw new TypeError('Failed to fetch');
+    }
+
+    return new Response(JSON.stringify(finalResponse), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }) as unknown as typeof fetch;
+
+  try {
+    const reconciled = await generateDraftStream('http://127.0.0.1:3001', sessionRequest, {});
+    const generateCalls = calls.filter((call) => call.url.endsWith('/api/draft/generate'));
+
+    assert.deepEqual(reconciled, finalResponse);
+    assert.equal(generateCalls.length, 2);
+    assert.ok(generateCalls[1].body instanceof FormData);
+    assert.deepEqual(JSON.parse(String(generateCalls[1].body.get('payload'))), sessionRequest);
   } finally {
     globalThis.fetch = originalFetch;
   }

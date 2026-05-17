@@ -12,6 +12,8 @@ class DraftStreamHttpError extends Error {}
 
 class DraftStreamServerError extends Error {}
 
+const RECONCILE_RETRY_DELAYS_MS = [100, 300, 700, 1500, 3000, 5000, 10000, 20000];
+
 type GenerateDraftStreamHandlers = {
   onStarted?: (event: GenerateDraftStartedEvent) => void;
   onRow?: (event: GenerateDraftRowEvent) => void;
@@ -43,6 +45,17 @@ function getErrorMessage(status: number, payload: unknown): string {
   return `HTTP ${status}`;
 }
 
+async function parseGenerateDraftResponse(response: Response): Promise<GenerateDraftResponse> {
+  const payload = await parseJsonResponse(response);
+  if (!response.ok) {
+    throw new Error(getErrorMessage(response.status, payload));
+  }
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('Backend returned non-JSON payload.');
+  }
+  return payload as GenerateDraftResponse;
+}
+
 export async function generateDraft(
   backendBaseUrl: string,
   payload: GenerateDraftRequest
@@ -53,8 +66,71 @@ export async function generateDraft(
   return client.post<GenerateDraftResponse>('/api/draft/generate', payload);
 }
 
+async function reconcileDraftWithFormPayload(
+  backendBaseUrl: string,
+  payload: GenerateDraftRequest
+): Promise<GenerateDraftResponse> {
+  const body = new FormData();
+  body.set('payload', JSON.stringify(payload));
+
+  const response = await fetch(getEndpointUrl(backendBaseUrl, '/api/draft/generate'), {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json'
+    },
+    body
+  });
+
+  return parseGenerateDraftResponse(response);
+}
+
 function normalizeError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function isReconnectableGenerateError(error: Error): boolean {
+  const message = error.message.toLowerCase();
+  return (
+    message.includes('could not reach backend') ||
+    message.includes('failed to fetch') ||
+    message.includes('networkerror') ||
+    message.includes('load failed')
+  );
+}
+
+async function reconcileDraftSession(
+  backendBaseUrl: string,
+  payload: GenerateDraftRequest,
+  handlers: GenerateDraftStreamHandlers,
+  streamError: Error
+): Promise<GenerateDraftResponse> {
+  let lastError = streamError;
+  handlers.onReconnect?.(streamError);
+
+  for (let attempt = 0; attempt <= RECONCILE_RETRY_DELAYS_MS.length; attempt += 1) {
+    if (attempt > 0) {
+      await delay(RECONCILE_RETRY_DELAYS_MS[attempt - 1]);
+      handlers.onReconnect?.(lastError);
+    }
+
+    try {
+      return await reconcileDraftWithFormPayload(backendBaseUrl, payload);
+    } catch (error) {
+      const normalizedError = normalizeError(error);
+      if (!isReconnectableGenerateError(normalizedError)) {
+        throw normalizedError;
+      }
+      lastError = normalizedError;
+    }
+  }
+
+  throw lastError;
 }
 
 async function generateDraftStreamCore(
@@ -199,7 +275,6 @@ export async function generateDraftStream(
     }
 
     const normalizedError = normalizeError(error);
-    handlers.onReconnect?.(normalizedError);
-    return generateDraft(backendBaseUrl, payload);
+    return reconcileDraftSession(backendBaseUrl, payload, handlers, normalizedError);
   }
 }
