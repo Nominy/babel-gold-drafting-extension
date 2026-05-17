@@ -241,6 +241,9 @@ export async function captureAudioTracksForDrafting(root: ParentNode = document)
   const tracks: CapturedAudioTrack[] = [];
   appendInterceptedTracks(tracks, seen);
   await appendDiscoveredSourceTracks(tracks, seen);
+  if (tracks.some(hasLaneMapping)) {
+    return tracks;
+  }
 
   for (const source of sources) {
     if (seen.has(source)) {

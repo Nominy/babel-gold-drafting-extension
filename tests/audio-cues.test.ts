@@ -198,3 +198,60 @@ test('captureAudioTracksForDrafting drops unmapped captures and keeps one source
     ]
   );
 });
+
+test('captureAudioTracksForDrafting skips DOM fallback audio when lane-mapped tracks already exist', async () => {
+  const dom = installDom(`
+    <audio src="blob:https://dashboard.babel.audio/blob-speaker-1"></audio>
+    <audio src="blob:https://dashboard.babel.audio/blob-speaker-2"></audio>
+  `);
+  installAudioRequestCapture();
+  const fetchedUrls: string[] = [];
+  globalThis.fetch = async (input: RequestInfo | URL) => {
+    const url = String(input);
+    fetchedUrls.push(url);
+    return {
+      ok: true,
+      status: 200,
+      blob: async () => new dom.window.Blob([`bytes:${url}`], { type: 'audio/webm' })
+    } as Response;
+  };
+
+  for (const message of [
+    {
+      url: 'https://dashboard.babel.audio/audio-speaker-1.webm',
+      trackId: 'speaker-1',
+      speakerKey: 'speaker-1',
+      trackLabel: 'Speaker 1'
+    },
+    {
+      url: 'https://dashboard.babel.audio/audio-speaker-2.webm',
+      trackId: 'speaker-2',
+      speakerKey: 'speaker-2',
+      trackLabel: 'Speaker 2'
+    }
+  ]) {
+    window.dispatchEvent(
+      new dom.window.MessageEvent('message', {
+        source: window,
+        data: {
+          type: AUDIO_SOURCE_MESSAGE_TYPE,
+          ...message,
+          mimeType: 'audio/webm',
+          discoveredAt: Date.now()
+        }
+      })
+    );
+  }
+
+  const tracks = await captureAudioTracksForDrafting();
+
+  assert.equal(tracks.length, 2);
+  assert.deepEqual(
+    tracks.map((track) => track.trackId),
+    ['speaker-1', 'speaker-2']
+  );
+  assert.deepEqual(fetchedUrls, [
+    'https://dashboard.babel.audio/audio-speaker-1.webm',
+    'https://dashboard.babel.audio/audio-speaker-2.webm'
+  ]);
+});
