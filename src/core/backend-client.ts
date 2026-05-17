@@ -8,6 +8,17 @@ import type {
   CapturedAudioTrack
 } from './types';
 
+class DraftStreamHttpError extends Error {}
+
+class DraftStreamServerError extends Error {}
+
+type GenerateDraftStreamHandlers = {
+  onStarted?: (event: GenerateDraftStartedEvent) => void;
+  onRow?: (event: GenerateDraftRowEvent) => void;
+  onDone?: (response: GenerateDraftResponse) => void;
+  onReconnect?: (error: Error) => void;
+};
+
 function getEndpointUrl(backendBaseUrl: string, path: string): string {
   return `${normalizeBaseUrl(backendBaseUrl)}${path}`;
 }
@@ -42,14 +53,14 @@ export async function generateDraft(
   return client.post<GenerateDraftResponse>('/api/draft/generate', payload);
 }
 
-export async function generateDraftStream(
+function normalizeError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+async function generateDraftStreamCore(
   backendBaseUrl: string,
   payload: GenerateDraftRequest,
-  handlers: {
-    onStarted?: (event: GenerateDraftStartedEvent) => void;
-    onRow?: (event: GenerateDraftRowEvent) => void;
-    onDone?: (response: GenerateDraftResponse) => void;
-  },
+  handlers: GenerateDraftStreamHandlers,
   audioTracks: CapturedAudioTrack[] = []
 ): Promise<GenerateDraftResponse> {
   const hasAudioTracks = audioTracks.length > 0;
@@ -84,7 +95,7 @@ export async function generateDraftStream(
   });
 
   if (!response.ok) {
-    throw new Error(getErrorMessage(response.status, await parseJsonResponse(response)));
+    throw new DraftStreamHttpError(getErrorMessage(response.status, await parseJsonResponse(response)));
   }
 
   if (!response.body) {
@@ -139,7 +150,7 @@ export async function generateDraftStream(
 
     if (eventName === 'error') {
       const errorPayload = parsed as GenerateDraftErrorEvent;
-      throw new Error(errorPayload.error || 'Draft stream failed.');
+      throw new DraftStreamServerError(errorPayload.error || 'Draft stream failed.');
     }
   };
 
@@ -172,4 +183,23 @@ export async function generateDraftStream(
   }
 
   return finalResponse;
+}
+
+export async function generateDraftStream(
+  backendBaseUrl: string,
+  payload: GenerateDraftRequest,
+  handlers: GenerateDraftStreamHandlers,
+  audioTracks: CapturedAudioTrack[] = []
+): Promise<GenerateDraftResponse> {
+  try {
+    return await generateDraftStreamCore(backendBaseUrl, payload, handlers, audioTracks);
+  } catch (error) {
+    if (error instanceof DraftStreamHttpError || error instanceof DraftStreamServerError || !payload.draftSessionId) {
+      throw error;
+    }
+
+    const normalizedError = normalizeError(error);
+    handlers.onReconnect?.(normalizedError);
+    return generateDraft(backendBaseUrl, payload);
+  }
 }
