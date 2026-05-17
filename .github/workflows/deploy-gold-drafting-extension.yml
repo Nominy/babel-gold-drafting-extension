@@ -66,11 +66,19 @@ jobs:
         run: |
           node --input-type=module <<'NODE'
           import fs from 'node:fs';
+          import { execFileSync } from 'node:child_process';
 
           const files = ['package.json', 'package-lock.json', 'manifest.json'];
           const packageJson = JSON.parse(fs.readFileSync('package.json', 'utf8'));
           const [major, minor, patch] = packageJson.version.split('.').map(Number);
-          const nextPatch = Math.max(patch + 1, Number(process.env.RELEASE_PATCH || 0));
+          const tagPattern = `v${major}.${minor}.*`;
+          const tagPatches = execFileSync('git', ['tag', '--list', tagPattern], { encoding: 'utf8' })
+            .split(/\r?\n/)
+            .map((tag) => new RegExp(`^v${major}\\.${minor}\\.(\\d+)$`).exec(tag.trim())?.[1])
+            .filter((value) => value != null)
+            .map(Number);
+          const latestTagPatch = tagPatches.length ? Math.max(...tagPatches) : -1;
+          const nextPatch = Math.max(patch + 1, Number(process.env.RELEASE_PATCH || 0), latestTagPatch + 1);
           const nextVersion = `${major}.${minor}.${nextPatch}`;
 
           for (const file of files) {
