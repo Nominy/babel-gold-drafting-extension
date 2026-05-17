@@ -1,8 +1,17 @@
 import { generateDraftStream } from '../core/backend-client';
+import { assessAudioCaptureForDrafting, type AudioCaptureIssue } from '../core/audio-capture-guard';
 import { captureAudioTracksForDrafting } from '../core/audio-cues';
 import { loadSettings } from '../core/settings';
 import { applyDraftRows, buildDiffPreviewItems, captureTranscriptJob, restoreCapturedRows } from '../core/transcript';
-import type { DraftRowResult, DraftSessionState, DraftSummary, GenerateDraftResponse } from '../core/types';
+import type {
+  CapturedAudioTrack,
+  DraftRowResult,
+  DraftSessionState,
+  DraftSummary,
+  ExtensionSettings,
+  GenerateDraftResponse,
+  TranscriptJob
+} from '../core/types';
 
 const STYLE_ID = 'babel-gold-drafting-style';
 const BUTTON_ID = 'babel-gold-drafting-magic-button';
@@ -200,6 +209,28 @@ function ensureStyles(): void {
 
     #${OVERLAY_ID} .bgd-status[data-error="true"] {
       color: var(--bgd-danger);
+    }
+
+    #${OVERLAY_ID} .bgd-audio-guard {
+      border: 1px solid #f0d9a8;
+      border-radius: 8px;
+      background: #fffbeb;
+      color: #5f4312;
+      padding: 10px 12px;
+      display: grid;
+      gap: 10px;
+      font-size: 12px;
+    }
+
+    #${OVERLAY_ID} .bgd-audio-guard[hidden] {
+      display: none;
+    }
+
+    #${OVERLAY_ID} .bgd-audio-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
     }
 
     #${OVERLAY_ID} .bgd-summary {
@@ -400,6 +431,7 @@ export class DraftingOverlayController {
   private overlay: HTMLDivElement | null = null;
   private dialogEl: HTMLDivElement | null = null;
   private statusEl: HTMLDivElement | null = null;
+  private audioGuardEl: HTMLDivElement | null = null;
   private summaryEl: HTMLDivElement | null = null;
   private previewEl: HTMLDivElement | null = null;
   private applyButton: HTMLButtonElement | null = null;
@@ -415,6 +447,12 @@ export class DraftingOverlayController {
   private streamedCompletedRows = 0;
   private streamedTotalRows = 0;
   private busy = false;
+  private pendingAudioDraft: {
+    capturedJob: TranscriptJob;
+    settings: ExtensionSettings;
+    audioTracks: CapturedAudioTrack[];
+    issue: AudioCaptureIssue;
+  } | null = null;
 
   mount(): void {
     ensureStyles();
@@ -435,6 +473,7 @@ export class DraftingOverlayController {
     this.overlay = null;
     this.dialogEl = null;
     this.statusEl = null;
+    this.audioGuardEl = null;
     this.summaryEl = null;
     this.previewEl = null;
     this.applyButton = null;
@@ -510,6 +549,8 @@ export class DraftingOverlayController {
 
     const main = createElement('div', 'bgd-main');
     const statusEl = createElement('div', 'bgd-status', 'Click the wand to generate a draft.');
+    const audioGuardEl = createElement('div', 'bgd-audio-guard');
+    audioGuardEl.hidden = true;
 
     const summaryBlock = createElement('section', 'bgd-block');
     summaryBlock.append(createElement('div', 'bgd-block-header', 'Summary'));
@@ -525,7 +566,7 @@ export class DraftingOverlayController {
     previewBody.append(previewEl);
     previewBlock.append(previewBody);
 
-    main.append(statusEl, summaryBlock, previewBlock);
+    main.append(statusEl, audioGuardEl, summaryBlock, previewBlock);
 
     const footer = createElement('div', 'bgd-footer');
     const restoreButton = createElement('button', 'bgd-button', 'Restore Original');
@@ -545,6 +586,7 @@ export class DraftingOverlayController {
     this.overlay = overlay;
     this.dialogEl = dialog;
     this.statusEl = statusEl;
+    this.audioGuardEl = audioGuardEl;
     this.summaryEl = summaryEl;
     this.previewEl = previewEl;
     this.applyButton = applyButton;
@@ -586,6 +628,11 @@ export class DraftingOverlayController {
     if (this.closeButton) {
       this.closeButton.disabled = nextBusy;
     }
+    this.audioGuardEl
+      ?.querySelectorAll<HTMLButtonElement>('button[data-bgd-audio-action]')
+      .forEach((button) => {
+        button.disabled = nextBusy;
+      });
   }
 
   private setStatus(message: string, isError = false): void {
@@ -593,6 +640,87 @@ export class DraftingOverlayController {
       this.statusEl.textContent = message;
       this.statusEl.dataset.error = isError ? 'true' : 'false';
     }
+  }
+
+  private clearAudioGuard(): void {
+    this.pendingAudioDraft = null;
+    if (this.audioGuardEl) {
+      this.audioGuardEl.hidden = true;
+      this.audioGuardEl.replaceChildren();
+    }
+  }
+
+  private showAudioGuard(
+    capturedJob: TranscriptJob,
+    settings: ExtensionSettings,
+    audioTracks: CapturedAudioTrack[],
+    issue: AudioCaptureIssue
+  ): void {
+    if (!this.audioGuardEl) {
+      return;
+    }
+
+    this.pendingAudioDraft = {
+      capturedJob,
+      settings,
+      audioTracks,
+      issue
+    };
+
+    const problem =
+      issue.kind === 'missing'
+        ? `No speaker-lane audio was captured. ${issue.capturedTracks} generic audio source(s) were ignored.`
+        : `Only ${issue.capturedSpeakerLanes} of ${issue.expectedSpeakerLanes} speaker lane(s) were captured.`;
+    const message = createElement(
+      'div',
+      '',
+      `${problem} Audio cues may miss laughter or other events if the draft starts now.`
+    );
+    const actions = createElement('div', 'bgd-audio-actions');
+    const retryButton = createElement('button', 'bgd-button', 'Retry Audio');
+    retryButton.type = 'button';
+    retryButton.dataset.bgdAudioAction = 'retry';
+    retryButton.addEventListener('click', () => void this.retryPendingAudioCapture());
+
+    actions.append(retryButton);
+
+    if (issue.kind === 'partial' && audioTracks.length) {
+      const usePartialButton = createElement('button', 'bgd-button', 'Use Captured Audio');
+      usePartialButton.type = 'button';
+      usePartialButton.dataset.bgdAudioAction = 'use-partial';
+      usePartialButton.addEventListener('click', () => void this.continuePendingDraft('captured-audio'));
+      actions.append(usePartialButton);
+    }
+
+    const textOnlyButton = createElement('button', 'bgd-button', 'Continue Text Only');
+    textOnlyButton.type = 'button';
+    textOnlyButton.dataset.bgdAudioAction = 'text-only';
+    textOnlyButton.addEventListener('click', () => void this.continuePendingDraft('text-only'));
+    actions.append(textOnlyButton);
+
+    this.audioGuardEl.hidden = false;
+    this.audioGuardEl.replaceChildren(message, actions);
+    this.setStatus('Audio capture needs review before generating.');
+  }
+
+  private logCapturedAudioTracks(tracks: CapturedAudioTrack[]): void {
+    console.info(
+      '[Babel Gold Drafting] captured audio tracks',
+      tracks.map((track) => ({
+        trackId: track.trackId,
+        speakerKey: track.speakerKey || '',
+        trackLabel: track.trackLabel || '',
+        source: track.source,
+        bytes: track.blob.size
+      }))
+    );
+  }
+
+  private async captureAudioTracksWithStatus(): Promise<CapturedAudioTrack[]> {
+    this.setStatus('Capturing available audio for research preview...');
+    const tracks = await captureAudioTracksForDrafting().catch(() => []);
+    this.logCapturedAudioTracks(tracks);
+    return tracks;
   }
 
   private renderSummary(draftResponse: GenerateDraftResponse | null): void {
@@ -735,6 +863,7 @@ export class DraftingOverlayController {
 
   private async runMagicDraft(): Promise<void> {
     this.openDialog();
+    this.clearAudioGuard();
     this.state = {
       capturedJob: null,
       draftResponse: null,
@@ -766,74 +895,132 @@ export class DraftingOverlayController {
           'OpenRouter API key is required. Add your key in the Babel Gold Drafting extension options. Setup guide: https://youtu.be/F-p45lvkzyU?si=2glvFn-iJnKEs8MI'
         );
       }
-      const audioTracks = settings.audioInputEnabled
-        ? await (async () => {
-            this.setStatus('Capturing available audio for research preview...');
-            const tracks = await captureAudioTracksForDrafting().catch(() => []);
-            console.info(
-              '[Babel Gold Drafting] captured audio tracks',
-              tracks.map((track) => ({
-                trackId: track.trackId,
-                speakerKey: track.speakerKey || '',
-                trackLabel: track.trackLabel || '',
-                source: track.source,
-                bytes: track.blob.size
-              }))
-            );
-            return tracks;
-          })()
-        : [];
-      const streamStatusLabel = audioTracks.length ? 'Streaming Gold draft with audio cues' : 'Streaming Gold draft';
-      this.setStatus(
-        `Starting Gold draft stream for ${capturedJob.rows.length} rows${
-          audioTracks.length ? ` with ${audioTracks.length} audio track(s)` : ''
-        }...`
-      );
+      const audioTracks = settings.audioInputEnabled ? await this.captureAudioTracksWithStatus() : [];
+      const audioIssue = settings.audioInputEnabled ? assessAudioCaptureForDrafting(capturedJob, audioTracks) : null;
+      if (audioIssue) {
+        this.showAudioGuard(capturedJob, settings, audioTracks, audioIssue);
+        this.setButtonState('error', 'Audio Capture Needs Review');
+        window.setTimeout(() => this.setButtonState('idle', 'Gold Draft'), 2200);
+        return;
+      }
 
-      const draftResponse = await generateDraftStream(settings.backendBaseUrl, {
-        projectPreset: settings.projectPreset,
-        jobId: capturedJob.jobId,
-        draftSessionId: createDraftSessionId(capturedJob.jobId),
-        rows: capturedJob.rows,
-        openRouterApiKey: settings.openRouterApiKey,
-        model: settings.model || undefined
-      }, {
-        onStarted: ({ totalRows }) => {
-          this.streamedTotalRows = totalRows;
-          this.setStatus(`${streamStatusLabel}... 0 / ${totalRows} rows complete.`);
-          this.render();
-        },
-        onRow: ({ row, completedRows, totalRows, summary }) => {
-          const existingIndex = this.streamedRows.findIndex((candidate) => candidate.rowId === row.rowId);
-          if (existingIndex >= 0) {
-            this.streamedRows[existingIndex] = row;
-          } else {
-            this.streamedRows.push(row);
-          }
-          this.streamedCompletedRows = completedRows;
-          this.streamedTotalRows = totalRows;
-          this.streamedSummary = summary;
-          this.setStatus(`${streamStatusLabel}... ${completedRows} / ${totalRows} rows complete.`);
-          this.render();
-        },
-        onDone: (response) => {
-          this.streamedRows = response.draftRows;
-          this.streamedSummary = response.summary;
-          this.streamedCompletedRows = response.summary.totalRows;
-          this.streamedTotalRows = response.summary.totalRows;
-        },
-        onReconnect: () => {
-          this.setStatus('Stream connection lost. Reconciling final draft response...');
-          this.render();
+      await this.generateDraftFromCapture(capturedJob, settings, audioTracks);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.setStatus(message, true);
+      this.setButtonState('error', 'Draft Failed');
+      window.setTimeout(() => this.setButtonState('idle', 'Gold Draft'), 2200);
+    } finally {
+      this.setBusy(false);
+      this.render();
+    }
+  }
+
+  private async generateDraftFromCapture(
+    capturedJob: TranscriptJob,
+    settings: ExtensionSettings,
+    audioTracks: CapturedAudioTrack[]
+  ): Promise<void> {
+    this.clearAudioGuard();
+    const streamStatusLabel = audioTracks.length ? 'Streaming Gold draft with audio cues' : 'Streaming Gold draft';
+    this.setStatus(
+      `Starting Gold draft stream for ${capturedJob.rows.length} rows${
+        audioTracks.length ? ` with ${audioTracks.length} audio track(s)` : ''
+      }...`
+    );
+
+    const draftResponse = await generateDraftStream(settings.backendBaseUrl, {
+      projectPreset: settings.projectPreset,
+      jobId: capturedJob.jobId,
+      draftSessionId: createDraftSessionId(capturedJob.jobId),
+      rows: capturedJob.rows,
+      openRouterApiKey: settings.openRouterApiKey,
+      model: settings.model || undefined
+    }, {
+      onStarted: ({ totalRows }) => {
+        this.streamedTotalRows = totalRows;
+        this.setStatus(`${streamStatusLabel}... 0 / ${totalRows} rows complete.`);
+        this.render();
+      },
+      onRow: ({ row, completedRows, totalRows, summary }) => {
+        const existingIndex = this.streamedRows.findIndex((candidate) => candidate.rowId === row.rowId);
+        if (existingIndex >= 0) {
+          this.streamedRows[existingIndex] = row;
+        } else {
+          this.streamedRows.push(row);
         }
-      }, audioTracks);
+        this.streamedCompletedRows = completedRows;
+        this.streamedTotalRows = totalRows;
+        this.streamedSummary = summary;
+        this.setStatus(`${streamStatusLabel}... ${completedRows} / ${totalRows} rows complete.`);
+        this.render();
+      },
+      onDone: (response) => {
+        this.streamedRows = response.draftRows;
+        this.streamedSummary = response.summary;
+        this.streamedCompletedRows = response.summary.totalRows;
+        this.streamedTotalRows = response.summary.totalRows;
+      },
+      onReconnect: () => {
+        this.setStatus('Stream connection lost. Reconciling final draft response...');
+        this.render();
+      }
+    }, audioTracks);
 
-      this.state.draftResponse = draftResponse;
-      this.setStatus(
-        `Draft ready. ${draftResponse.summary.rewrittenRows} rewritten, ${draftResponse.summary.failedRows} failed fallback rows.`
+    this.state.draftResponse = draftResponse;
+    this.setStatus(
+      `Draft ready. ${draftResponse.summary.rewrittenRows} rewritten, ${draftResponse.summary.failedRows} failed fallback rows.`
+    );
+    this.setButtonState('done', 'Draft Ready');
+    window.setTimeout(() => this.setButtonState('idle', 'Gold Draft'), 1600);
+  }
+
+  private async retryPendingAudioCapture(): Promise<void> {
+    const pending = this.pendingAudioDraft;
+    if (!pending) {
+      this.setStatus('No pending audio capture to retry.', true);
+      return;
+    }
+
+    try {
+      this.setBusy(true);
+      this.setButtonState('loading', 'Retrying audio...');
+      const audioTracks = await this.captureAudioTracksWithStatus();
+      const audioIssue = assessAudioCaptureForDrafting(pending.capturedJob, audioTracks);
+      if (audioIssue) {
+        this.showAudioGuard(pending.capturedJob, pending.settings, audioTracks, audioIssue);
+        this.setButtonState('error', 'Audio Capture Needs Review');
+        window.setTimeout(() => this.setButtonState('idle', 'Gold Draft'), 2200);
+        return;
+      }
+
+      await this.generateDraftFromCapture(pending.capturedJob, pending.settings, audioTracks);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.setStatus(message, true);
+      this.setButtonState('error', 'Draft Failed');
+      window.setTimeout(() => this.setButtonState('idle', 'Gold Draft'), 2200);
+    } finally {
+      this.setBusy(false);
+      this.render();
+    }
+  }
+
+  private async continuePendingDraft(mode: 'captured-audio' | 'text-only'): Promise<void> {
+    const pending = this.pendingAudioDraft;
+    if (!pending) {
+      this.setStatus('No pending draft to continue.', true);
+      return;
+    }
+
+    try {
+      this.setBusy(true);
+      this.setButtonState('loading', 'Generating...');
+      await this.generateDraftFromCapture(
+        pending.capturedJob,
+        pending.settings,
+        mode === 'captured-audio' ? pending.audioTracks : []
       );
-      this.setButtonState('done', 'Draft Ready');
-      window.setTimeout(() => this.setButtonState('idle', 'Gold Draft'), 1600);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.setStatus(message, true);
