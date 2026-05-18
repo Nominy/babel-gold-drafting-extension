@@ -935,7 +935,8 @@ export class DraftingOverlayController {
       draftSessionId: createDraftSessionId(capturedJob.jobId),
       rows: capturedJob.rows,
       openRouterApiKey: settings.openRouterApiKey,
-      model: settings.model || undefined
+      model: settings.model || undefined,
+      serviceTier: settings.serviceTier
     }, {
       onStarted: ({ totalRows }) => {
         this.streamedTotalRows = totalRows;

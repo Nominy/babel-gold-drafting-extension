@@ -1,10 +1,12 @@
 export type ProjectPresetId = 'ru-gold-2sp-v1';
+export type OpenRouterServiceTier = 'default' | 'flex' | 'priority';
 
 export interface ExtensionSettings {
   backendBaseUrl: string;
   projectPreset: ProjectPresetId;
   openRouterApiKey: string;
   model: string;
+  serviceTier: OpenRouterServiceTier;
   audioInputEnabled: boolean;
 }
 
@@ -61,6 +63,7 @@ export interface GenerateDraftRequest {
   rows: TranscriptRow[];
   openRouterApiKey: string;
   model?: string;
+  serviceTier?: OpenRouterServiceTier;
 }
 
 export interface GenerateDraftResponse {

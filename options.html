@@ -135,6 +135,16 @@
         <label for="model">Model</label>
         <input id="model" name="model" placeholder="google/gemini-3-flash-preview" />
 
+        <label for="serviceTier">OpenRouter Service Tier</label>
+        <select id="serviceTier" name="serviceTier">
+          <option value="flex">Flex</option>
+          <option value="default">Default</option>
+          <option value="priority">Priority</option>
+        </select>
+        <p class="field-help">
+          Flex is cheaper and can be slower. Default leaves service tier selection to OpenRouter/provider. Priority is faster and can cost more.
+        </p>
+
         <label class="checkbox-row" for="audioInputEnabled">
           <input id="audioInputEnabled" name="audioInputEnabled" type="checkbox" />
           <span>
