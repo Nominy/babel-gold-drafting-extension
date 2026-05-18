@@ -13,18 +13,66 @@ type RowIdentity = {
   speakerKey: string;
   startText: string;
   endText: string;
+  startSeconds: number | null;
+  endSeconds: number | null;
 };
 
+function readFiniteNumber(value: unknown): number | null {
+  const numeric = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : Number.NaN;
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function readVisibleTimeCells(row: HTMLTableRowElement): {
+  speakerKey: string;
+  startText: string;
+  endText: string;
+  startSeconds: number | null;
+  endSeconds: number | null;
+} {
+  const cells = Array.from(row.children).filter((child): child is HTMLElement => child instanceof HTMLElement);
+  const textarea = row.querySelector<HTMLTextAreaElement>(ROW_TEXTAREA_SELECTOR);
+  const textareaCell = textarea?.closest('td, th');
+  const textareaCellIndex = textareaCell ? cells.indexOf(textareaCell as HTMLElement) : -1;
+  const cellsBeforeText = textareaCellIndex >= 0 ? cells.slice(0, textareaCellIndex) : cells;
+  const timeCells = cellsBeforeText
+    .map((cell, index) => {
+      const text = normalizeText(cell);
+      return {
+        cell,
+        index,
+        text,
+        seconds: parseTimeValue(text)
+      };
+    })
+    .filter((item): item is { cell: HTMLElement; index: number; text: string; seconds: number } => item.seconds !== null);
+  const start = timeCells.at(-2);
+  const end = timeCells.at(-1);
+  const speakerCell = start
+    ? cellsBeforeText
+        .slice(0, start.index)
+        .reverse()
+        .find((cell) => normalizeText(cell) && parseTimeValue(normalizeText(cell)) === null)
+    : (row.children[1] as HTMLElement | undefined);
+
+  return {
+    speakerKey: normalizeText(speakerCell),
+    startText: start?.text || '',
+    endText: end?.text || '',
+    startSeconds: start?.seconds ?? null,
+    endSeconds: end?.seconds ?? null
+  };
+}
+
 function readRowIdentity(row: HTMLTableRowElement): RowIdentity {
-  const startCell = row.children[2] as HTMLElement | undefined;
-  const endCell = row.children[3] as HTMLElement | undefined;
-  const speakerCell = row.children[1] as HTMLElement | undefined;
+  const visibleCells = readVisibleTimeCells(row);
 
   const identity: RowIdentity = {
     rowId: null,
-    speakerKey: normalizeText(speakerCell),
-    startText: normalizeText(startCell),
-    endText: normalizeText(endCell)
+    speakerKey: visibleCells.speakerKey,
+    startText: visibleCells.startText,
+    endText: visibleCells.endText,
+    startSeconds: visibleCells.startSeconds,
+    endSeconds: visibleCells.endSeconds
   };
 
   const fiber = (getReactFiber(row) || getReactFiber(row.querySelector(ROW_TEXTAREA_SELECTOR))) as
@@ -52,6 +100,8 @@ function readRowIdentity(row: HTMLTableRowElement): RowIdentity {
       if (processedRecordingId || trackLabel) {
         identity.speakerKey = processedRecordingId || trackLabel;
       }
+      identity.startSeconds = readFiniteNumber(annotation.startTimeInSeconds) ?? identity.startSeconds;
+      identity.endSeconds = readFiniteNumber(annotation.endTimeInSeconds) ?? identity.endSeconds;
       break;
     }
 
@@ -86,14 +136,12 @@ export function captureTranscriptJob(
   const rows = getTranscriptRowElements(root).map<TranscriptRow>((row, index) => {
     const identity = readRowIdentity(row);
     const textarea = row.querySelector<HTMLTextAreaElement>(ROW_TEXTAREA_SELECTOR);
-    const startCell = row.children[2] as HTMLElement | undefined;
-    const endCell = row.children[3] as HTMLElement | undefined;
 
     return {
       rowId: identity.rowId || makeFallbackRowId(identity, index),
       speakerKey: identity.speakerKey,
-      startSeconds: startCell ? parseTimeValue(normalizeText(startCell)) : null,
-      endSeconds: endCell ? parseTimeValue(normalizeText(endCell)) : null,
+      startSeconds: identity.startSeconds,
+      endSeconds: identity.endSeconds,
       text: textarea?.value || '',
       index
     };
