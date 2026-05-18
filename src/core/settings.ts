@@ -8,6 +8,7 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
   projectPreset: 'ru-gold-2sp-v1',
   openRouterApiKey: '',
   model: 'google/gemini-3-flash-preview',
+  serviceTier: 'flex',
   audioInputEnabled: false
 };
 
@@ -25,6 +26,10 @@ export function normalizeSettings(input: unknown): ExtensionSettings {
   const projectPreset = raw.projectPreset === 'ru-gold-2sp-v1' ? raw.projectPreset : DEFAULT_SETTINGS.projectPreset;
   const openRouterApiKey = typeof raw.openRouterApiKey === 'string' ? raw.openRouterApiKey.trim() : DEFAULT_SETTINGS.openRouterApiKey;
   const model = typeof raw.model === 'string' && raw.model.trim() ? raw.model.trim() : DEFAULT_SETTINGS.model;
+  const serviceTier =
+    raw.serviceTier === 'default' || raw.serviceTier === 'priority' || raw.serviceTier === 'flex'
+      ? raw.serviceTier
+      : DEFAULT_SETTINGS.serviceTier;
   const audioInputEnabled = raw.audioInputEnabled === true;
 
   return {
@@ -32,6 +37,7 @@ export function normalizeSettings(input: unknown): ExtensionSettings {
     projectPreset,
     openRouterApiKey,
     model,
+    serviceTier,
     audioInputEnabled
   };
 }

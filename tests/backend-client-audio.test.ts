@@ -17,7 +17,8 @@ const request: GenerateDraftRequest = {
     }
   ],
   openRouterApiKey: 'sk-or-test',
-  model: 'google/gemini-3-flash-preview'
+  model: 'google/gemini-3-flash-preview',
+  serviceTier: 'flex'
 };
 
 test('generateDraftStream attaches audio tracks to the default generate stream route', async () => {
