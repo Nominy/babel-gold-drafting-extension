@@ -81,6 +81,34 @@ test('captureTranscriptJob extracts locked row payload from Babel-like DOM', () 
   ]);
 });
 
+test('captureTranscriptJob detects start and end columns instead of assuming fixed indexes', () => {
+  const dom = installDom(`
+    <table>
+      <tbody>
+        <tr>
+          <td>Speaker 1</td>
+          <td>02:30.22</td>
+          <td>02:36.78</td>
+          <td><textarea placeholder="What was said">А Spotify и YouTube Music. Ну, из того, что я заметил, эти алгоритмы, они стараются.</textarea></td>
+        </tr>
+      </tbody>
+    </table>
+  `);
+
+  const job = captureTranscriptJob(dom.window.document, dom.window.location);
+
+  assert.deepEqual(job.rows, [
+    {
+      rowId: 'row:Speaker 1:02:30.22:02:36.78:0',
+      speakerKey: 'Speaker 1',
+      startSeconds: 150.22,
+      endSeconds: 156.78,
+      text: 'А Spotify и YouTube Music. Ну, из того, что я заметил, эти алгоритмы, они стараются.',
+      index: 0
+    }
+  ]);
+});
+
 test('applyDraftRows updates matching textareas without changing row structure', () => {
   const dom = installDom(`
     <table>
