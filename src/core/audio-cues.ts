@@ -31,6 +31,11 @@ const interceptedAudioByUrl = new Map<string, InterceptedAudioTrack>();
 const discoveredAudioSourceByUrl = new Map<string, DiscoveredAudioSource>();
 let installedWindow: Window | null = null;
 
+function clearAudioCaptureSession(): void {
+  interceptedAudioByUrl.clear();
+  discoveredAudioSourceByUrl.clear();
+}
+
 function sourceForAudioElement(audio: HTMLMediaElement): string {
   const direct = audio.currentSrc || audio.getAttribute('src') || '';
   if (direct) {
@@ -153,31 +158,42 @@ function handleAudioResponseMessage(event: MessageEvent): void {
 }
 
 export function installAudioRequestCapture(): void {
-  if (installedWindow === window) {
-    window.postMessage({ type: AUDIO_FLUSH_REQUEST_MESSAGE_TYPE }, '*');
-    return;
-  }
-
-  interceptedAudioByUrl.clear();
-  discoveredAudioSourceByUrl.clear();
-  installedWindow = window;
-  window.addEventListener('message', handleAudioResponseMessage);
+  ensureAudioRequestCaptureInstalled();
   window.postMessage({ type: AUDIO_FLUSH_REQUEST_MESSAGE_TYPE }, '*');
 }
 
+function ensureAudioRequestCaptureInstalled(): void {
+  if (installedWindow === window) {
+    return;
+  }
+
+  clearAudioCaptureSession();
+  installedWindow = window;
+  window.addEventListener('message', handleAudioResponseMessage);
+}
+
 async function requestAudioFlush(): Promise<void> {
-  installAudioRequestCapture();
+  ensureAudioRequestCaptureInstalled();
   window.postMessage({ type: AUDIO_FLUSH_REQUEST_MESSAGE_TYPE }, '*');
   await new Promise((resolve) => window.setTimeout(resolve, 180));
 }
 
-function appendInterceptedTracks(tracks: CapturedAudioTrack[], seen: Set<string>): void {
+function appendInterceptedTracks(
+  tracks: CapturedAudioTrack[],
+  seen: Set<string>,
+  currentLaneSourceUrls: Set<string>
+): void {
   const intercepted = Array.from(interceptedAudioByUrl.values()).sort((a, b) => {
     const sourceOrder = compareAudioRecords(a, b);
     return sourceOrder || a.capturedAt - b.capturedAt;
   });
   for (const record of intercepted) {
-    if (!hasLaneMapping(record) || seen.has(record.url) || hasSeenTrack(seen, record)) {
+    if (
+      !hasLaneMapping(record) ||
+      seen.has(record.url) ||
+      hasSeenTrack(seen, record) ||
+      (currentLaneSourceUrls.size > 0 && !currentLaneSourceUrls.has(record.url))
+    ) {
       continue;
     }
     markSeen(seen, record);
@@ -190,6 +206,16 @@ function appendInterceptedTracks(tracks: CapturedAudioTrack[], seen: Set<string>
       mimeType: record.mimeType
     });
   }
+}
+
+function getCurrentLaneSourceUrls(): Set<string> {
+  const urls = new Set<string>();
+  for (const record of discoveredAudioSourceByUrl.values()) {
+    if (hasLaneMapping(record)) {
+      urls.add(record.url);
+    }
+  }
+  return urls;
 }
 
 async function appendDiscoveredSourceTracks(tracks: CapturedAudioTrack[], seen: Set<string>): Promise<void> {
@@ -223,48 +249,52 @@ async function appendDiscoveredSourceTracks(tracks: CapturedAudioTrack[], seen: 
 }
 
 export async function captureAudioTracksForDrafting(root: ParentNode = document): Promise<CapturedAudioTrack[]> {
-  await requestAudioFlush();
-  const seen = new Set<string>();
-  const seenDomSources = new Set<string>();
-  const sources = Array.from(root.querySelectorAll('audio'))
-    .map((audio) => sourceForAudioElement(audio))
-    .filter(Boolean)
-    .map(toAbsoluteUrl)
-    .filter((source) => {
-      if (seenDomSources.has(source)) {
-        return false;
+  try {
+    await requestAudioFlush();
+    const seen = new Set<string>();
+    const seenDomSources = new Set<string>();
+    const sources = Array.from(root.querySelectorAll('audio'))
+      .map((audio) => sourceForAudioElement(audio))
+      .filter(Boolean)
+      .map(toAbsoluteUrl)
+      .filter((source) => {
+        if (seenDomSources.has(source)) {
+          return false;
+        }
+        seenDomSources.add(source);
+        return true;
+      });
+
+    const tracks: CapturedAudioTrack[] = [];
+    appendInterceptedTracks(tracks, seen, getCurrentLaneSourceUrls());
+    await appendDiscoveredSourceTracks(tracks, seen);
+    if (tracks.some(hasLaneMapping)) {
+      return tracks;
+    }
+
+    for (const source of sources) {
+      if (seen.has(source)) {
+        continue;
       }
-      seenDomSources.add(source);
-      return true;
-    });
+      seen.add(source);
+      const response = await fetch(source, { credentials: 'include' });
+      if (!response.ok) {
+        throw new Error(`Audio fetch failed: ${response.status}`);
+      }
+      const blob = await response.blob();
+      if (!blob.size) {
+        continue;
+      }
+      tracks.push({
+        trackId: `audio-${tracks.length + 1}`,
+        source,
+        blob,
+        mimeType: blob.type || 'application/octet-stream'
+      });
+    }
 
-  const tracks: CapturedAudioTrack[] = [];
-  appendInterceptedTracks(tracks, seen);
-  await appendDiscoveredSourceTracks(tracks, seen);
-  if (tracks.some(hasLaneMapping)) {
     return tracks;
+  } finally {
+    clearAudioCaptureSession();
   }
-
-  for (const source of sources) {
-    if (seen.has(source)) {
-      continue;
-    }
-    seen.add(source);
-    const response = await fetch(source, { credentials: 'include' });
-    if (!response.ok) {
-      throw new Error(`Audio fetch failed: ${response.status}`);
-    }
-    const blob = await response.blob();
-    if (!blob.size) {
-      continue;
-    }
-    tracks.push({
-      trackId: `audio-${tracks.length + 1}`,
-      source,
-      blob,
-      mimeType: blob.type || 'application/octet-stream'
-    });
-  }
-
-  return tracks;
 }
