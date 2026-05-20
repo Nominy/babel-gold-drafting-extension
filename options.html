@@ -145,6 +145,20 @@
           Flex is cheaper and can be slower. Default leaves service tier selection to OpenRouter/provider. Priority is faster and can cost more.
         </p>
 
+        <label for="reasoningEffort">Reasoning Effort</label>
+        <select id="reasoningEffort" name="reasoningEffort">
+          <option value="low">Low</option>
+          <option value="default">Provider default</option>
+          <option value="none">None</option>
+          <option value="minimal">Minimal</option>
+          <option value="medium">Medium</option>
+          <option value="high">High</option>
+          <option value="xhigh">XHigh</option>
+        </select>
+        <p class="field-help">
+          Low preserves the current drafting default. Provider default omits the reasoning parameter and lets OpenRouter choose.
+        </p>
+
         <label class="checkbox-row" for="audioInputEnabled">
           <input id="audioInputEnabled" name="audioInputEnabled" type="checkbox" />
           <span>

@@ -12,11 +12,27 @@ test('OpenRouter service tier defaults to flex', () => {
   assert.equal(normalizeSettings({}).serviceTier, 'flex');
 });
 
+test('reasoning effort defaults to low to preserve current drafting behavior', () => {
+  assert.equal(DEFAULT_SETTINGS.reasoningEffort, 'low');
+  assert.equal(normalizeSettings({}).reasoningEffort, 'low');
+});
+
 test('normalizeSettings keeps only supported OpenRouter service tiers', () => {
   assert.equal(normalizeSettings({ serviceTier: 'flex' }).serviceTier, 'flex');
   assert.equal(normalizeSettings({ serviceTier: 'default' }).serviceTier, 'default');
   assert.equal(normalizeSettings({ serviceTier: 'priority' }).serviceTier, 'priority');
   assert.equal(normalizeSettings({ serviceTier: 'auto' }).serviceTier, 'flex');
+});
+
+test('normalizeSettings keeps only supported reasoning efforts', () => {
+  assert.equal(normalizeSettings({ reasoningEffort: 'default' }).reasoningEffort, 'default');
+  assert.equal(normalizeSettings({ reasoningEffort: 'none' }).reasoningEffort, 'none');
+  assert.equal(normalizeSettings({ reasoningEffort: 'minimal' }).reasoningEffort, 'minimal');
+  assert.equal(normalizeSettings({ reasoningEffort: 'low' }).reasoningEffort, 'low');
+  assert.equal(normalizeSettings({ reasoningEffort: 'medium' }).reasoningEffort, 'medium');
+  assert.equal(normalizeSettings({ reasoningEffort: 'high' }).reasoningEffort, 'high');
+  assert.equal(normalizeSettings({ reasoningEffort: 'xhigh' }).reasoningEffort, 'xhigh');
+  assert.equal(normalizeSettings({ reasoningEffort: 'auto' }).reasoningEffort, 'low');
 });
 
 test('normalizeSettings only enables audio input from an explicit true value', () => {

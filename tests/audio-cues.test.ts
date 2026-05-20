@@ -101,6 +101,145 @@ test('captureAudioTracksForDrafting fetches lane-mapped audio sources discovered
   assert.equal(tracks[0]?.blob.type, 'audio/webm');
 });
 
+test('captureAudioTracksForDrafting does not retain discovered audio sources across SPA tasks', async () => {
+  const dom = installDom('<main></main>');
+  installAudioRequestCapture();
+
+  for (const message of [
+    {
+      url: 'https://dashboard.babel.audio/api/files/task-a-speaker-1',
+      trackId: 'task-a-speaker-1',
+      speakerKey: 'task-a-speaker-1',
+      trackLabel: 'Speaker 1'
+    },
+    {
+      url: 'https://dashboard.babel.audio/api/files/task-a-speaker-2',
+      trackId: 'task-a-speaker-2',
+      speakerKey: 'task-a-speaker-2',
+      trackLabel: 'Speaker 2'
+    }
+  ]) {
+    window.dispatchEvent(
+      new dom.window.MessageEvent('message', {
+        source: window,
+        data: {
+          type: AUDIO_SOURCE_MESSAGE_TYPE,
+          ...message,
+          mimeType: 'audio/webm',
+          discoveredAt: 100
+        }
+      })
+    );
+  }
+
+  const firstTracks = await captureAudioTracksForDrafting();
+  assert.deepEqual(
+    firstTracks.map((track) => track.source),
+    [
+      'https://dashboard.babel.audio/api/files/task-a-speaker-1',
+      'https://dashboard.babel.audio/api/files/task-a-speaker-2'
+    ]
+  );
+
+  for (const message of [
+    {
+      url: 'https://dashboard.babel.audio/api/files/task-b-speaker-1',
+      trackId: 'task-b-speaker-1',
+      speakerKey: 'task-b-speaker-1',
+      trackLabel: 'Speaker 1'
+    },
+    {
+      url: 'https://dashboard.babel.audio/api/files/task-b-speaker-2',
+      trackId: 'task-b-speaker-2',
+      speakerKey: 'task-b-speaker-2',
+      trackLabel: 'Speaker 2'
+    }
+  ]) {
+    window.dispatchEvent(
+      new dom.window.MessageEvent('message', {
+        source: window,
+        data: {
+          type: AUDIO_SOURCE_MESSAGE_TYPE,
+          ...message,
+          mimeType: 'audio/webm',
+          discoveredAt: 200
+        }
+      })
+    );
+  }
+
+  const secondTracks = await captureAudioTracksForDrafting();
+
+  assert.deepEqual(
+    secondTracks.map((track) => track.source),
+    [
+      'https://dashboard.babel.audio/api/files/task-b-speaker-1',
+      'https://dashboard.babel.audio/api/files/task-b-speaker-2'
+    ]
+  );
+});
+
+test('captureAudioTracksForDrafting ignores stale intercepted audio once current lane sources are rediscovered', async () => {
+  const dom = installDom('<main></main>');
+  const capturePromise = captureAudioTracksForDrafting();
+
+  dom.window.setTimeout(() => {
+    window.dispatchEvent(
+      new dom.window.MessageEvent('message', {
+        source: window,
+        data: {
+          type: AUDIO_RESPONSE_MESSAGE_TYPE,
+          url: 'https://dashboard.babel.audio/api/files/task-a-speaker-1',
+          mimeType: 'audio/webm',
+          trackId: 'task-a-speaker-1',
+          speakerKey: 'task-a-speaker-1',
+          trackLabel: 'Speaker 1',
+          source: 'fetch',
+          capturedAt: 100,
+          bytes: new Uint8Array([1, 1, 1]).buffer
+        }
+      })
+    );
+
+    for (const message of [
+      {
+        url: 'https://dashboard.babel.audio/api/files/task-b-speaker-1',
+        trackId: 'task-b-speaker-1',
+        speakerKey: 'task-b-speaker-1',
+        trackLabel: 'Speaker 1'
+      },
+      {
+        url: 'https://dashboard.babel.audio/api/files/task-b-speaker-2',
+        trackId: 'task-b-speaker-2',
+        speakerKey: 'task-b-speaker-2',
+        trackLabel: 'Speaker 2'
+      }
+    ]) {
+      window.dispatchEvent(
+        new dom.window.MessageEvent('message', {
+          source: window,
+          data: {
+            type: AUDIO_SOURCE_MESSAGE_TYPE,
+            ...message,
+            mimeType: 'audio/webm',
+            discoveredAt: 200
+          }
+        })
+      );
+    }
+  }, 0);
+
+  const tracks = await capturePromise;
+
+  assert.deepEqual(
+    tracks.map((track) => track.source),
+    [
+      'https://dashboard.babel.audio/api/files/task-b-speaker-1',
+      'https://dashboard.babel.audio/api/files/task-b-speaker-2'
+    ]
+  );
+});
+
 test('captureAudioTracksForDrafting drops unmapped captures and keeps one source per speaker lane', async () => {
   const dom = installDom('<main></main>');
   installAudioRequestCapture();

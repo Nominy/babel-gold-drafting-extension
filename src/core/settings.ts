@@ -9,6 +9,7 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
   openRouterApiKey: '',
   model: 'google/gemini-3-flash-preview',
   serviceTier: 'flex',
+  reasoningEffort: 'low',
   audioInputEnabled: false
 };
 
@@ -30,6 +31,16 @@ export function normalizeSettings(input: unknown): ExtensionSettings {
     raw.serviceTier === 'default' || raw.serviceTier === 'priority' || raw.serviceTier === 'flex'
       ? raw.serviceTier
       : DEFAULT_SETTINGS.serviceTier;
+  const reasoningEffort =
+    raw.reasoningEffort === 'default' ||
+    raw.reasoningEffort === 'none' ||
+    raw.reasoningEffort === 'minimal' ||
+    raw.reasoningEffort === 'low' ||
+    raw.reasoningEffort === 'medium' ||
+    raw.reasoningEffort === 'high' ||
+    raw.reasoningEffort === 'xhigh'
+      ? raw.reasoningEffort
+      : DEFAULT_SETTINGS.reasoningEffort;
   const audioInputEnabled = raw.audioInputEnabled === true;
 
   return {
@@ -38,6 +49,7 @@ export function normalizeSettings(input: unknown): ExtensionSettings {
     openRouterApiKey,
     model,
     serviceTier,
+    reasoningEffort,
     audioInputEnabled
   };
 }
