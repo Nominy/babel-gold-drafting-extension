@@ -14,6 +14,7 @@ async function boot(): Promise<void> {
   const openRouterApiKeyInput = requireElement<HTMLInputElement>('#openRouterApiKey');
   const modelInput = requireElement<HTMLInputElement>('#model');
   const serviceTierSelect = requireElement<HTMLSelectElement>('#serviceTier');
+  const reasoningEffortSelect = requireElement<HTMLSelectElement>('#reasoningEffort');
   const audioInputEnabledInput = requireElement<HTMLInputElement>('#audioInputEnabled');
   const saveButton = requireElement<HTMLButtonElement>('[data-role="save"]');
   const status = requireElement<HTMLElement>('[data-role="status"]');
@@ -24,6 +25,7 @@ async function boot(): Promise<void> {
   openRouterApiKeyInput.value = settings.openRouterApiKey;
   modelInput.value = settings.model;
   serviceTierSelect.value = settings.serviceTier;
+  reasoningEffortSelect.value = settings.reasoningEffort;
   audioInputEnabledInput.checked = settings.audioInputEnabled;
 
   saveButton.addEventListener('click', () => {
@@ -37,6 +39,16 @@ async function boot(): Promise<void> {
         serviceTierSelect.value === 'default' || serviceTierSelect.value === 'priority' || serviceTierSelect.value === 'flex'
           ? serviceTierSelect.value
           : 'flex',
+      reasoningEffort:
+        reasoningEffortSelect.value === 'default' ||
+        reasoningEffortSelect.value === 'none' ||
+        reasoningEffortSelect.value === 'minimal' ||
+        reasoningEffortSelect.value === 'low' ||
+        reasoningEffortSelect.value === 'medium' ||
+        reasoningEffortSelect.value === 'high' ||
+        reasoningEffortSelect.value === 'xhigh'
+          ? reasoningEffortSelect.value
+          : 'low',
       audioInputEnabled: audioInputEnabledInput.checked
     })
       .then((saved) => {
@@ -45,6 +57,7 @@ async function boot(): Promise<void> {
         openRouterApiKeyInput.value = saved.openRouterApiKey;
         modelInput.value = saved.model;
         serviceTierSelect.value = saved.serviceTier;
+        reasoningEffortSelect.value = saved.reasoningEffort;
         audioInputEnabledInput.checked = saved.audioInputEnabled;
         status.textContent = 'Saved. Reload Babel tabs to pick up the new settings.';
       })

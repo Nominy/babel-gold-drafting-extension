@@ -1,5 +1,6 @@
 export type ProjectPresetId = 'ru-gold-2sp-v1';
 export type OpenRouterServiceTier = 'default' | 'flex' | 'priority';
+export type OpenRouterReasoningEffort = 'default' | 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
 
 export interface ExtensionSettings {
   backendBaseUrl: string;
@@ -7,6 +8,7 @@ export interface ExtensionSettings {
   openRouterApiKey: string;
   model: string;
   serviceTier: OpenRouterServiceTier;
+  reasoningEffort: OpenRouterReasoningEffort;
   audioInputEnabled: boolean;
 }
 
@@ -64,6 +66,7 @@ export interface GenerateDraftRequest {
   openRouterApiKey: string;
   model?: string;
   serviceTier?: OpenRouterServiceTier;
+  reasoningEffort?: OpenRouterReasoningEffort;
 }
 
 export interface GenerateDraftResponse {
