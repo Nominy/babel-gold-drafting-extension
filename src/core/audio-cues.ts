@@ -83,7 +83,7 @@ function getTrackIdentity(record: {
   speakerKey?: string;
   trackLabel?: string;
 }): string | null {
-  return record.trackId || record.speakerKey || record.trackLabel || null;
+  return record.speakerKey || record.trackLabel || record.trackId || null;
 }
 
 function hasLaneMapping(record: {

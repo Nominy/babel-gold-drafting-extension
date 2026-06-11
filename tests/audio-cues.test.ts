@@ -338,6 +338,63 @@ test('captureAudioTracksForDrafting drops unmapped captures and keeps one source
   );
 });
 
+test('captureAudioTracksForDrafting treats speaker lane as the duplicate key when track ids differ', async () => {
+  const dom = installDom('<main></main>');
+  installAudioRequestCapture();
+
+  for (const message of [
+    {
+      url: 'https://dashboard.babel.audio/api/files/speaker-1-source',
+      mimeType: 'audio/wav',
+      trackId: 'volatile-source-id',
+      speakerKey: 'speaker-1',
+      trackLabel: 'Speaker 1',
+      capturedAt: 1,
+      bytes: [1, 1, 1]
+    },
+    {
+      url: 'blob:https://dashboard.babel.audio/speaker-1-copy',
+      mimeType: 'audio/wav',
+      trackId: 'volatile-blob-id',
+      speakerKey: 'speaker-1',
+      trackLabel: 'Speaker 1',
+      capturedAt: 2,
+      bytes: [2, 2, 2]
+    }
+  ]) {
+    window.dispatchEvent(
+      new dom.window.MessageEvent('message', {
+        source: window,
+        data: {
+          type: AUDIO_RESPONSE_MESSAGE_TYPE,
+          source: 'fetch',
+          ...message,
+          bytes: new Uint8Array(message.bytes).buffer
+        }
+      })
+    );
+  }
+
+  const tracks = await captureAudioTracksForDrafting();
+
+  assert.deepEqual(
+    tracks.map((track) => ({
+      trackId: track.trackId,
+      speakerKey: track.speakerKey,
+      trackLabel: track.trackLabel,
+      source: track.source
+    })),
+    [
+      {
+        trackId: 'volatile-source-id',
+        speakerKey: 'speaker-1',
+        trackLabel: 'Speaker 1',
+        source: 'https://dashboard.babel.audio/api/files/speaker-1-source'
+      }
+    ]
+  );
+});
+
 test('captureAudioTracksForDrafting skips DOM fallback audio when lane-mapped tracks already exist', async () => {
   const dom = installDom(`
     <audio src="blob:https://dashboard.babel.audio/blob-speaker-1"></audio>
