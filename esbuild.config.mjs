@@ -21,6 +21,10 @@ const config = defineExtensionBuild({
       outfile: 'dist/content/audio-request-interceptor.js'
     },
     {
+      entryPoints: ['src/background/ai-broker.ts'],
+      outfile: 'dist/background/ai-broker.js'
+    },
+    {
       entryPoints: ['src/options/options.ts'],
       outfile: 'dist/options/options.js'
     }

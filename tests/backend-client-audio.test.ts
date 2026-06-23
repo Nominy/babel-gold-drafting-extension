@@ -1,7 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { generateDraftStream } from '../src/core/backend-client';
-import type { CapturedAudioTrack, GenerateDraftRequest } from '../src/core/types';
+import { generateDraftStream, redistributeTextWithBroker, transcribeSegmentWithBroker } from '../src/core/backend-client';
+import type {
+  BrokerRedistributeTextRequest,
+  BrokerTranscribeSegmentRequest,
+  CapturedAudioTrack,
+  GenerateDraftRequest
+} from '../src/core/types';
 
 const request: GenerateDraftRequest = {
   projectPreset: 'ru-gold-2sp-v1',
@@ -20,6 +25,102 @@ const request: GenerateDraftRequest = {
   model: 'google/gemini-3-flash-preview',
   serviceTier: 'flex'
 };
+
+const brokerTranscribeRequest: BrokerTranscribeSegmentRequest = {
+  openRouterApiKey: 'sk-or-test',
+  model: 'google/gemini-3-flash-preview',
+  serviceTier: 'flex',
+  segment: {
+    rowId: 'r1',
+    speakerKey: 'speaker-1',
+    startSeconds: 0,
+    endSeconds: 1
+  }
+};
+
+const brokerRedistributeRequest: BrokerRedistributeTextRequest = {
+  openRouterApiKey: 'sk-or-test',
+  model: 'google/gemini-3-flash-preview',
+  serviceTier: 'flex',
+  groups: [
+    {
+      groupId: 'group-1',
+      speakerKey: 'Speaker 1',
+      fullText: 'Привет мир.',
+      segments: [
+        { id: 's1', index: 0, speakerKey: 'Speaker 1', startSeconds: 0, endSeconds: 1, text: 'Привет' }
+      ],
+      draftAllocations: [{ segmentId: 's1', text: 'Привет мир.' }]
+    }
+  ]
+};
+
+test('transcribeSegmentWithBroker aborts and reports the endpoint when the broker request stalls', async () => {
+  let seenSignal: AbortSignal | null = null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+    seenSignal = (init?.signal as AbortSignal | undefined) || null;
+    return await new Promise<Response>((_resolve, reject) => {
+      seenSignal?.addEventListener('abort', () => {
+        reject(seenSignal?.reason || new DOMException('The operation was aborted.', 'AbortError'));
+      });
+    });
+  }) as unknown as typeof fetch;
+
+  try {
+    const result = await Promise.race([
+      transcribeSegmentWithBroker('http://127.0.0.1:3001', brokerTranscribeRequest, [], { timeoutMs: 5 })
+        .then(() => 'resolved')
+        .catch((error: unknown) => error),
+      new Promise((resolve) => setTimeout(() => resolve('hung'), 50))
+    ]);
+
+    assert.ok(result instanceof Error, `expected timeout error, got ${String(result)}`);
+    const capturedSignal = seenSignal as unknown as AbortSignal | null;
+    assert.equal(capturedSignal?.aborted, true);
+    assert.match(result.message, /\/api\/broker\/transcribe-segment/);
+    assert.match(result.message, /timed out after 5ms/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('redistributeTextWithBroker posts one server-side grouped broker request', async () => {
+  let seenUrl = '';
+  let seenPayload: BrokerRedistributeTextRequest | null = null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+    seenUrl = String(url);
+    const body = init?.body;
+    assert.ok(body instanceof FormData);
+    seenPayload = JSON.parse(String(body.get('payload')));
+    return new Response(
+      JSON.stringify({
+        model: 'google/gemini-3-flash-preview',
+        results: [
+          {
+            groupId: 'group-1',
+            ok: true,
+            review: { acceptDraft: true, moves: [] },
+            model: 'google/gemini-3-flash-preview'
+          }
+        ]
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } }
+    );
+  }) as unknown as typeof fetch;
+
+  try {
+    const response = await redistributeTextWithBroker('http://127.0.0.1:3001', brokerRedistributeRequest);
+
+    assert.equal(seenUrl, 'http://127.0.0.1:3001/api/broker/redistribute-text');
+    assert.deepEqual(seenPayload, brokerRedistributeRequest);
+    assert.equal(response.results[0]?.groupId, 'group-1');
+    assert.equal(response.results[0]?.ok, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 test('generateDraftStream attaches audio tracks to the default generate stream route', async () => {
   let seenUrl = '';

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Babel Gold Drafting",
-  "version": "0.1.16",
+  "version": "0.1.17",
   "description": "Standalone Silver-to-Gold drafting assistant for Babel transcription jobs.",
   "icons": {
     "16": "icons/icon16.png",
@@ -12,6 +12,14 @@
   "permissions": [
     "storage"
   ],
+  "background": {
+    "service_worker": "dist/background/ai-broker.js"
+  },
+  "externally_connectable": {
+    "ids": [
+      "dldjgploldmldipplklepcpjdjhehald"
+    ]
+  },
   "host_permissions": [
     "https://dashboard.babel.audio/*",
     "https://reviewgen.ovh/*",

@@ -10,6 +10,7 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
   model: 'google/gemini-3-flash-preview',
   serviceTier: 'flex',
   reasoningEffort: 'low',
+  aiBrokerProvider: 'auto',
   audioInputEnabled: false
 };
 
@@ -41,6 +42,12 @@ export function normalizeSettings(input: unknown): ExtensionSettings {
     raw.reasoningEffort === 'xhigh'
       ? raw.reasoningEffort
       : DEFAULT_SETTINGS.reasoningEffort;
+  const aiBrokerProvider =
+    raw.aiBrokerProvider === 'auto' ||
+    raw.aiBrokerProvider === 'remote-openrouter' ||
+    raw.aiBrokerProvider === 'local-gemini-nano'
+      ? raw.aiBrokerProvider
+      : DEFAULT_SETTINGS.aiBrokerProvider;
   const audioInputEnabled = raw.audioInputEnabled === true;
 
   return {
@@ -50,6 +57,7 @@ export function normalizeSettings(input: unknown): ExtensionSettings {
     model,
     serviceTier,
     reasoningEffort,
+    aiBrokerProvider,
     audioInputEnabled
   };
 }
