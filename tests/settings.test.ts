@@ -7,6 +7,11 @@ test('audio input research preview is off by default', () => {
   assert.equal(normalizeSettings({}).audioInputEnabled, false);
 });
 
+test('AI broker provider defaults to automatic remote fallback', () => {
+  assert.equal(DEFAULT_SETTINGS.aiBrokerProvider, 'auto');
+  assert.equal(normalizeSettings({}).aiBrokerProvider, 'auto');
+});
+
 test('OpenRouter service tier defaults to flex', () => {
   assert.equal(DEFAULT_SETTINGS.serviceTier, 'flex');
   assert.equal(normalizeSettings({}).serviceTier, 'flex');
@@ -39,4 +44,11 @@ test('normalizeSettings only enables audio input from an explicit true value', (
   assert.equal(normalizeSettings({ audioInputEnabled: true }).audioInputEnabled, true);
   assert.equal(normalizeSettings({ audioInputEnabled: false }).audioInputEnabled, false);
   assert.equal(normalizeSettings({ audioInputEnabled: 'true' }).audioInputEnabled, false);
+});
+
+test('normalizeSettings keeps only supported AI broker providers', () => {
+  assert.equal(normalizeSettings({ aiBrokerProvider: 'auto' }).aiBrokerProvider, 'auto');
+  assert.equal(normalizeSettings({ aiBrokerProvider: 'remote-openrouter' }).aiBrokerProvider, 'remote-openrouter');
+  assert.equal(normalizeSettings({ aiBrokerProvider: 'local-gemini-nano' }).aiBrokerProvider, 'local-gemini-nano');
+  assert.equal(normalizeSettings({ aiBrokerProvider: 'remote' }).aiBrokerProvider, 'auto');
 });

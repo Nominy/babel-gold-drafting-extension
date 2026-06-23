@@ -1,6 +1,8 @@
 import { DraftingOverlayController } from './overlay';
+import { publishGoldDraftingExtensionId, registerAiBrokerContentHandler } from './ai-broker-content';
 import { registerLifecycle } from '../core/lifecycle';
 import { loadSettings } from '../core/settings';
+import { shouldUseRemoteBroker } from '../core/ai-broker-protocol';
 import { AUDIO_ENABLE_CAPTURE_MESSAGE_TYPE } from '../core/audio-intercept-protocol';
 
 declare global {
@@ -15,6 +17,8 @@ function boot(): void {
   }
 
   window.__babelGoldDraftingInstalled = true;
+  publishGoldDraftingExtensionId();
+  registerAiBrokerContentHandler();
   const controller = new DraftingOverlayController();
   controller.mount();
   registerLifecycle(controller);
@@ -23,7 +27,7 @@ function boot(): void {
 function enableAudioCaptureIfConfigured(): void {
   void loadSettings()
     .then((settings) => {
-      if (settings.audioInputEnabled) {
+      if (settings.audioInputEnabled || shouldUseRemoteBroker(settings.aiBrokerProvider)) {
         window.postMessage({ type: AUDIO_ENABLE_CAPTURE_MESSAGE_TYPE }, '*');
       }
     })

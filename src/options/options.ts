@@ -15,6 +15,7 @@ async function boot(): Promise<void> {
   const modelInput = requireElement<HTMLInputElement>('#model');
   const serviceTierSelect = requireElement<HTMLSelectElement>('#serviceTier');
   const reasoningEffortSelect = requireElement<HTMLSelectElement>('#reasoningEffort');
+  const aiBrokerProviderSelect = requireElement<HTMLSelectElement>('#aiBrokerProvider');
   const audioInputEnabledInput = requireElement<HTMLInputElement>('#audioInputEnabled');
   const saveButton = requireElement<HTMLButtonElement>('[data-role="save"]');
   const status = requireElement<HTMLElement>('[data-role="status"]');
@@ -26,6 +27,7 @@ async function boot(): Promise<void> {
   modelInput.value = settings.model;
   serviceTierSelect.value = settings.serviceTier;
   reasoningEffortSelect.value = settings.reasoningEffort;
+  aiBrokerProviderSelect.value = settings.aiBrokerProvider;
   audioInputEnabledInput.checked = settings.audioInputEnabled;
 
   saveButton.addEventListener('click', () => {
@@ -49,6 +51,12 @@ async function boot(): Promise<void> {
         reasoningEffortSelect.value === 'xhigh'
           ? reasoningEffortSelect.value
           : 'low',
+      aiBrokerProvider:
+        aiBrokerProviderSelect.value === 'auto' ||
+        aiBrokerProviderSelect.value === 'remote-openrouter' ||
+        aiBrokerProviderSelect.value === 'local-gemini-nano'
+          ? aiBrokerProviderSelect.value
+          : 'auto',
       audioInputEnabled: audioInputEnabledInput.checked
     })
       .then((saved) => {
@@ -58,6 +66,7 @@ async function boot(): Promise<void> {
         modelInput.value = saved.model;
         serviceTierSelect.value = saved.serviceTier;
         reasoningEffortSelect.value = saved.reasoningEffort;
+        aiBrokerProviderSelect.value = saved.aiBrokerProvider;
         audioInputEnabledInput.checked = saved.audioInputEnabled;
         status.textContent = 'Saved. Reload Babel tabs to pick up the new settings.';
       })

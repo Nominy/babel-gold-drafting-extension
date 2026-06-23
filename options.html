@@ -159,6 +159,16 @@
           Low preserves the current drafting default. Provider default omits the reasoning parameter and lets OpenRouter choose.
         </p>
 
+        <label for="aiBrokerProvider">Helper AI Broker</label>
+        <select id="aiBrokerProvider" name="aiBrokerProvider">
+          <option value="auto">Auto: remote if configured, else Gemini Nano</option>
+          <option value="remote-openrouter">Remote OpenRouter model only</option>
+          <option value="local-gemini-nano">Local Gemini Nano only</option>
+        </select>
+        <p class="field-help">
+          Controls how Babel Helper AI shortcuts use this extension when Gold Drafting is installed.
+        </p>
+
         <label class="checkbox-row" for="audioInputEnabled">
           <input id="audioInputEnabled" name="audioInputEnabled" type="checkbox" />
           <span>

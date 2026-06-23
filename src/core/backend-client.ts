@@ -5,7 +5,11 @@ import type {
   GenerateDraftResponse,
   GenerateDraftRowEvent,
   GenerateDraftStartedEvent,
-  CapturedAudioTrack
+  CapturedAudioTrack,
+  BrokerTranscribeSegmentRequest,
+  BrokerTranscribeSegmentResponse,
+  BrokerRedistributeTextRequest,
+  BrokerRedistributeTextResponse
 } from './types';
 
 class DraftStreamHttpError extends Error {}
@@ -13,6 +17,12 @@ class DraftStreamHttpError extends Error {}
 class DraftStreamServerError extends Error {}
 
 const RECONCILE_RETRY_DELAYS_MS = [100, 300, 700, 1500, 3000, 5000, 10000, 20000];
+const BROKER_TRANSCRIBE_TIMEOUT_MS = 300000;
+const BROKER_REDISTRIBUTE_TIMEOUT_MS = 120000;
+
+type BrokerRequestOptions = {
+  timeoutMs?: number;
+};
 
 type GenerateDraftStreamHandlers = {
   onStarted?: (event: GenerateDraftStartedEvent) => void;
@@ -64,6 +74,111 @@ export async function generateDraft(
     getBaseCandidates: () => [normalizeBaseUrl(backendBaseUrl)]
   });
   return client.post<GenerateDraftResponse>('/api/draft/generate', payload);
+}
+
+function createBrokerFormData(
+  payload: BrokerTranscribeSegmentRequest | BrokerRedistributeTextRequest,
+  audioTracks: CapturedAudioTrack[] = []
+): FormData {
+  const body = new FormData();
+  body.set('payload', JSON.stringify(payload));
+  for (const track of audioTracks) {
+    const extension = track.mimeType.includes('wav') ? 'wav' : track.mimeType.includes('mpeg') ? 'mp3' : 'bin';
+    body.append(`audioTrack:${track.trackId}`, track.blob, `${track.trackId}.${extension}`);
+    body.set(
+      `audioTrackMeta:${track.trackId}`,
+      JSON.stringify({
+        source: track.source,
+        speakerKey: track.speakerKey || '',
+        trackLabel: track.trackLabel || '',
+        mimeType: track.mimeType
+      })
+    );
+  }
+  return body;
+}
+
+async function parseBrokerJsonResponse<T>(response: Response): Promise<T> {
+  const payload = await parseJsonResponse(response);
+  if (!response.ok) {
+    throw new Error(getErrorMessage(response.status, payload));
+  }
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('Backend returned non-JSON payload.');
+  }
+  return payload as T;
+}
+
+function getBrokerRequestTimeoutMs(options: BrokerRequestOptions | undefined, fallbackMs: number): number {
+  const timeoutMs = Number(options?.timeoutMs);
+  return Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : fallbackMs;
+}
+
+async function fetchBrokerJsonResponse<T>(
+  backendBaseUrl: string,
+  path: string,
+  payload: BrokerTranscribeSegmentRequest | BrokerRedistributeTextRequest,
+  audioTracks: CapturedAudioTrack[],
+  timeoutMs: number
+): Promise<T> {
+  const endpointUrl = getEndpointUrl(backendBaseUrl, path);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => {
+    controller.abort(new Error(`Gold Drafting broker request to ${endpointUrl} timed out after ${timeoutMs}ms.`));
+  }, timeoutMs);
+
+  try {
+    const response = await fetch(endpointUrl, {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json'
+      },
+      body: createBrokerFormData(payload, audioTracks),
+      signal: controller.signal
+    });
+
+    return await parseBrokerJsonResponse<T>(response);
+  } catch (error) {
+    if (controller.signal.aborted) {
+      const reason = (controller.signal as AbortSignal & { reason?: unknown }).reason;
+      throw reason instanceof Error
+        ? reason
+        : new Error(`Gold Drafting broker request to ${endpointUrl} timed out after ${timeoutMs}ms.`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+export async function transcribeSegmentWithBroker(
+  backendBaseUrl: string,
+  payload: BrokerTranscribeSegmentRequest,
+  audioTracks: CapturedAudioTrack[] = [],
+  options: BrokerRequestOptions = {}
+): Promise<BrokerTranscribeSegmentResponse> {
+  return fetchBrokerJsonResponse<BrokerTranscribeSegmentResponse>(
+    backendBaseUrl,
+    '/api/broker/transcribe-segment',
+    payload,
+    audioTracks,
+    getBrokerRequestTimeoutMs(options, BROKER_TRANSCRIBE_TIMEOUT_MS)
+  );
+}
+
+export async function redistributeTextWithBroker(
+  backendBaseUrl: string,
+  payload: BrokerRedistributeTextRequest,
+  audioTracks: CapturedAudioTrack[] = [],
+  options: BrokerRequestOptions = {}
+): Promise<BrokerRedistributeTextResponse> {
+  return fetchBrokerJsonResponse<BrokerRedistributeTextResponse>(
+    backendBaseUrl,
+    '/api/broker/redistribute-text',
+    payload,
+    audioTracks,
+    getBrokerRequestTimeoutMs(options, BROKER_REDISTRIBUTE_TIMEOUT_MS)
+  );
 }
 
 async function reconcileDraftWithFormPayload(

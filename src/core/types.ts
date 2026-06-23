@@ -1,6 +1,7 @@
 export type ProjectPresetId = 'ru-gold-2sp-v1';
 export type OpenRouterServiceTier = 'default' | 'flex' | 'priority';
 export type OpenRouterReasoningEffort = 'default' | 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+export type AiBrokerProvider = 'auto' | 'remote-openrouter' | 'local-gemini-nano';
 
 export interface ExtensionSettings {
   backendBaseUrl: string;
@@ -9,6 +10,7 @@ export interface ExtensionSettings {
   model: string;
   serviceTier: OpenRouterServiceTier;
   reasoningEffort: OpenRouterReasoningEffort;
+  aiBrokerProvider: AiBrokerProvider;
   audioInputEnabled: boolean;
 }
 
@@ -73,6 +75,86 @@ export interface GenerateDraftResponse {
   draftRows: DraftRowResult[];
   summary: DraftSummary;
   generationMeta: DraftGenerationMeta;
+}
+
+export interface BrokerTranscriptSegment {
+  rowId: string;
+  speakerKey: string;
+  startSeconds: number;
+  endSeconds: number;
+}
+
+export interface BrokerTranscribeSegmentRequest {
+  openRouterApiKey: string;
+  model?: string;
+  serviceTier?: OpenRouterServiceTier;
+  reasoningEffort?: OpenRouterReasoningEffort;
+  segment: BrokerTranscriptSegment;
+}
+
+export interface BrokerTranscribeSegmentResponse {
+  text: string;
+  model: string;
+}
+
+export interface BrokerRedistributionSegment {
+  id: string;
+  index: number;
+  speakerKey: string;
+  startSeconds: number | null;
+  endSeconds: number | null;
+  text: string;
+}
+
+export interface BrokerRedistributionAllocation {
+  segmentId: string;
+  text: string;
+}
+
+export interface BrokerRedistributionGroup {
+  groupId: string;
+  speakerKey: string;
+  fullText: string;
+  segments: BrokerRedistributionSegment[];
+  draftAllocations: BrokerRedistributionAllocation[];
+}
+
+export interface BrokerRedistributionMove {
+  fromIndex: number;
+  toIndex: number;
+  sentenceCount: number;
+}
+
+export interface BrokerRedistributionReview {
+  acceptDraft: boolean;
+  moves: BrokerRedistributionMove[];
+  notes?: string;
+}
+
+export interface BrokerRedistributeTextRequest {
+  openRouterApiKey: string;
+  model?: string;
+  serviceTier?: OpenRouterServiceTier;
+  reasoningEffort?: OpenRouterReasoningEffort;
+  groups: BrokerRedistributionGroup[];
+}
+
+export type BrokerRedistributeTextResult =
+  | {
+      groupId: string;
+      ok: true;
+      review: BrokerRedistributionReview;
+      model: string;
+    }
+  | {
+      groupId: string;
+      ok: false;
+      error: string;
+    };
+
+export interface BrokerRedistributeTextResponse {
+  model: string;
+  results: BrokerRedistributeTextResult[];
 }
 
 export interface GenerateDraftStartedEvent {
