@@ -27,11 +27,20 @@ test('gold drafting extension structure exists', () => {
 test('manifest and build expose the AI broker service worker', () => {
   const manifest = JSON.parse(fs.readFileSync(new URL('../manifest.json', import.meta.url), 'utf8'));
   assert.equal(manifest.background.service_worker, 'dist/background/ai-broker.js');
-  assert.deepEqual(manifest.externally_connectable, { ids: ['dldjgploldmldipplklepcpjdjhehald'] });
+  assert.deepEqual(manifest.externally_connectable, {
+    ids: [
+      'dldjgploldmldipplklepcpjdjhehald',
+      'afpcopjodphibggidgicpjnkgnfhhemi'
+    ]
+  });
 
   const esbuildSource = fs.readFileSync(new URL('../esbuild.config.mjs', import.meta.url), 'utf8');
   assert.match(esbuildSource, /entryPoints: \['src\/background\/ai-broker\.ts'\]/);
   assert.match(esbuildSource, /outfile: 'dist\/background\/ai-broker\.js'/);
+
+  const packSource = fs.readFileSync(new URL('../scripts/pack.mjs', import.meta.url), 'utf8');
+  assert.match(packSource, /STORE_EXTERNALLY_CONNECTABLE_IDS = \['dldjgploldmldipplklepcpjdjhehald'\]/);
+  assert.match(packSource, /externally_connectable: \{\s*ids: STORE_EXTERNALLY_CONNECTABLE_IDS\s*\}/);
 });
 
 test('AI broker redistribution review uses the Helper review contract', () => {
