@@ -113,6 +113,25 @@
         line-height: 1.4;
         font-weight: 400;
       }
+
+      .support-footer {
+        margin: 18px 0 0;
+        padding-top: 16px;
+        border-top: 1px solid var(--border);
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.45;
+      }
+
+      .support-footer a {
+        color: var(--accent);
+        font-weight: 700;
+        text-decoration: none;
+      }
+
+      .support-footer a:hover {
+        text-decoration: underline;
+      }
     </style>
   </head>
   <body>
@@ -181,6 +200,10 @@
 
         <button type="button" data-role="save">Save Settings</button>
         <div data-role="status"></div>
+        <p class="support-footer">
+          These Babel tools are maintained by Naftsan. If they save you time,
+          <a href="https://ko-fi.com/naftsan" target="_blank" rel="noopener noreferrer">Support on Ko-fi</a>.
+        </p>
       </section>
     </main>
     <script src="dist/options/options.js"></script>
