@@ -180,6 +180,25 @@ function ensureStyles(): void {
       font-size: 14px;
     }
 
+    #${OVERLAY_ID} .bgd-header-title-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    #${OVERLAY_ID} .bgd-support-link {
+      color: var(--bgd-accent);
+      font-size: 11px;
+      font-weight: 700;
+      text-decoration: none;
+      white-space: nowrap;
+    }
+
+    #${OVERLAY_ID} .bgd-support-link:hover {
+      text-decoration: underline;
+    }
+
     #${OVERLAY_ID} .bgd-header-subtitle {
       color: var(--bgd-muted);
       font-size: 12px;
@@ -538,10 +557,13 @@ export class DraftingOverlayController {
 
     const header = createElement('div', 'bgd-header');
     const titleWrap = createElement('div');
-    titleWrap.append(
-      createElement('div', 'bgd-header-title', 'Gold Draft'),
-      createElement('div', 'bgd-header-subtitle', 'Silver -> Gold draft preview before apply')
-    );
+    const titleRow = createElement('div', 'bgd-header-title-row');
+    const supportLink = createElement('a', 'bgd-support-link', 'Support on Ko-fi');
+    supportLink.href = 'https://ko-fi.com/naftsan';
+    supportLink.target = '_blank';
+    supportLink.rel = 'noopener noreferrer';
+    titleRow.append(createElement('div', 'bgd-header-title', 'Gold Draft'), supportLink);
+    titleWrap.append(titleRow, createElement('div', 'bgd-header-subtitle', 'Silver -> Gold draft preview before apply'));
     const closeButton = createElement('button', 'bgd-close', 'Close');
     closeButton.type = 'button';
     closeButton.addEventListener('click', () => this.closeDialog());

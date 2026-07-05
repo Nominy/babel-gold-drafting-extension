@@ -24,14 +24,42 @@ test('gold drafting extension structure exists', () => {
   }
 });
 
+test('options page includes passive Ko-fi support link without new host permissions', () => {
+  const optionsSource = fs.readFileSync(new URL('../options.html', import.meta.url), 'utf8');
+  const manifest = JSON.parse(fs.readFileSync(new URL('../manifest.json', import.meta.url), 'utf8'));
+  const hostPermissions = manifest.host_permissions || [];
+
+  assert.match(optionsSource, /https:\/\/ko-fi\.com\/naftsan/);
+  assert.match(optionsSource, /Support on Ko-fi/);
+  assert.equal(hostPermissions.some((permission: string) => /ko-fi\.com/.test(permission)), false);
+});
+
+test('Gold Draft work surface includes a small Ko-fi link beside the overlay header', () => {
+  const overlaySource = fs.readFileSync(new URL('../src/content/overlay.ts', import.meta.url), 'utf8');
+
+  assert.match(overlaySource, /bgd-header-title/);
+  assert.match(overlaySource, /https:\/\/ko-fi\.com\/naftsan/);
+  assert.match(overlaySource, /Support on Ko-fi/);
+  assert.match(overlaySource, /bgd-support-link/);
+});
+
 test('manifest and build expose the AI broker service worker', () => {
   const manifest = JSON.parse(fs.readFileSync(new URL('../manifest.json', import.meta.url), 'utf8'));
   assert.equal(manifest.background.service_worker, 'dist/background/ai-broker.js');
-  assert.deepEqual(manifest.externally_connectable, { ids: ['dldjgploldmldipplklepcpjdjhehald'] });
+  assert.deepEqual(manifest.externally_connectable, {
+    ids: [
+      'dldjgploldmldipplklepcpjdjhehald',
+      'afpcopjodphibggidgicpjnkgnfhhemi'
+    ]
+  });
 
   const esbuildSource = fs.readFileSync(new URL('../esbuild.config.mjs', import.meta.url), 'utf8');
   assert.match(esbuildSource, /entryPoints: \['src\/background\/ai-broker\.ts'\]/);
   assert.match(esbuildSource, /outfile: 'dist\/background\/ai-broker\.js'/);
+
+  const packSource = fs.readFileSync(new URL('../scripts/pack.mjs', import.meta.url), 'utf8');
+  assert.match(packSource, /STORE_EXTERNALLY_CONNECTABLE_IDS = \['dldjgploldmldipplklepcpjdjhehald'\]/);
+  assert.match(packSource, /externally_connectable: \{\s*ids: STORE_EXTERNALLY_CONNECTABLE_IDS\s*\}/);
 });
 
 test('AI broker redistribution review uses the Helper review contract', () => {

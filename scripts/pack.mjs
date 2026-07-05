@@ -6,6 +6,7 @@ import { collectFiles, packExtension } from '@nominy/babel-extension-build';
 
 const ROOT = resolve(import.meta.dirname, '..');
 const tempManifestPath = join(ROOT, '.tmp.store.manifest.json');
+const STORE_EXTERNALLY_CONNECTABLE_IDS = ['dldjgploldmldipplklepcpjdjhehald'];
 
 try {
   await packExtension({
@@ -19,6 +20,9 @@ try {
       const manifest = JSON.parse(readFileSync(join(ROOT, 'manifest.json'), 'utf-8').replace(/^\uFEFF/, ''));
       const storeManifest = {
         ...manifest,
+        externally_connectable: {
+          ids: STORE_EXTERNALLY_CONNECTABLE_IDS
+        },
         host_permissions: ['https://dashboard.babel.audio/*', 'https://reviewgen.ovh/*']
       };
       writeFileSync(tempManifestPath, `${JSON.stringify(storeManifest, null, 2)}\n`);
