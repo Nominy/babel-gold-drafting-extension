@@ -192,7 +192,7 @@ function ensureStyles(): void {
       font-size: 11px;
       font-weight: 700;
       text-decoration: none;
-      white-space: nowrap;
+      white-space: normal;
     }
 
     #${OVERLAY_ID} .bgd-support-link:hover {
@@ -558,7 +558,11 @@ export class DraftingOverlayController {
     const header = createElement('div', 'bgd-header');
     const titleWrap = createElement('div');
     const titleRow = createElement('div', 'bgd-header-title-row');
-    const supportLink = createElement('a', 'bgd-support-link', 'Support on Ko-fi');
+    const supportLink = createElement(
+      'a',
+      'bgd-support-link',
+      'if this extension saves you time, consider supporting development on Ko-Fi',
+    );
     supportLink.href = 'https://ko-fi.com/naftsan';
     supportLink.target = '_blank';
     supportLink.rel = 'noopener noreferrer';
