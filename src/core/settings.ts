@@ -2,6 +2,8 @@ import { createSettingsStore } from '@nominy/babel-extension-frontend';
 import type { ExtensionSettings } from './types';
 
 export const SETTINGS_STORAGE_KEY = 'babel_gold_drafting_settings';
+const DEFAULT_L0_CUSTOM_BASE_URL = 'http://127.0.0.1:8767';
+
 
 export const DEFAULT_SETTINGS: ExtensionSettings = {
   backendBaseUrl: 'https://reviewgen.ovh',
@@ -11,6 +13,9 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
   serviceTier: 'flex',
   reasoningEffort: 'low',
   aiBrokerProvider: 'auto',
+  l0ReplacementPreviewEnabled: false,
+  l0CustomBaseUrl: DEFAULT_L0_CUSTOM_BASE_URL,
+  l0DontRunLlm: false,
   audioInputEnabled: false
 };
 
@@ -18,6 +23,28 @@ function getStorageArea() {
   const chromeApi = globalThis.chrome;
   return chromeApi?.storage?.local ?? null;
 }
+export function normalizeL0CustomBaseUrl(input: unknown): string {
+  if (typeof input !== 'string' || !input.trim()) {
+    return DEFAULT_L0_CUSTOM_BASE_URL;
+  }
+
+  const candidate = input.trim();
+  try {
+    const url = new URL(candidate);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+      return DEFAULT_L0_CUSTOM_BASE_URL;
+    }
+    url.username = '';
+    url.password = '';
+    url.search = '';
+    url.hash = '';
+    url.pathname = url.pathname.replace(/\/+$/, '') || '/';
+    return url.toString().replace(/\/+$/, '');
+  } catch {
+    return DEFAULT_L0_CUSTOM_BASE_URL;
+  }
+}
+
 
 export function normalizeSettings(input: unknown): ExtensionSettings {
   const raw = input && typeof input === 'object' ? (input as Partial<ExtensionSettings>) : {};
@@ -48,6 +75,9 @@ export function normalizeSettings(input: unknown): ExtensionSettings {
     raw.aiBrokerProvider === 'local-gemini-nano'
       ? raw.aiBrokerProvider
       : DEFAULT_SETTINGS.aiBrokerProvider;
+  const l0ReplacementPreviewEnabled = raw.l0ReplacementPreviewEnabled === true;
+  const l0CustomBaseUrl = normalizeL0CustomBaseUrl(raw.l0CustomBaseUrl);
+  const l0DontRunLlm = raw.l0DontRunLlm === true;
   const audioInputEnabled = raw.audioInputEnabled === true;
 
   return {
@@ -58,6 +88,9 @@ export function normalizeSettings(input: unknown): ExtensionSettings {
     serviceTier,
     reasoningEffort,
     aiBrokerProvider,
+    l0ReplacementPreviewEnabled,
+    l0CustomBaseUrl,
+    l0DontRunLlm,
     audioInputEnabled
   };
 }

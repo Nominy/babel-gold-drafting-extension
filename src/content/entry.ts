@@ -27,7 +27,11 @@ function boot(): void {
 function enableAudioCaptureIfConfigured(): void {
   void loadSettings()
     .then((settings) => {
-      if (settings.audioInputEnabled || shouldUseRemoteBroker(settings.aiBrokerProvider)) {
+      if (
+        settings.audioInputEnabled ||
+        settings.l0ReplacementPreviewEnabled ||
+        shouldUseRemoteBroker(settings.aiBrokerProvider)
+      ) {
         window.postMessage({ type: AUDIO_ENABLE_CAPTURE_MESSAGE_TYPE }, '*');
       }
     })
