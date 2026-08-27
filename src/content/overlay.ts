@@ -1,6 +1,7 @@
 import { generateDraftStream } from '../core/backend-client';
 import { generateL0Draft } from '../core/l0-client';
 import { replaceTranscriptWithL0Rows } from '../core/l0-replacement-bridge';
+import { matchL0CreatedRows } from '../core/l0-created-row-matcher';
 import { assessAudioCaptureForDrafting, type AudioCaptureIssue } from '../core/audio-capture-guard';
 import { captureAudioTracksForDrafting } from '../core/audio-cues';
 import { loadSettings } from '../core/settings';
@@ -982,34 +983,13 @@ export class DraftingOverlayController {
     if (createdIds.size !== response.rows.length || response.rows.some((row) => !createdIds.has(row.id))) {
       throw new Error('Babel Helper returned incomplete or duplicate L0 row mappings.');
     }
-    const textByL0Id = new Map(response.rows.map((row) => [row.id, row.text]));
-    const replacementSnapshot = captureTranscriptJob();
-    const applyResult = applyDraftRows(
-      created.map((mapping) => {
-        const text = textByL0Id.get(mapping.id);
-        if (text === undefined) {
-          throw new Error(`Babel Helper returned an unknown L0 row mapping: ${mapping.id}.`);
-        }
-        return {
-          rowId: mapping.annotationId,
-          rewrittenText: text,
-          status: 'rewritten' as const,
-          warnings: []
-        };
-      })
-    );
-    if (applyResult.missingRowIds.length || applyResult.appliedCount !== created.length) {
-      throw new Error(
-        `Could not populate ${applyResult.missingRowIds.length || created.length - applyResult.appliedCount} replaced L0 segment(s).`
-      );
-    }
-
     const populatedJob = captureTranscriptJob();
-    this.state.capturedJob = replacementSnapshot;
+    const matchedRows = matchL0CreatedRows(response.rows, populatedJob.rows);
+    this.state.capturedJob = populatedJob;
     this.state.draftResponse = {
-      draftRows: created.map((mapping) => ({
-        rowId: mapping.annotationId,
-        rewrittenText: textByL0Id.get(mapping.id) || '',
+      draftRows: matchedRows.map(({ engineRow, capturedRow }) => ({
+        rowId: capturedRow.rowId,
+        rewrittenText: engineRow.text,
         status: 'rewritten',
         warnings: []
       })),
