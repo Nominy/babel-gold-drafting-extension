@@ -17,6 +17,10 @@ on:
         description: Request skipReview=true when the item is eligible
         type: boolean
         default: false
+      replace_pending_submission:
+        description: Cancel the current pending review before uploading this release
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -120,6 +124,7 @@ jobs:
           CWS_EXTENSION_ID: ${{ secrets.CWS_EXTENSION_ID }}
           CWS_PUBLISH_TYPE: ${{ inputs.publish_type || 'DEFAULT_PUBLISH' }}
           CWS_SKIP_REVIEW: ${{ inputs.skip_review || 'false' }}
+          CWS_CANCEL_PENDING: ${{ inputs.replace_pending_submission || 'false' }}
           CWS_ZIP_PATH: ${{ steps.metadata.outputs.zip_path }}
         run: node scripts/publish-cws.mjs
 
