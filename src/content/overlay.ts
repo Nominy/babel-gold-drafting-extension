@@ -1,4 +1,6 @@
 import { generateDraftStream } from '../core/backend-client';
+import { generateL0Draft } from '../core/l0-client';
+import { replaceTranscriptWithL0Rows } from '../core/l0-replacement-bridge';
 import { assessAudioCaptureForDrafting, type AudioCaptureIssue } from '../core/audio-capture-guard';
 import { captureAudioTracksForDrafting } from '../core/audio-cues';
 import { loadSettings } from '../core/settings';
@@ -64,7 +66,7 @@ function ensureStyles(): void {
       --bgd-font: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
 
-    #${BUTTON_ID} {
+    .bgd-toolbar-button {
       display: inline-flex;
       align-items: center;
       justify-content: center;
@@ -81,32 +83,32 @@ function ensureStyles(): void {
       flex: 0 0 auto;
     }
 
-    #${BUTTON_ID}:hover {
+    .bgd-toolbar-button:hover {
       background: #f3e8ff;
       border-color: #c084fc;
     }
 
-    #${BUTTON_ID}[data-state="loading"] {
+    .bgd-toolbar-button[data-state="loading"] {
       cursor: wait;
       opacity: 0.92;
     }
 
-    #${BUTTON_ID}[data-state="done"] {
+    .bgd-toolbar-button[data-state="done"] {
       background: var(--bgd-success);
       border-color: var(--bgd-success);
     }
 
-    #${BUTTON_ID}[data-state="error"] {
+    .bgd-toolbar-button[data-state="error"] {
       background: var(--bgd-danger);
       border-color: var(--bgd-danger);
     }
 
-    #${BUTTON_ID} .bgd-icon {
+    .bgd-toolbar-button .bgd-icon {
       font-size: 16px;
       line-height: 1;
     }
 
-    #${BUTTON_ID} .bgd-spinner {
+    .bgd-toolbar-button .bgd-spinner {
       width: 14px;
       height: 14px;
       border-radius: 50%;
@@ -115,12 +117,12 @@ function ensureStyles(): void {
       display: none;
     }
 
-    #${BUTTON_ID}[data-state="loading"] .bgd-spinner {
+    .bgd-toolbar-button[data-state="loading"] .bgd-spinner {
       display: inline-block;
       animation: bgd-spin 0.7s linear infinite;
     }
 
-    #${BUTTON_ID}[data-state="loading"] .bgd-icon {
+    .bgd-toolbar-button[data-state="loading"] .bgd-icon {
       display: none;
     }
 
@@ -465,6 +467,7 @@ export class DraftingOverlayController {
   private streamedSummary: DraftSummary | null = null;
   private streamedCompletedRows = 0;
   private streamedTotalRows = 0;
+  private activeDraftLabel = 'Gold / OpenRouter';
   private busy = false;
   private pendingAudioDraft: {
     capturedJob: TranscriptJob;
@@ -515,7 +518,7 @@ export class DraftingOverlayController {
     const button = document.createElement('button');
     button.id = BUTTON_ID;
     button.type = 'button';
-    button.dataset.state = 'idle';
+    button.className = 'bgd-toolbar-button';
     button.setAttribute('aria-label', 'Gold Draft');
     button.title = 'Gold Draft';
     button.innerHTML = `
@@ -529,6 +532,7 @@ export class DraftingOverlayController {
     host.appendChild(button);
     this.button = button;
   }
+
 
   private findToolbarHost(): HTMLElement | null {
     const anchor = document.querySelector(TOOLBAR_BUTTON_SELECTOR);
@@ -761,6 +765,7 @@ export class DraftingOverlayController {
     }
 
     const summary = createElement('div', 'bgd-summary');
+    summary.append(this.createSummaryPill(this.activeDraftLabel));
     summary.append(
       this.createSummaryPill(`Job ${this.state.capturedJob.jobId}`),
       this.createSummaryPill(`${this.state.capturedJob.rows.length} rows captured`)
@@ -889,6 +894,7 @@ export class DraftingOverlayController {
 
   private async runMagicDraft(): Promise<void> {
     this.openDialog();
+    this.activeDraftLabel = 'Gold / OpenRouter';
     this.clearAudioGuard();
     this.state = {
       capturedJob: null,
@@ -906,16 +912,34 @@ export class DraftingOverlayController {
       this.setButtonState('loading', 'Generating...');
       this.setStatus('Capturing transcript...');
 
-      const capturedJob = captureTranscriptJob();
+      let capturedJob = captureTranscriptJob();
       if (!capturedJob.rows.length) {
         throw new Error('No transcript rows detected on this page.');
       }
-
       this.state.capturedJob = capturedJob;
       this.streamedTotalRows = capturedJob.rows.length;
       this.render();
 
       const settings = await loadSettings();
+      if (settings.l0ReplacementPreviewEnabled) {
+        this.activeDraftLabel = settings.l0DontRunLlm
+          ? 'L0 replacement / no LLM'
+          : 'L0 replacement -> Gold / OpenRouter';
+        capturedJob = await this.runL0Replacement(capturedJob, settings);
+        this.state.capturedJob = capturedJob;
+        if (settings.l0DontRunLlm) {
+          this.setButtonState('done', 'L0 Replacement Ready');
+          window.setTimeout(() => this.setButtonState('idle', 'Gold Draft'), 1600);
+          return;
+        }
+        this.state.draftResponse = null;
+        this.streamedRows = [];
+        this.streamedSummary = null;
+        this.streamedCompletedRows = 0;
+        this.streamedTotalRows = capturedJob.rows.length;
+        this.render();
+      }
+
       if (!settings.openRouterApiKey) {
         throw new Error(
           'OpenRouter API key is required. Add your key in the Babel Gold Drafting extension options. Setup guide: https://youtu.be/F-p45lvkzyU?si=2glvFn-iJnKEs8MI'
@@ -941,6 +965,76 @@ export class DraftingOverlayController {
       this.render();
     }
   }
+
+  private async runL0Replacement(
+    capturedJob: TranscriptJob,
+    settings: ExtensionSettings
+  ): Promise<TranscriptJob> {
+    this.setStatus('Capturing exactly two WAV speaker tracks for L0 replacement...');
+    const audioTracks = await captureAudioTracksForDrafting();
+    this.logCapturedAudioTracks(audioTracks);
+    this.setStatus('Generating replacement segments with the self-hosted L0 endpoint...');
+    const response = await generateL0Draft(settings, capturedJob, audioTracks);
+
+    this.setStatus(`Replacing current transcript with ${response.rows.length} L0 segment(s) through Babel Helper...`);
+    const created = await replaceTranscriptWithL0Rows(response.rows);
+    const createdIds = new Set(created.map((mapping) => mapping.id));
+    if (createdIds.size !== response.rows.length || response.rows.some((row) => !createdIds.has(row.id))) {
+      throw new Error('Babel Helper returned incomplete or duplicate L0 row mappings.');
+    }
+    const textByL0Id = new Map(response.rows.map((row) => [row.id, row.text]));
+    const replacementSnapshot = captureTranscriptJob();
+    const applyResult = applyDraftRows(
+      created.map((mapping) => {
+        const text = textByL0Id.get(mapping.id);
+        if (text === undefined) {
+          throw new Error(`Babel Helper returned an unknown L0 row mapping: ${mapping.id}.`);
+        }
+        return {
+          rowId: mapping.annotationId,
+          rewrittenText: text,
+          status: 'rewritten' as const,
+          warnings: []
+        };
+      })
+    );
+    if (applyResult.missingRowIds.length || applyResult.appliedCount !== created.length) {
+      throw new Error(
+        `Could not populate ${applyResult.missingRowIds.length || created.length - applyResult.appliedCount} replaced L0 segment(s).`
+      );
+    }
+
+    const populatedJob = captureTranscriptJob();
+    this.state.capturedJob = replacementSnapshot;
+    this.state.draftResponse = {
+      draftRows: created.map((mapping) => ({
+        rowId: mapping.annotationId,
+        rewrittenText: textByL0Id.get(mapping.id) || '',
+        status: 'rewritten',
+        warnings: []
+      })),
+      summary: {
+        totalRows: created.length,
+        rewrittenRows: created.length,
+        unchangedRows: 0,
+        failedRows: 0,
+        anomalyCounts: {}
+      },
+      generationMeta: {
+        model: Object.keys(response.models).join(' + ') || 'L0 two-model engine',
+        rulePackVersion: 'l0-replacement',
+        generatedAt: new Date().toISOString()
+      }
+    };
+    this.setStatus(
+      settings.l0DontRunLlm
+        ? `L0 replacement complete: ${created.length} segment(s). LLM drafting was skipped.`
+        : `L0 replacement complete: ${created.length} segment(s). Recaptured transcript for Gold LLM drafting.`
+    );
+    this.render();
+    return populatedJob;
+  }
+
 
   private async generateDraftFromCapture(
     capturedJob: TranscriptJob,

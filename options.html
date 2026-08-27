@@ -143,6 +143,25 @@
         <label for="backendBaseUrl">Backend Base URL</label>
         <input id="backendBaseUrl" name="backendBaseUrl" placeholder="https://reviewgen.ovh" />
 
+        <label class="checkbox-row" for="l0ReplacementPreviewEnabled">
+          <input id="l0ReplacementPreviewEnabled" name="l0ReplacementPreviewEnabled" type="checkbox" />
+          <span>
+            L0 replacement research preview
+            <span class="field-help">Replaces current segments from exactly two captured audio lanes before optional Gold LLM drafting.</span>
+          </span>
+        </label>
+
+        <div data-role="l0-replacement-settings" hidden>
+          <label for="l0CustomBaseUrl">Self-hosted L0 Base URL</label>
+          <input id="l0CustomBaseUrl" name="l0CustomBaseUrl" inputmode="url" placeholder="http://127.0.0.1:8767" />
+          <p class="field-help">Posts directly to <code>/v1/draft</code>. No hosted service or fallback is used.</p>
+
+          <label class="checkbox-row" for="l0DontRunLlm">
+            <input id="l0DontRunLlm" name="l0DontRunLlm" type="checkbox" />
+            <span>Don't run the LLM</span>
+          </label>
+        </div>
+
         <label for="projectPreset">Project Preset</label>
         <select id="projectPreset" name="projectPreset">
           <option value="ru-gold-2sp-v1">Russian Gold 2-speaker v1</option>

@@ -11,6 +11,9 @@ export interface ExtensionSettings {
   serviceTier: OpenRouterServiceTier;
   reasoningEffort: OpenRouterReasoningEffort;
   aiBrokerProvider: AiBrokerProvider;
+  l0ReplacementPreviewEnabled: boolean;
+  l0CustomBaseUrl: string;
+  l0DontRunLlm: boolean;
   audioInputEnabled: boolean;
 }
 
@@ -35,6 +38,31 @@ export interface TranscriptRow {
 export interface TranscriptJob {
   jobId: string;
   rows: TranscriptRow[];
+}
+
+export interface L0DraftTrackSpec {
+  lane: string;
+  fieldName: string;
+}
+
+
+export interface L0DraftPayload {
+  taskId: string;
+  tracks: [L0DraftTrackSpec, L0DraftTrackSpec];
+}
+
+export interface L0DraftRow {
+  id: string;
+  lane: string;
+  startSeconds: number;
+  endSeconds: number;
+  text: string;
+}
+
+export interface L0DraftResponse {
+  rows: L0DraftRow[];
+  summary: Record<string, unknown>;
+  models: Record<string, unknown>;
 }
 
 export type DraftRowStatus = 'rewritten' | 'unchanged' | 'failed';

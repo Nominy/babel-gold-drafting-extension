@@ -1,10 +1,33 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_SETTINGS, normalizeSettings } from '../src/core/settings';
+import { DEFAULT_SETTINGS, normalizeL0CustomBaseUrl, normalizeSettings } from '../src/core/settings';
 
 test('audio input research preview is off by default', () => {
   assert.equal(DEFAULT_SETTINGS.audioInputEnabled, false);
   assert.equal(normalizeSettings({}).audioInputEnabled, false);
+});
+
+test('L0 replacement preview and LLM bypass are off by default', () => {
+  assert.equal(DEFAULT_SETTINGS.l0ReplacementPreviewEnabled, false);
+  assert.equal(DEFAULT_SETTINGS.l0DontRunLlm, false);
+  assert.equal(DEFAULT_SETTINGS.l0CustomBaseUrl, 'http://127.0.0.1:8767');
+});
+
+test('normalizeSettings persists the L0 replacement controls and trims its URL', () => {
+  const settings = normalizeSettings({
+    l0ReplacementPreviewEnabled: true,
+    l0CustomBaseUrl: ' https://draft.example.test/base///?ignored=1 ',
+    l0DontRunLlm: true
+  });
+  assert.equal(settings.l0ReplacementPreviewEnabled, true);
+  assert.equal(settings.l0CustomBaseUrl, 'https://draft.example.test/base');
+  assert.equal(settings.l0DontRunLlm, true);
+});
+
+test('normalizeL0CustomBaseUrl accepts only normalized HTTP bases', () => {
+  assert.equal(normalizeL0CustomBaseUrl('http://localhost:9000///'), 'http://localhost:9000');
+  assert.equal(normalizeL0CustomBaseUrl('file:///tmp/engine'), DEFAULT_SETTINGS.l0CustomBaseUrl);
+  assert.equal(normalizeL0CustomBaseUrl('not a URL'), DEFAULT_SETTINGS.l0CustomBaseUrl);
 });
 
 test('AI broker provider defaults to automatic remote fallback', () => {
