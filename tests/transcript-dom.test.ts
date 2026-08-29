@@ -116,7 +116,15 @@ test('captureTranscriptJob prefers the review action over a shared route identit
   assert.equal(job.jobId, 'review-action-new');
   assert.equal(
     buildCanonicalTaskIdentity(job),
-    '{"version":1,"baseTaskId":"review-action-new","stableLaneIds":["recording-a"]}'
+    '{"version":1,"baseTaskId":"review-action-new","stableLaneIds":[]}'
+  );
+  assert.equal(
+    buildCanonicalTaskIdentity({
+      ...job,
+      rows: job.rows.map((row) => ({ ...row, processedRecordingId: 'hidden-lane-change' }))
+    }),
+    buildCanonicalTaskIdentity(job),
+    'lane visibility must not change a review-scoped task identity'
   );
 });
 

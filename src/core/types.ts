@@ -38,6 +38,7 @@ export interface TranscriptRow {
 
 export interface TranscriptJob {
   jobId: string;
+  taskScoped?: boolean;
   rows: TranscriptRow[];
 }
 
