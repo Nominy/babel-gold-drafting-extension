@@ -29,6 +29,7 @@ export interface CapturedAudioTrack {
 export interface TranscriptRow {
   rowId: string;
   speakerKey: string;
+  processedRecordingId?: string;
   startSeconds: number | null;
   endSeconds: number | null;
   text: string;
@@ -61,6 +62,25 @@ export interface L0DraftRow {
 
 export interface L0DraftResponse {
   rows: L0DraftRow[];
+  summary: Record<string, unknown>;
+  models: Record<string, unknown>;
+}
+
+export interface L0TimingToken {
+  id: string;
+  text: string;
+  startSeconds: number;
+  endSeconds: number;
+}
+
+export interface L0TimingTrack {
+  lane: string;
+  tokens: L0TimingToken[];
+}
+
+export interface L0TimingResponse {
+  taskId: string;
+  tracks: L0TimingTrack[];
   summary: Record<string, unknown>;
   models: Record<string, unknown>;
 }

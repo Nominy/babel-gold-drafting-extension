@@ -2,7 +2,8 @@ import { createSettingsStore } from '@nominy/babel-extension-frontend';
 import type { ExtensionSettings } from './types';
 
 export const SETTINGS_STORAGE_KEY = 'babel_gold_drafting_settings';
-const DEFAULT_L0_CUSTOM_BASE_URL = 'http://127.0.0.1:8767';
+const DEFAULT_L0_CUSTOM_BASE_URL =
+  'https://reviewgen.ovh/a3f73d6cf25fa138be653daaf2d7cd0702c0b2d69c40fb9eaee4e07d4b067dd5';
 
 
 export const DEFAULT_SETTINGS: ExtensionSettings = {
@@ -13,10 +14,10 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
   serviceTier: 'flex',
   reasoningEffort: 'low',
   aiBrokerProvider: 'auto',
-  l0ReplacementPreviewEnabled: false,
+  l0ReplacementPreviewEnabled: true,
   l0CustomBaseUrl: DEFAULT_L0_CUSTOM_BASE_URL,
   l0DontRunLlm: false,
-  audioInputEnabled: false
+  audioInputEnabled: true
 };
 
 function getStorageArea() {
@@ -75,10 +76,16 @@ export function normalizeSettings(input: unknown): ExtensionSettings {
     raw.aiBrokerProvider === 'local-gemini-nano'
       ? raw.aiBrokerProvider
       : DEFAULT_SETTINGS.aiBrokerProvider;
-  const l0ReplacementPreviewEnabled = raw.l0ReplacementPreviewEnabled === true;
+  const l0ReplacementPreviewEnabled =
+    typeof raw.l0ReplacementPreviewEnabled === 'boolean'
+      ? raw.l0ReplacementPreviewEnabled
+      : DEFAULT_SETTINGS.l0ReplacementPreviewEnabled;
   const l0CustomBaseUrl = normalizeL0CustomBaseUrl(raw.l0CustomBaseUrl);
   const l0DontRunLlm = raw.l0DontRunLlm === true;
-  const audioInputEnabled = raw.audioInputEnabled === true;
+  const audioInputEnabled =
+    typeof raw.audioInputEnabled === 'boolean'
+      ? raw.audioInputEnabled
+      : DEFAULT_SETTINGS.audioInputEnabled;
 
   return {
     backendBaseUrl,

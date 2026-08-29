@@ -6,6 +6,12 @@ import { assessAudioCaptureForDrafting, type AudioCaptureIssue } from '../core/a
 import { captureAudioTracksForDrafting } from '../core/audio-cues';
 import { loadSettings } from '../core/settings';
 import { applyDraftRows, buildDiffPreviewItems, captureTranscriptJob, restoreCapturedRows } from '../core/transcript';
+import {
+  getL0TimingAvailability,
+  requestL0TimingRegeneration,
+  subscribeL0TimingAvailability,
+  type L0TimingAvailability
+} from './l0-timing-availability';
 import type {
   CapturedAudioTrack,
   DraftRowResult,
@@ -89,6 +95,12 @@ function ensureStyles(): void {
       border-color: #c084fc;
     }
 
+    .bgd-toolbar-button[data-timing-open="true"] {
+      border-radius: 8px 0 0 8px;
+      background: #f3e8ff;
+      border-color: #c084fc;
+    }
+
     .bgd-toolbar-button[data-state="loading"] {
       cursor: wait;
       opacity: 0.92;
@@ -125,6 +137,53 @@ function ensureStyles(): void {
 
     .bgd-toolbar-button[data-state="loading"] .bgd-icon {
       display: none;
+    }
+
+    .bgd-timing-hover-panel {
+      position: fixed;
+      z-index: 2147483647;
+      display: flex;
+      align-items: center;
+      width: max-content;
+      max-width: min(360px, calc(100vw - 24px));
+      height: 36px;
+      box-sizing: border-box;
+      padding: 0 12px;
+      border: 1px solid #c084fc;
+      border-left: 0;
+      border-radius: 0 8px 8px 0;
+      background: #f3e8ff;
+      color: var(--bgd-accent);
+      box-shadow: none;
+      font: 600 12px/1.2 var(--bgd-font);
+      white-space: nowrap;
+      opacity: 0;
+      pointer-events: none;
+      transform: translateX(-6px);
+      transition: opacity 130ms ease, transform 130ms ease;
+    }
+    .bgd-timing-hover-panel[data-open="true"] {
+      opacity: 1;
+      pointer-events: auto;
+      transform: translateX(0);
+    }
+    .bgd-timing-hover-panel .bgd-timing-state {
+      display: flex;
+      align-items: center;
+    }
+    .bgd-timing-hover-panel .bgd-timing-dot {
+      display: none;
+    }
+    .bgd-timing-hover-panel .bgd-timing-retry {
+      width: auto;
+      margin: 0 0 0 10px;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: var(--bgd-accent-hover);
+      font: 700 12px/1.2 var(--bgd-font);
+      text-decoration: underline;
+      cursor: pointer;
     }
 
     #${OVERLAY_ID} {
@@ -459,6 +518,10 @@ export class DraftingOverlayController {
   private applyButton: HTMLButtonElement | null = null;
   private restoreButton: HTMLButtonElement | null = null;
   private closeButton: HTMLButtonElement | null = null;
+  private timingPanel: HTMLDivElement | null = null;
+  private timingAvailability: L0TimingAvailability | null = null;
+  private timingAvailabilityDispose: (() => void) | null = null;
+  private timingPanelHideTimer: number | null = null;
   private state: DraftSessionState = {
     capturedJob: null,
     draftResponse: null,
@@ -479,6 +542,13 @@ export class DraftingOverlayController {
 
   mount(): void {
     ensureStyles();
+    if (!this.timingAvailabilityDispose) {
+      this.timingAvailability = getL0TimingAvailability();
+      this.timingAvailabilityDispose = subscribeL0TimingAvailability((availability) => {
+        this.timingAvailability = availability;
+        this.renderTimingPanel();
+      });
+    }
     this.ensureMagicButton();
     this.ensureOverlay();
     this.render();
@@ -492,6 +562,9 @@ export class DraftingOverlayController {
   unmount(): void {
     this.button?.remove();
     this.overlay?.remove();
+    this.timingPanel?.remove();
+    this.timingAvailabilityDispose?.();
+    if (this.timingPanelHideTimer !== null) window.clearTimeout(this.timingPanelHideTimer);
     this.button = null;
     this.overlay = null;
     this.dialogEl = null;
@@ -502,6 +575,9 @@ export class DraftingOverlayController {
     this.applyButton = null;
     this.restoreButton = null;
     this.closeButton = null;
+    this.timingPanel = null;
+    this.timingAvailabilityDispose = null;
+    this.timingPanelHideTimer = null;
   }
 
   private ensureButton(): void {
@@ -529,9 +605,91 @@ export class DraftingOverlayController {
     button.addEventListener('click', () => {
       void this.runMagicDraft();
     });
+    button.addEventListener('mouseenter', () => this.showTimingPanel());
+    button.addEventListener('mouseleave', () => this.scheduleTimingPanelHide());
+    button.addEventListener('focus', () => this.showTimingPanel());
+    button.addEventListener('blur', () => this.scheduleTimingPanelHide());
 
     host.appendChild(button);
     this.button = button;
+  }
+
+  private ensureTimingPanel(): HTMLDivElement {
+    if (this.timingPanel?.isConnected) return this.timingPanel;
+    const panel = createElement('div', 'bgd-timing-hover-panel');
+    panel.dataset.open = 'false';
+    panel.setAttribute('role', 'status');
+    panel.setAttribute('aria-live', 'polite');
+    const state = createElement('div', 'bgd-timing-state');
+    state.append(
+      createElement('span', 'bgd-timing-dot'),
+      createElement('span', 'bgd-timing-copy')
+    );
+    const retry = createElement('button', 'bgd-timing-retry', 'Regenerate timestamp data');
+    retry.type = 'button';
+    retry.addEventListener('click', () => {
+      if (requestL0TimingRegeneration()) {
+        this.timingAvailability = getL0TimingAvailability();
+        this.renderTimingPanel();
+      }
+    });
+    panel.addEventListener('mouseenter', () => this.cancelTimingPanelHide());
+    panel.addEventListener('mouseleave', () => this.scheduleTimingPanelHide());
+    panel.append(state, retry);
+    document.body.appendChild(panel);
+    this.timingPanel = panel;
+    this.renderTimingPanel();
+    return panel;
+  }
+
+  private showTimingPanel(): void {
+    this.cancelTimingPanelHide();
+    const panel = this.ensureTimingPanel();
+    const buttonRect = this.button?.getBoundingClientRect();
+    if (buttonRect) {
+      panel.style.top = `${buttonRect.top}px`;
+      panel.style.left = `${buttonRect.right - 1}px`;
+    }
+    if (this.button) this.button.dataset.timingOpen = 'true';
+    panel.dataset.open = 'true';
+  }
+
+  private scheduleTimingPanelHide(): void {
+    this.cancelTimingPanelHide();
+    this.timingPanelHideTimer = window.setTimeout(() => {
+      this.timingPanelHideTimer = null;
+      if (this.button) this.button.dataset.timingOpen = 'false';
+      if (this.timingPanel) this.timingPanel.dataset.open = 'false';
+    }, 180);
+  }
+
+  private cancelTimingPanelHide(): void {
+    if (this.timingPanelHideTimer === null) return;
+    window.clearTimeout(this.timingPanelHideTimer);
+    this.timingPanelHideTimer = null;
+  }
+
+  private renderTimingPanel(): void {
+    if (!this.timingPanel) return;
+    const availability = this.timingAvailability;
+    const status = availability?.status ?? 'unavailable';
+    const copyByStatus: Record<L0TimingAvailability['status'], string> = {
+      available: 'Timestamp data available',
+      unavailable: 'Timestamp data not available',
+      preparing: 'Generating timestamp data…',
+      queued:
+        availability?.status === 'queued'
+          ? `Timestamp generation queued · #${availability.position}`
+          : 'Timestamp generation queued',
+      running: 'Generating timestamp data…',
+      retrying: 'Retrying timestamp generation…'
+    };
+    this.timingPanel.dataset.status = status;
+    this.timingPanel.dataset.taskId = availability?.taskId ?? '';
+    const copy = this.timingPanel.querySelector<HTMLElement>('.bgd-timing-copy');
+    if (copy) copy.textContent = copyByStatus[status];
+    const retry = this.timingPanel.querySelector<HTMLButtonElement>('.bgd-timing-retry');
+    if (retry) retry.hidden = status !== 'unavailable';
   }
 
 
@@ -748,7 +906,7 @@ export class DraftingOverlayController {
   }
 
   private async captureAudioTracksWithStatus(): Promise<CapturedAudioTrack[]> {
-    this.setStatus('Capturing available audio for research preview...');
+    this.setStatus('Capturing available task audio...');
     const tracks = await captureAudioTracksForDrafting().catch(() => []);
     this.logCapturedAudioTracks(tracks);
     return tracks;

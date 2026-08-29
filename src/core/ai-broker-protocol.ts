@@ -2,7 +2,8 @@ import type {
   AiBrokerProvider,
   BrokerRedistributionGroup,
   BrokerRedistributeTextResult,
-  BrokerTranscriptSegment
+  BrokerTranscriptSegment,
+  TranscriptRow
 } from './types';
 
 export const AI_BROKER_EXTERNAL_MESSAGE_TYPE = 'babel-gold-drafting:ai-broker';
@@ -11,7 +12,7 @@ export const AI_BROKER_PORT_NAME = 'babel-gold-drafting:ai-broker-port';
 export const AI_BROKER_INTERNAL_PORT_NAME = 'babel-gold-drafting:ai-broker-tab-port';
 export const AI_BROKER_EXTENSION_ID_ATTR = 'data-babel-gold-drafting-extension-id';
 
-export type AiBrokerOperation = 'ping' | 'transcribeSegment' | 'redistributeText';
+export type AiBrokerOperation = 'ping' | 'transcribeSegment' | 'transcribeSegmentL0' | 'redistributeText';
 
 export interface AiBrokerBaseRequest {
   type: typeof AI_BROKER_EXTERNAL_MESSAGE_TYPE;
@@ -29,6 +30,12 @@ export interface AiBrokerTranscribeSegmentRequest extends AiBrokerBaseRequest {
   segment: BrokerTranscriptSegment;
 }
 
+export interface AiBrokerTranscribeSegmentL0Request extends AiBrokerBaseRequest {
+  operation: 'transcribeSegmentL0';
+  taskId: string;
+  row: TranscriptRow;
+}
+
 export interface AiBrokerRedistributeTextRequest extends AiBrokerBaseRequest {
   operation: 'redistributeText';
   groups: BrokerRedistributionGroup[];
@@ -37,6 +44,7 @@ export interface AiBrokerRedistributeTextRequest extends AiBrokerBaseRequest {
 export type AiBrokerExternalRequest =
   | AiBrokerPingRequest
   | AiBrokerTranscribeSegmentRequest
+  | AiBrokerTranscribeSegmentL0Request
   | AiBrokerRedistributeTextRequest;
 
 type AiBrokerInternalRequestFor<T extends AiBrokerExternalRequest> = Omit<T, 'type'> & {
@@ -46,6 +54,7 @@ type AiBrokerInternalRequestFor<T extends AiBrokerExternalRequest> = Omit<T, 'ty
 export type AiBrokerInternalRequest =
   | AiBrokerInternalRequestFor<AiBrokerPingRequest>
   | AiBrokerInternalRequestFor<AiBrokerTranscribeSegmentRequest>
+  | AiBrokerInternalRequestFor<AiBrokerTranscribeSegmentL0Request>
   | AiBrokerInternalRequestFor<AiBrokerRedistributeTextRequest>;
 
 export interface AiBrokerPingResponse {
@@ -54,6 +63,7 @@ export interface AiBrokerPingResponse {
   remoteConfigured: boolean;
   capabilities: {
     transcribeSegment: boolean;
+    transcribeSegmentL0: boolean;
     redistributeText: boolean;
   };
 }
@@ -65,6 +75,14 @@ export interface AiBrokerTranscribeSegmentResponse {
   model: string;
 }
 
+
+export interface AiBrokerTranscribeSegmentL0Response {
+  ok: true;
+  provider: 'local-l0';
+  result: {
+    text: string;
+  };
+}
 export interface AiBrokerRedistributeTextResponse {
   ok: true;
   provider: 'remote-openrouter';
@@ -78,6 +96,7 @@ export interface AiBrokerUnavailableResponse {
     | 'invalid-request'
     | 'provider-local-gemini-nano'
     | 'remote-not-configured'
+    | 'stale-task'
     | 'missing-tab'
     | 'tab-broker-unavailable'
     | 'broker-error';
@@ -88,6 +107,7 @@ export interface AiBrokerUnavailableResponse {
 export type AiBrokerResponse =
   | AiBrokerPingResponse
   | AiBrokerTranscribeSegmentResponse
+  | AiBrokerTranscribeSegmentL0Response
   | AiBrokerRedistributeTextResponse
   | AiBrokerUnavailableResponse;
 

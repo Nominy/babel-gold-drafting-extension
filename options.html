@@ -146,15 +146,15 @@
         <label class="checkbox-row" for="l0ReplacementPreviewEnabled">
           <input id="l0ReplacementPreviewEnabled" name="l0ReplacementPreviewEnabled" type="checkbox" />
           <span>
-            L0 replacement research preview
-            <span class="field-help">Replaces current segments from exactly two captured audio lanes before optional Gold LLM drafting.</span>
+            L0 replacement
+            <span class="field-help">Enabled by default. Replaces current segments from two captured audio lanes before optional Gold LLM drafting.</span>
           </span>
         </label>
 
         <div data-role="l0-replacement-settings" hidden>
-          <label for="l0CustomBaseUrl">Self-hosted L0 Base URL</label>
-          <input id="l0CustomBaseUrl" name="l0CustomBaseUrl" inputmode="url" placeholder="http://127.0.0.1:8767" />
-          <p class="field-help">Posts directly to <code>/v1/draft</code>. No hosted service or fallback is used.</p>
+          <label for="l0CustomBaseUrl">L0 Base URL</label>
+          <input id="l0CustomBaseUrl" name="l0CustomBaseUrl" inputmode="url" placeholder="https://reviewgen.ovh/a3f73d6cf25fa138be653daaf2d7cd0702c0b2d69c40fb9eaee4e07d4b067dd5" />
+          <p class="field-help">Uses the free hosted L0 service by default and posts to <code>/v1/draft</code>. Enter a self-hosted base URL to override it.</p>
 
           <label class="checkbox-row" for="l0DontRunLlm">
             <input id="l0DontRunLlm" name="l0DontRunLlm" type="checkbox" />
@@ -210,9 +210,9 @@
         <label class="checkbox-row" for="audioInputEnabled">
           <input id="audioInputEnabled" name="audioInputEnabled" type="checkbox" />
           <span>
-            Audio input research preview
+            Audio-enhanced drafting
             <span class="field-help">
-              Off by default. When enabled, Babel page audio can be collected and sent with drafting requests for experimental audio cue tags.
+              Enabled by default. Sends available task audio with drafting requests so audio-capable models can add audible-event and vocal-style tags.
             </span>
           </span>
         </label>

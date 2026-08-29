@@ -162,7 +162,9 @@ async function handleBrokerRequest(
   sender: chrome.runtime.MessageSender
 ): Promise<AiBrokerResponse> {
   const settings = await loadSettings();
-  const fallbackAllowed = providerAllowsLocalFallback(settings.aiBrokerProvider);
+  const fallbackAllowed = request.operation === 'transcribeSegmentL0'
+    ? false
+    : providerAllowsLocalFallback(settings.aiBrokerProvider);
   const remoteConfigured = Boolean(settings.openRouterApiKey);
 
   if (request.operation === 'ping') {
@@ -172,16 +174,17 @@ async function handleBrokerRequest(
       remoteConfigured,
       capabilities: {
         transcribeSegment: shouldUseRemoteBroker(settings.aiBrokerProvider) && remoteConfigured,
+        transcribeSegmentL0: true,
         redistributeText: shouldUseRemoteBroker(settings.aiBrokerProvider) && remoteConfigured
       }
     };
   }
 
-  if (!shouldUseRemoteBroker(settings.aiBrokerProvider)) {
+  if (request.operation !== 'transcribeSegmentL0' && !shouldUseRemoteBroker(settings.aiBrokerProvider)) {
     return unavailable('provider-local-gemini-nano', 'Gold Drafting is configured to use local Gemini Nano.', true);
   }
 
-  if (!remoteConfigured) {
+  if (request.operation !== 'transcribeSegmentL0' && !remoteConfigured) {
     return unavailable('remote-not-configured', 'Gold Drafting OpenRouter API key is not configured.', fallbackAllowed);
   }
 
@@ -198,7 +201,9 @@ async function handleBrokerPortRequest(
   port: chrome.runtime.Port
 ): Promise<void> {
   const settings = await loadSettings();
-  const fallbackAllowed = providerAllowsLocalFallback(settings.aiBrokerProvider);
+  const fallbackAllowed = request.operation === 'transcribeSegmentL0'
+    ? false
+    : providerAllowsLocalFallback(settings.aiBrokerProvider);
   const remoteConfigured = Boolean(settings.openRouterApiKey);
 
   postPortMessage(port, {
@@ -217,6 +222,7 @@ async function handleBrokerPortRequest(
         remoteConfigured,
         capabilities: {
           transcribeSegment: shouldUseRemoteBroker(settings.aiBrokerProvider) && remoteConfigured,
+          transcribeSegmentL0: true,
           redistributeText: shouldUseRemoteBroker(settings.aiBrokerProvider) && remoteConfigured
         }
       }
@@ -224,7 +230,7 @@ async function handleBrokerPortRequest(
     return;
   }
 
-  if (!shouldUseRemoteBroker(settings.aiBrokerProvider)) {
+  if (request.operation !== 'transcribeSegmentL0' && !shouldUseRemoteBroker(settings.aiBrokerProvider)) {
     postPortMessage(port, {
       type: 'error',
       response: unavailable('provider-local-gemini-nano', 'Gold Drafting is configured to use local Gemini Nano.', true) as Extract<AiBrokerResponse, { ok: false }>
@@ -232,7 +238,7 @@ async function handleBrokerPortRequest(
     return;
   }
 
-  if (!remoteConfigured) {
+  if (request.operation !== 'transcribeSegmentL0' && !remoteConfigured) {
     postPortMessage(port, {
       type: 'error',
       response: unavailable('remote-not-configured', 'Gold Drafting OpenRouter API key is not configured.', fallbackAllowed) as Extract<AiBrokerResponse, { ok: false }>

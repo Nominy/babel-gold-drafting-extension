@@ -10,8 +10,11 @@ import {
 } from '../core/ai-broker-protocol';
 import { captureAudioTracksForDrafting } from '../core/audio-cues';
 import { redistributeTextWithBroker, transcribeSegmentWithBroker } from '../core/backend-client';
+import { generateL0SegmentDraft } from '../core/l0-client';
+import { prepareL0TimingTracks } from '../core/l0-timing-client';
 import { loadSettings } from '../core/settings';
-import type { ExtensionSettings } from '../core/types';
+import { buildCanonicalTaskIdentity, captureTranscriptJob } from '../core/transcript';
+import type { ExtensionSettings, TranscriptRow } from '../core/types';
 
 const AI_BROKER_CONTENT_BUILD = 'port-stream-postmortem-2026-06-23';
 const AI_BROKER_CONTENT_BUILD_ATTR = 'data-babel-gold-drafting-ai-broker-build';
@@ -97,11 +100,74 @@ function logBrokerRequestFailure(
   console.error('[Babel Gold Drafting] Helper AI broker request failed', details);
 }
 
+
+function isValidL0TargetRow(row: TranscriptRow): boolean {
+  return Boolean(
+    row &&
+      typeof row.rowId === 'string' &&
+      row.rowId.trim() &&
+      typeof row.speakerKey === 'string' &&
+      row.speakerKey.trim() &&
+      typeof row.startSeconds === 'number' &&
+      Number.isFinite(row.startSeconds) &&
+      row.startSeconds >= 0 &&
+      typeof row.endSeconds === 'number' &&
+      Number.isFinite(row.endSeconds) &&
+      row.endSeconds > row.startSeconds
+  );
+}
+
+function captureCurrentCanonicalTaskId(): string {
+  return buildCanonicalTaskIdentity(captureTranscriptJob());
+}
 async function handleBrokerRequest(
   message: AiBrokerInternalRequest,
   emit?: (message: AiBrokerPortMessage) => void
 ): Promise<AiBrokerResponse> {
   const settings = await loadSettings();
+
+  if (message.operation === 'transcribeSegmentL0') {
+    if (
+      typeof message.taskId !== 'string' ||
+      !message.taskId.trim() ||
+      !isValidL0TargetRow(message.row) ||
+      captureCurrentCanonicalTaskId() !== message.taskId
+    ) {
+      return brokerError('stale-task', 'The requested transcript task is no longer current.', false);
+    }
+    if (emit) {
+      emit({ type: 'event', event: 'capturing-audio', operation: message.operation, message: 'Capturing Babel segment audio.' });
+    }
+    const audioTracks = await captureAudioTracksForDrafting();
+    if (captureCurrentCanonicalTaskId() !== message.taskId) {
+      return brokerError('stale-task', 'The transcript task changed while audio was being captured.', false);
+    }
+    const targetRow: TranscriptRow = {
+      ...message.row,
+      rowId: message.row.rowId.trim(),
+      speakerKey: message.row.speakerKey.trim(),
+      text: '',
+      index: 0
+    };
+    const segmentJob = { jobId: message.taskId, rows: [targetRow] };
+    const tracks = prepareL0TimingTracks(segmentJob, audioTracks);
+    if (emit) {
+      emit({ type: 'event', event: 'calling-backend', operation: message.operation, message: 'Calling the local L0 drafting engine.' });
+    }
+    const text = await withBrokerBackendProgress(
+      message.operation,
+      emit,
+      () => generateL0SegmentDraft(settings, message.taskId, targetRow, tracks)
+    );
+    if (captureCurrentCanonicalTaskId() !== message.taskId) {
+      return brokerError('stale-task', 'The transcript task changed before L0 drafting completed.', false);
+    }
+    return {
+      ok: true,
+      provider: 'local-l0',
+      result: { text }
+    };
+  }
   const fallbackAllowed = providerAllowsLocalFallback(settings.aiBrokerProvider);
 
   if (!shouldUseRemoteBroker(settings.aiBrokerProvider)) {

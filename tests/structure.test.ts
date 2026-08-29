@@ -45,12 +45,12 @@ test('Gold Draft work surface includes a small Ko-fi link beside the overlay hea
   assert.match(overlaySource, /bgd-support-link/);
 });
 
-test('L0 replacement preview is gated in settings and integrated into Gold generation', () => {
+test('L0 replacement is enabled in settings and integrated into Gold generation', () => {
   const optionsSource = fs.readFileSync(new URL('../options.html', import.meta.url), 'utf8');
   const overlaySource = fs.readFileSync(new URL('../src/content/overlay.ts', import.meta.url), 'utf8');
   const manifest = JSON.parse(fs.readFileSync(new URL('../manifest.json', import.meta.url), 'utf8'));
 
-  assert.match(optionsSource, /L0 replacement research preview/);
+  assert.match(optionsSource, /L0 replacement/);
   assert.match(optionsSource, /id="l0ReplacementPreviewEnabled"/);
   assert.match(optionsSource, /Don't run the LLM/);
   assert.doesNotMatch(optionsSource, /Bearer Token/);
