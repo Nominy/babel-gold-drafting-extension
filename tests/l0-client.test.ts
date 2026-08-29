@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { generateL0Draft, getL0DraftEndpoint } from '../src/core/l0-client';
+import { generateL0Draft, generateL0SegmentDraft, getL0DraftEndpoint } from '../src/core/l0-client';
 import { DEFAULT_SETTINGS } from '../src/core/settings';
 import type { CapturedAudioTrack, TranscriptJob } from '../src/core/types';
 
@@ -31,11 +31,18 @@ const canonicalResponse = {
   models: { asr: 'qwen', formatter: 'punctuation' }
 };
 
-test('L0 routing normalizes the configured self-host base and only uses v1/draft', () => {
-  assert.equal(getL0DraftEndpoint(DEFAULT_SETTINGS), 'http://127.0.0.1:8767/v1/draft');
+test('L0 routing uses the hosted default and normalizes custom self-host bases', () => {
+  assert.equal(
+    getL0DraftEndpoint(DEFAULT_SETTINGS),
+    'https://reviewgen.ovh/a3f73d6cf25fa138be653daaf2d7cd0702c0b2d69c40fb9eaee4e07d4b067dd5/v1/draft'
+  );
   assert.equal(
     getL0DraftEndpoint({ ...DEFAULT_SETTINGS, l0CustomBaseUrl: 'https://engine.example.test/root///' }),
     'https://engine.example.test/root/v1/draft'
+  );
+  assert.equal(
+    getL0DraftEndpoint({ ...DEFAULT_SETTINGS, l0CustomBaseUrl: 'not a URL' }),
+    'https://reviewgen.ovh/a3f73d6cf25fa138be653daaf2d7cd0702c0b2d69c40fb9eaee4e07d4b067dd5/v1/draft'
   );
 });
 
@@ -72,6 +79,71 @@ test('generateL0Draft sends unsegmented canonical payload and exactly two WAV pa
     const headers = requestInit.headers as Record<string, string>;
     assert.equal(headers.Authorization, undefined);
     assert.equal(headers['X-Babel-Local-Engine'], '1');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('free L0 segment drafting sends one empty preserved row through the draft endpoint', async () => {
+  let requestInit: RequestInit | undefined;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+    requestInit = init;
+    return new Response(JSON.stringify({
+      rows: [
+        {
+          id: 'empty-row',
+          lane: 'speaker-1',
+          startSeconds: 4,
+          endSeconds: 7,
+          text: 'Пунктуированный текст.'
+        }
+      ],
+      summary: { rowCount: 1 },
+      models: { asr: 'gigaam', l2: 'punctuation' }
+    }), { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const text = await generateL0SegmentDraft(
+      { ...DEFAULT_SETTINGS, l0CustomBaseUrl: 'https://engine.test' },
+      'canonical-task',
+      {
+        rowId: 'empty-row',
+        speakerKey: 'speaker-1',
+        startSeconds: 4,
+        endSeconds: 7,
+        text: '',
+        index: 0
+      },
+      [
+        { lane: 'speaker-1', fieldName: 'audio:1', audio: tracks[0] },
+        { lane: 'speaker-2', fieldName: 'audio:2', audio: tracks[1] }
+      ]
+    );
+
+    assert.equal(text, 'Пунктуированный текст.');
+    assert.ok(requestInit?.body instanceof FormData);
+    const form = requestInit.body;
+    assert.deepEqual(JSON.parse(String(form.get('payload'))), {
+      taskId: 'canonical-task',
+      tracks: [
+        { lane: 'speaker-1', fieldName: 'audio:1' },
+        { lane: 'speaker-2', fieldName: 'audio:2' }
+      ],
+      options: {
+        preserveRows: [
+          {
+            rowId: 'empty-row',
+            speakerKey: 'speaker-1',
+            startSeconds: 4,
+            endSeconds: 7,
+            text: '',
+            index: 0
+          }
+        ]
+      }
+    });
   } finally {
     globalThis.fetch = originalFetch;
   }

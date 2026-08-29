@@ -6,15 +6,22 @@ import {
   ROW_TEXTAREA_SELECTOR,
   setControlledTextareaValue
 } from './dom';
+import { PAGE_TASK_ID_ATTRIBUTE } from './audio-intercept-protocol';
 import type { ApplyDraftResult, DiffPreviewItem, DraftRowResult, TranscriptJob, TranscriptRow } from './types';
 
 type RowIdentity = {
   rowId: string | null;
   speakerKey: string;
+  processedRecordingId: string;
   startText: string;
   endText: string;
   startSeconds: number | null;
   endSeconds: number | null;
+};
+
+type ReactFiberNode = {
+  memoizedProps?: unknown;
+  return?: ReactFiberNode | null;
 };
 
 function readFiniteNumber(value: unknown): number | null {
@@ -69,6 +76,7 @@ function readRowIdentity(row: HTMLTableRowElement): RowIdentity {
   const identity: RowIdentity = {
     rowId: null,
     speakerKey: visibleCells.speakerKey,
+    processedRecordingId: '',
     startText: visibleCells.startText,
     endText: visibleCells.endText,
     startSeconds: visibleCells.startSeconds,
@@ -94,11 +102,11 @@ function readRowIdentity(row: HTMLTableRowElement): RowIdentity {
 
     if (annotation && typeof annotation.id === 'string' && annotation.id.trim()) {
       identity.rowId = annotation.id.trim();
-      const processedRecordingId =
+      identity.processedRecordingId =
         annotation.processedRecordingId != null ? String(annotation.processedRecordingId).trim() : '';
       const trackLabel = typeof annotation.trackLabel === 'string' ? annotation.trackLabel.trim() : '';
-      if (processedRecordingId || trackLabel) {
-        identity.speakerKey = processedRecordingId || trackLabel;
+      if (identity.processedRecordingId || trackLabel) {
+        identity.speakerKey = identity.processedRecordingId || trackLabel;
       }
       identity.startSeconds = readFiniteNumber(annotation.startTimeInSeconds) ?? identity.startSeconds;
       identity.endSeconds = readFiniteNumber(annotation.endTimeInSeconds) ?? identity.endSeconds;
@@ -112,6 +120,35 @@ function readRowIdentity(row: HTMLTableRowElement): RowIdentity {
   return identity;
 }
 
+function readReviewActionId(row: HTMLTableRowElement): string {
+  const textarea = row.querySelector<HTMLTextAreaElement>(ROW_TEXTAREA_SELECTOR);
+  const seeds = [getReactFiber(row), getReactFiber(textarea)].filter(Boolean) as ReactFiberNode[];
+  for (const seed of seeds) {
+    let current: ReactFiberNode | null = seed;
+    let depth = 0;
+    while (current && depth <= 30) {
+      const props = current.memoizedProps;
+      if (props && typeof props === 'object' && 'reviewActionId' in props) {
+        const reviewActionId = (props as Record<string, unknown>).reviewActionId;
+        if (typeof reviewActionId === 'string' && reviewActionId.trim()) {
+          return reviewActionId.trim();
+        }
+      }
+      current = current.return ?? null;
+      depth += 1;
+    }
+  }
+  return '';
+}
+
+function readPublishedReviewActionId(root: ParentNode): string {
+  const documentRef =
+    'documentElement' in root
+      ? (root as Document)
+      : ((root as Node).ownerDocument ?? null);
+  return documentRef?.documentElement?.getAttribute(PAGE_TASK_ID_ATTRIBUTE)?.trim() || '';
+}
+
 function makeFallbackRowId(identity: RowIdentity, rowIndex: number): string {
   return `row:${identity.speakerKey}:${identity.startText}:${identity.endText}:${rowIndex}`;
 }
@@ -120,26 +157,41 @@ export function buildJobId(locationLike: Pick<Location, 'pathname' | 'search'> =
   const search = locationLike.search || '';
   const pathname = locationLike.pathname || '';
   const query = new URLSearchParams(search);
-  const explicitId =
-    query.get('jobId') ||
-    query.get('transcriptionChunkId') ||
-    query.get('annotationId') ||
-    query.get('id');
+  const explicitId = ['jobId', 'transcriptionChunkId', 'annotationId', 'id']
+    .map((key) => query.get(key)?.trim() || '')
+    .find(Boolean);
 
-  return explicitId ? explicitId.trim() : `${pathname}${search}`;
+  return explicitId || `${pathname}${search}`;
+}
+
+export function buildCanonicalTaskIdentity(job: Pick<TranscriptJob, 'jobId' | 'rows'>): string {
+  const processedRecordingIds = job.rows
+    .map((row) => row.processedRecordingId?.trim() || '')
+    .filter(Boolean);
+  const laneValues = processedRecordingIds.length > 0
+    ? processedRecordingIds
+    : job.rows.map((row) => row.speakerKey.trim()).filter(Boolean);
+  const stableLaneIds = Array.from(new Set(laneValues)).sort();
+  return JSON.stringify({
+    version: 1,
+    baseTaskId: job.jobId.trim(),
+    stableLaneIds
+  });
 }
 
 export function captureTranscriptJob(
   root: ParentNode = document,
   locationLike: Pick<Location, 'pathname' | 'search'> = window.location
 ): TranscriptJob {
-  const rows = getTranscriptRowElements(root).map<TranscriptRow>((row, index) => {
+  const rowElements = getTranscriptRowElements(root);
+  const rows = rowElements.map<TranscriptRow>((row, index) => {
     const identity = readRowIdentity(row);
     const textarea = row.querySelector<HTMLTextAreaElement>(ROW_TEXTAREA_SELECTOR);
 
     return {
       rowId: identity.rowId || makeFallbackRowId(identity, index),
       speakerKey: identity.speakerKey,
+      ...(identity.processedRecordingId ? { processedRecordingId: identity.processedRecordingId } : {}),
       startSeconds: identity.startSeconds,
       endSeconds: identity.endSeconds,
       text: textarea?.value || '',
@@ -147,8 +199,12 @@ export function captureTranscriptJob(
     };
   });
 
+  const reviewActionId =
+    readPublishedReviewActionId(root)
+    || rowElements.map(readReviewActionId).find(Boolean)
+    || '';
   return {
-    jobId: buildJobId(locationLike),
+    jobId: reviewActionId || buildJobId(locationLike),
     rows
   };
 }

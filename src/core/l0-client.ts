@@ -11,7 +11,7 @@ import type {
 const L0_CUSTOM_PATH = '/v1/draft';
 const WAV_HEADER_BYTES = 12;
 
-type PreparedL0Track = {
+export type PreparedL0Track = {
   lane: string;
   fieldName: 'audio:1' | 'audio:2';
   audio: CapturedAudioTrack;
@@ -92,7 +92,7 @@ function parseL0DraftResponse(payload: unknown): L0DraftResponse {
   return payload as L0DraftResponse;
 }
 
-function prepareTracks(job: TranscriptJob, audioTracks: CapturedAudioTrack[]): PreparedL0Track[] {
+export function prepareL0Tracks(job: TranscriptJob, audioTracks: CapturedAudioTrack[]): PreparedL0Track[] {
   const laneByKey = new Map<string, string>();
   for (const row of job.rows) {
     const key = normalizedLane(row.speakerKey);
@@ -125,7 +125,7 @@ function prepareTracks(job: TranscriptJob, audioTracks: CapturedAudioTrack[]): P
   });
 }
 
-async function assertWavAudio(track: PreparedL0Track): Promise<void> {
+export async function assertL0WavAudio(track: PreparedL0Track): Promise<void> {
   if (!track.audio.blob.size) {
     throw new Error(`L0 audio track for "${track.lane}" is empty.`);
   }
@@ -138,7 +138,7 @@ async function assertWavAudio(track: PreparedL0Track): Promise<void> {
     throw new Error(`L0 audio track for "${track.lane}" is not a WAV file.`);
   }
 }
-function createPayload(job: TranscriptJob, tracks: PreparedL0Track[]): L0DraftPayload {
+export function createL0Payload(job: TranscriptJob, tracks: PreparedL0Track[]): L0DraftPayload {
   return {
     taskId: job.jobId,
     tracks: [
@@ -146,6 +146,56 @@ function createPayload(job: TranscriptJob, tracks: PreparedL0Track[]): L0DraftPa
       { lane: tracks[1].lane, fieldName: tracks[1].fieldName }
     ]
   };
+}
+
+export async function generateL0SegmentDraft(
+  settings: ExtensionSettings,
+  taskId: string,
+  row: TranscriptJob['rows'][number],
+  tracks: PreparedL0Track[]
+): Promise<string> {
+  if (tracks.length !== 2 || !tracks.some((track) => track.lane === row.speakerKey)) {
+    throw new Error('L0 segment drafting requires two audio tracks including the target speaker lane.');
+  }
+  await Promise.all(tracks.map(assertL0WavAudio));
+  const body = new FormData();
+  body.set('payload', JSON.stringify({
+    taskId,
+    tracks: tracks.map((track) => ({ lane: track.lane, fieldName: track.fieldName })),
+    options: {
+      preserveRows: [{
+        rowId: row.rowId,
+        speakerKey: row.speakerKey,
+        startSeconds: row.startSeconds,
+        endSeconds: row.endSeconds,
+        text: '',
+        index: 0
+      }]
+    }
+  }));
+  for (const track of tracks) {
+    body.append(track.fieldName, track.audio.blob, `${track.fieldName.replace(':', '-')}.wav`);
+  }
+
+  const endpoint = getL0DraftEndpoint(settings);
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'X-Babel-Local-Engine': '1'
+    },
+    body
+  });
+  const responsePayload = await parseResponsePayload(response);
+  if (!response.ok) {
+    throw new Error(`L0 segment drafting failed: ${parseErrorMessage(response.status, responsePayload)}`);
+  }
+  const parsed = parseL0DraftResponse(responsePayload);
+  const result = parsed.rows.find((candidate) => candidate.id === row.rowId);
+  if (!result?.text.trim()) {
+    throw new Error('L0 segment drafting response did not contain the target row.');
+  }
+  return result.text.trim();
 }
 
 export function getL0DraftEndpoint(settings: ExtensionSettings): string {
@@ -157,9 +207,9 @@ export async function generateL0Draft(
   job: TranscriptJob,
   audioTracks: CapturedAudioTrack[]
 ): Promise<L0DraftResponse> {
-  const tracks = prepareTracks(job, audioTracks);
-  await Promise.all(tracks.map(assertWavAudio));
-  const payload = createPayload(job, tracks);
+  const tracks = prepareL0Tracks(job, audioTracks);
+  await Promise.all(tracks.map(assertL0WavAudio));
+  const payload = createL0Payload(job, tracks);
   const body = new FormData();
   body.set('payload', JSON.stringify(payload));
   for (const track of tracks) {

@@ -1,9 +1,8 @@
 import { DraftingOverlayController } from './overlay';
 import { publishGoldDraftingExtensionId, registerAiBrokerContentHandler } from './ai-broker-content';
 import { registerLifecycle } from '../core/lifecycle';
-import { loadSettings } from '../core/settings';
-import { shouldUseRemoteBroker } from '../core/ai-broker-protocol';
-import { AUDIO_ENABLE_CAPTURE_MESSAGE_TYPE } from '../core/audio-intercept-protocol';
+import { enableL0TimingAudioCapture, registerL0TimingService } from './l0-timing-service';
+import { refreshPageTaskIdentity } from './page-task-identity';
 
 declare global {
   interface Window {
@@ -19,26 +18,16 @@ function boot(): void {
   window.__babelGoldDraftingInstalled = true;
   publishGoldDraftingExtensionId();
   registerAiBrokerContentHandler();
+  const timingService = registerL0TimingService();
   const controller = new DraftingOverlayController();
   controller.mount();
-  registerLifecycle(controller);
+  registerLifecycle(controller, () => {
+    void refreshPageTaskIdentity().then(() => timingService.onLifecycleOpportunity());
+  });
 }
 
-function enableAudioCaptureIfConfigured(): void {
-  void loadSettings()
-    .then((settings) => {
-      if (
-        settings.audioInputEnabled ||
-        settings.l0ReplacementPreviewEnabled ||
-        shouldUseRemoteBroker(settings.aiBrokerProvider)
-      ) {
-        window.postMessage({ type: AUDIO_ENABLE_CAPTURE_MESSAGE_TYPE }, '*');
-      }
-    })
-    .catch(() => undefined);
-}
 
-enableAudioCaptureIfConfigured();
+enableL0TimingAudioCapture();
 
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', boot, { once: true });

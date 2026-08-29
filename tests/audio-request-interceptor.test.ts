@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { AUDIO_ENABLE_CAPTURE_MESSAGE_TYPE } from '../src/core/audio-intercept-protocol';
 
-test('main-world audio interceptor stays dormant until research preview enables capture', async () => {
+test('main-world audio interceptor stays dormant until the extension enables capture', async () => {
   const dom = new JSDOM('<main></main>', { url: 'https://dashboard.babel.audio/transcription/RU-transcription' });
   const originalFetch = (async () => new Response('ok')) as typeof fetch;
   dom.window.fetch = originalFetch;

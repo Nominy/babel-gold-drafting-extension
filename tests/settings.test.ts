@@ -2,15 +2,24 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DEFAULT_SETTINGS, normalizeL0CustomBaseUrl, normalizeSettings } from '../src/core/settings';
 
-test('audio input research preview is off by default', () => {
-  assert.equal(DEFAULT_SETTINGS.audioInputEnabled, false);
-  assert.equal(normalizeSettings({}).audioInputEnabled, false);
+test('audio-enhanced drafting is on by default and explicit opt-out persists', () => {
+  assert.equal(DEFAULT_SETTINGS.audioInputEnabled, true);
+  assert.equal(normalizeSettings({}).audioInputEnabled, true);
+  assert.equal(normalizeSettings({ audioInputEnabled: false }).audioInputEnabled, false);
 });
 
-test('L0 replacement preview and LLM bypass are off by default', () => {
-  assert.equal(DEFAULT_SETTINGS.l0ReplacementPreviewEnabled, false);
+test('L0 replacement is on with the hosted base while LLM bypass stays off by default', () => {
+  assert.equal(DEFAULT_SETTINGS.l0ReplacementPreviewEnabled, true);
+  assert.equal(normalizeSettings({}).l0ReplacementPreviewEnabled, true);
+  assert.equal(
+    normalizeSettings({ l0ReplacementPreviewEnabled: false }).l0ReplacementPreviewEnabled,
+    false
+  );
   assert.equal(DEFAULT_SETTINGS.l0DontRunLlm, false);
-  assert.equal(DEFAULT_SETTINGS.l0CustomBaseUrl, 'http://127.0.0.1:8767');
+  assert.equal(
+    DEFAULT_SETTINGS.l0CustomBaseUrl,
+    'https://reviewgen.ovh/a3f73d6cf25fa138be653daaf2d7cd0702c0b2d69c40fb9eaee4e07d4b067dd5'
+  );
 });
 
 test('normalizeSettings persists the L0 replacement controls and trims its URL', () => {
@@ -24,9 +33,12 @@ test('normalizeSettings persists the L0 replacement controls and trims its URL',
   assert.equal(settings.l0DontRunLlm, true);
 });
 
-test('normalizeL0CustomBaseUrl accepts only normalized HTTP bases', () => {
+test('normalizeL0CustomBaseUrl accepts normalized HTTP bases and falls back to the hosted default', () => {
   assert.equal(normalizeL0CustomBaseUrl('http://localhost:9000///'), 'http://localhost:9000');
-  assert.equal(normalizeL0CustomBaseUrl('file:///tmp/engine'), DEFAULT_SETTINGS.l0CustomBaseUrl);
+  assert.equal(
+    normalizeL0CustomBaseUrl('file:///tmp/engine'),
+    'https://reviewgen.ovh/a3f73d6cf25fa138be653daaf2d7cd0702c0b2d69c40fb9eaee4e07d4b067dd5'
+  );
   assert.equal(normalizeL0CustomBaseUrl('not a URL'), DEFAULT_SETTINGS.l0CustomBaseUrl);
 });
 
@@ -63,10 +75,10 @@ test('normalizeSettings keeps only supported reasoning efforts', () => {
   assert.equal(normalizeSettings({ reasoningEffort: 'auto' }).reasoningEffort, 'low');
 });
 
-test('normalizeSettings only enables audio input from an explicit true value', () => {
+test('normalizeSettings preserves audio opt-in or opt-out and rejects non-booleans to the default', () => {
   assert.equal(normalizeSettings({ audioInputEnabled: true }).audioInputEnabled, true);
   assert.equal(normalizeSettings({ audioInputEnabled: false }).audioInputEnabled, false);
-  assert.equal(normalizeSettings({ audioInputEnabled: 'true' }).audioInputEnabled, false);
+  assert.equal(normalizeSettings({ audioInputEnabled: 'true' }).audioInputEnabled, true);
 });
 
 test('normalizeSettings keeps only supported AI broker providers', () => {

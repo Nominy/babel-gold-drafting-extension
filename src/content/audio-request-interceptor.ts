@@ -3,10 +3,14 @@ import {
   AUDIO_FLUSH_REQUEST_MESSAGE_TYPE,
   AUDIO_RESPONSE_MESSAGE_TYPE,
   AUDIO_SOURCE_MESSAGE_TYPE,
+  PAGE_TASK_ID_ATTRIBUTE,
+  PAGE_TASK_ID_REQUEST_MESSAGE_TYPE,
+  PAGE_TASK_ID_RESPONSE_MESSAGE_TYPE,
   type AudioEnableCaptureMessage,
   type AudioSourceMessage,
   type AudioInterceptSource,
-  type AudioResponseMessage
+  type AudioResponseMessage,
+  type PageTaskIdResponseMessage
 } from '../core/audio-intercept-protocol';
 import { isLikelyAudioSource } from '../core/audio-url';
 
@@ -72,6 +76,24 @@ function getReactInternalValue(element: Element | null, prefix: string): unknown
 function getReactFiber(element: Element | null): Record<string, unknown> | null {
   const fiber = getReactInternalValue(element, '__reactFiber$');
   return fiber && typeof fiber === 'object' ? (fiber as Record<string, unknown>) : null;
+}
+
+function readCurrentReviewActionId(): string {
+  const textarea = document.querySelector('textarea[placeholder^="What was said"]');
+  let fiber = getReactFiber(textarea);
+  let depth = 0;
+  while (fiber && depth <= 30) {
+    const props = fiber.memoizedProps;
+    if (props && typeof props === 'object' && 'reviewActionId' in props) {
+      const reviewActionId = readString((props as Record<string, unknown>).reviewActionId);
+      if (reviewActionId) return reviewActionId;
+    }
+    fiber = fiber.return && typeof fiber.return === 'object'
+      ? (fiber.return as Record<string, unknown>)
+      : null;
+    depth += 1;
+  }
+  return '';
 }
 
 function getTrackDetailsForHost(host: HTMLElement): Record<string, unknown> | null {
@@ -393,6 +415,20 @@ function installXhrInterceptor(): void {
 function installFlushHandler(): void {
   window.addEventListener('message', (event) => {
     if (event.source !== window) {
+      return;
+    }
+    if (event.data?.type === PAGE_TASK_ID_REQUEST_MESSAGE_TYPE && typeof event.data.requestId === 'string') {
+      const reviewActionId = readCurrentReviewActionId();
+      const root = document.documentElement;
+      if (root) {
+        if (reviewActionId) root.setAttribute(PAGE_TASK_ID_ATTRIBUTE, reviewActionId);
+        else root.removeAttribute(PAGE_TASK_ID_ATTRIBUTE);
+      }
+      window.postMessage({
+        type: PAGE_TASK_ID_RESPONSE_MESSAGE_TYPE,
+        requestId: event.data.requestId,
+        reviewActionId
+      } satisfies PageTaskIdResponseMessage, '*');
       return;
     }
     if (!event.data || typeof event.data !== 'object' || event.data.type !== AUDIO_FLUSH_REQUEST_MESSAGE_TYPE) {
