@@ -164,14 +164,16 @@ export function buildJobId(locationLike: Pick<Location, 'pathname' | 'search'> =
   return explicitId || `${pathname}${search}`;
 }
 
-export function buildCanonicalTaskIdentity(job: Pick<TranscriptJob, 'jobId' | 'rows'>): string {
+export function buildCanonicalTaskIdentity(
+  job: Pick<TranscriptJob, 'jobId' | 'rows' | 'taskScoped'>
+): string {
   const processedRecordingIds = job.rows
     .map((row) => row.processedRecordingId?.trim() || '')
     .filter(Boolean);
   const laneValues = processedRecordingIds.length > 0
     ? processedRecordingIds
     : job.rows.map((row) => row.speakerKey.trim()).filter(Boolean);
-  const stableLaneIds = Array.from(new Set(laneValues)).sort();
+  const stableLaneIds = job.taskScoped ? [] : Array.from(new Set(laneValues)).sort();
   return JSON.stringify({
     version: 1,
     baseTaskId: job.jobId.trim(),
@@ -205,6 +207,7 @@ export function captureTranscriptJob(
     || '';
   return {
     jobId: reviewActionId || buildJobId(locationLike),
+    ...(reviewActionId ? { taskScoped: true } : {}),
     rows
   };
 }
