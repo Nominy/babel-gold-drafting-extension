@@ -26,7 +26,9 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
+    "@huggingface/transformers": "4.2.0",
     "@nominy/babel-babel-runtime": "file:../../shared/babel-extension-platform/packages/babel-babel-runtime",
-    "@nominy/babel-extension-frontend": "file:../../shared/babel-extension-platform/packages/babel-extension-frontend"
+    "@nominy/babel-extension-frontend": "file:../../shared/babel-extension-platform/packages/babel-extension-frontend",
+    "onnxruntime-web": "1.29.0"
   }
 }

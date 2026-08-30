@@ -50,6 +50,7 @@ function toAbsoluteUrl(source: string): string {
   return new URL(source, window.location.href).toString();
 }
 
+
 function isObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === 'object');
 }
@@ -229,7 +230,9 @@ async function appendDiscoveredSourceTracks(tracks: CapturedAudioTrack[], seen: 
     }
     markSeen(seen, record);
 
-    const response = await fetch(record.url, { credentials: 'include' });
+    const response = await fetch(record.url, {
+      credentials: new URL(record.url, window.location.href).origin === window.location.origin ? 'include' : 'omit'
+    });
     if (!response.ok) {
       throw new Error(`Audio fetch failed: ${response.status}`);
     }
@@ -277,7 +280,9 @@ export async function captureAudioTracksForDrafting(root: ParentNode = document)
         continue;
       }
       seen.add(source);
-      const response = await fetch(source, { credentials: 'include' });
+      const response = await fetch(source, {
+        credentials: new URL(source, window.location.href).origin === window.location.origin ? 'include' : 'omit'
+      });
       if (!response.ok) {
         throw new Error(`Audio fetch failed: ${response.status}`);
       }

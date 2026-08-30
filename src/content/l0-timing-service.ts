@@ -1,6 +1,7 @@
 import { captureAudioTracksForDrafting } from '../core/audio-cues';
 import { AUDIO_ENABLE_CAPTURE_MESSAGE_TYPE } from '../core/audio-intercept-protocol';
 import { generateL0Timing, type L0TimingQueueStatus, type L0TimingRequestCallbacks } from '../core/l0-timing-client';
+import { generateLocalL0Timing } from '../core/local-model-client';
 import { loadSettings } from '../core/settings';
 import { buildCanonicalTaskIdentity, captureTranscriptJob } from '../core/transcript';
 import type { CapturedAudioTrack, ExtensionSettings, L0TimingResponse, TranscriptJob } from '../core/types';
@@ -22,6 +23,28 @@ type TimingTaskState = {
   retryNotBefore: number;
   retryScheduled: boolean;
 };
+export type L0TimingGenerators = {
+  remote: typeof generateL0Timing;
+  local: typeof generateLocalL0Timing;
+};
+
+const DEFAULT_L0_TIMING_GENERATORS: L0TimingGenerators = {
+  remote: generateL0Timing,
+  local: generateLocalL0Timing
+};
+
+export function requestConfiguredL0Timing(
+  settings: ExtensionSettings,
+  job: TranscriptJob,
+  tracks: CapturedAudioTrack[],
+  callbacks: L0TimingRequestCallbacks,
+  generators: L0TimingGenerators = DEFAULT_L0_TIMING_GENERATORS
+): Promise<L0TimingResponse> {
+  return settings.localModelsEnabled
+    ? generators.local(settings, job, tracks, callbacks)
+    : generators.remote(settings, job, tracks, callbacks);
+}
+
 
 export interface L0TimingServiceDependencies {
   captureTranscript: () => TranscriptJob;
@@ -183,7 +206,11 @@ export class L0TimingService {
       });
       publishL0TimingAvailability({ taskId, status: 'available' });
       state.completed = true;
-    } catch {
+    } catch (error) {
+      console.error(
+        `[Babel Gold] word timing attempt ${state.failureCount + 1} failed for task ${taskId}.`,
+        error
+      );
       this.scheduleRetry(taskId, state);
     } finally {
       state.inFlight = false;
@@ -225,7 +252,7 @@ export function registerL0TimingService(): L0TimingService {
     currentTaskId: () => buildCanonicalTaskIdentity(captureTranscriptJob()),
     captureAudio: () => captureAudioTracksForDrafting(),
     getSettings: () => loadSettings(),
-    requestTiming: generateL0Timing,
+    requestTiming: requestConfiguredL0Timing,
     publish: (message) => window.postMessage(message, '*'),
     activateStatusTask: (taskId) => statusPill.activateTask(taskId),
     updateStatus: (taskId, status) => statusPill.update(taskId, status),

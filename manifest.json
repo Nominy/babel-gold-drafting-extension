@@ -10,8 +10,13 @@
     "128": "icons/icon128.png"
   },
   "permissions": [
-    "storage"
+    "storage",
+    "unlimitedStorage",
+    "offscreen"
   ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
   "background": {
     "service_worker": "dist/background/ai-broker.js"
   },
@@ -51,6 +56,17 @@
         "dist/content/entry.js"
       ],
       "run_at": "document_start"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "dist/vendor/ort/*.mjs",
+        "dist/vendor/ort/*.wasm"
+      ],
+      "matches": [
+        "https://dashboard.babel.audio/*"
+      ]
     }
   ]
 }

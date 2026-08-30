@@ -21,6 +21,82 @@ function installDom(html: string) {
   return dom;
 }
 
+interface FetchCall {
+  url: string;
+  credentials?: RequestCredentials;
+}
+
+function recordFetches(dom: JSDOM): FetchCall[] {
+  const calls: FetchCall[] = [];
+  globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    calls.push({ url, credentials: init?.credentials });
+    return {
+      ok: true,
+      status: 200,
+      blob: async () => new dom.window.Blob([`bytes:${url}`], { type: 'audio/wav' })
+    } as Response;
+  };
+  return calls;
+}
+
+test('captureAudioTracksForDrafting includes credentials only for same-origin DOM audio sources', async () => {
+  const signedS3Url =
+    'https://davidai-audio-recordings.s3.us-east-2.amazonaws.com/transcription-chunks/prod/job-42/chunk/speaker-1.wav?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=test%2F20260830%2Fus-east-2%2Fs3%2Faws4_request&X-Amz-Signature=abc123';
+  const dom = installDom(`
+    <audio src="https://dashboard.babel.audio/api/files/source-a"></audio>
+    <audio src="${signedS3Url}"></audio>
+  `);
+  const fetchCalls = recordFetches(dom);
+
+  await captureAudioTracksForDrafting();
+
+  assert.deepEqual(fetchCalls, [
+    { url: 'https://dashboard.babel.audio/api/files/source-a', credentials: 'include' },
+    { url: signedS3Url, credentials: 'omit' }
+  ]);
+});
+
+test('captureAudioTracksForDrafting includes credentials only for same-origin discovered audio sources', async () => {
+  const signedS3Url =
+    'https://davidai-audio-recordings.s3.us-east-2.amazonaws.com/transcription-chunks/prod/job-42/chunk/speaker-2.wav?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=test%2F20260830%2Fus-east-2%2Fs3%2Faws4_request&X-Amz-Signature=def456';
+  const dom = installDom('<main></main>');
+  const fetchCalls = recordFetches(dom);
+  installAudioRequestCapture();
+
+  for (const source of [
+    {
+      url: 'https://dashboard.babel.audio/api/files/source-a',
+      trackId: 'track-a',
+      speakerKey: 'speaker-1'
+    },
+    {
+      url: signedS3Url,
+      trackId: 'track-b',
+      speakerKey: 'speaker-2'
+    }
+  ]) {
+    window.dispatchEvent(
+      new dom.window.MessageEvent('message', {
+        source: window,
+        data: {
+          type: AUDIO_SOURCE_MESSAGE_TYPE,
+          ...source,
+          mimeType: 'audio/wav',
+          discoveredAt: 124
+        }
+      })
+    );
+  }
+
+  await captureAudioTracksForDrafting();
+
+  assert.deepEqual(fetchCalls, [
+    { url: 'https://dashboard.babel.audio/api/files/source-a', credentials: 'include' },
+    { url: signedS3Url, credentials: 'omit' }
+  ]);
+});
+
 test('captureAudioTracksForDrafting fetches every distinct audio source on the page', async () => {
   installDom(`
     <audio src="https://dashboard.babel.audio/a1.webm"></audio>

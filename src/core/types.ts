@@ -15,6 +15,7 @@ export interface ExtensionSettings {
   l0CustomBaseUrl: string;
   l0DontRunLlm: boolean;
   audioInputEnabled: boolean;
+  localModelsEnabled: boolean;
 }
 
 export interface CapturedAudioTrack {
