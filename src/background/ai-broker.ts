@@ -1,3 +1,4 @@
+import './local-model-offscreen';
 import {
   AI_BROKER_EXTERNAL_MESSAGE_TYPE,
   AI_BROKER_INTERNAL_MESSAGE_TYPE,
@@ -10,7 +11,31 @@ import {
   type AiBrokerPortMessage,
   type AiBrokerResponse
 } from '../core/ai-broker-protocol';
-import { loadSettings } from '../core/settings';
+import { getLocalModelStatus, type LocalModelStatus } from '../core/local-model-bundle';
+import { LOCAL_MODEL_BASE_URL, loadSettings } from '../core/settings';
+import { isOpenLocalModelOptionsMessage } from '../core/local-model-suggestion-protocol';
+import type { ExtensionSettings } from '../core/types';
+
+export async function resolveBrokerCapabilities(
+  settings: ExtensionSettings,
+  getStatus: (baseUrl: string) => Promise<LocalModelStatus> = getLocalModelStatus
+) {
+  let transcribeSegmentL0 = true;
+  if (settings.localModelsEnabled) {
+    try {
+      transcribeSegmentL0 = (await getStatus(LOCAL_MODEL_BASE_URL)).state === 'ready';
+    } catch {
+      transcribeSegmentL0 = false;
+    }
+  }
+  const remoteConfigured = Boolean(settings.openRouterApiKey);
+  const remoteBrokerAvailable = shouldUseRemoteBroker(settings.aiBrokerProvider) && remoteConfigured;
+  return {
+    transcribeSegment: remoteBrokerAvailable,
+    transcribeSegmentL0,
+    redistributeText: remoteBrokerAvailable
+  };
+}
 
 function isBrokerRequest(message: unknown): message is AiBrokerExternalRequest {
   return (
@@ -168,15 +193,12 @@ async function handleBrokerRequest(
   const remoteConfigured = Boolean(settings.openRouterApiKey);
 
   if (request.operation === 'ping') {
+    const capabilities = await resolveBrokerCapabilities(settings);
     return {
       ok: true,
       provider: settings.aiBrokerProvider,
       remoteConfigured,
-      capabilities: {
-        transcribeSegment: shouldUseRemoteBroker(settings.aiBrokerProvider) && remoteConfigured,
-        transcribeSegmentL0: true,
-        redistributeText: shouldUseRemoteBroker(settings.aiBrokerProvider) && remoteConfigured
-      }
+      capabilities
     };
   }
 
@@ -214,17 +236,14 @@ async function handleBrokerPortRequest(
   });
 
   if (request.operation === 'ping') {
+    const capabilities = await resolveBrokerCapabilities(settings);
     postPortMessage(port, {
       type: 'result',
       response: {
         ok: true,
         provider: settings.aiBrokerProvider,
         remoteConfigured,
-        capabilities: {
-          transcribeSegment: shouldUseRemoteBroker(settings.aiBrokerProvider) && remoteConfigured,
-          transcribeSegmentL0: true,
-          redistributeText: shouldUseRemoteBroker(settings.aiBrokerProvider) && remoteConfigured
-        }
+        capabilities
       }
     });
     return;
@@ -299,5 +318,16 @@ if (externalConnectHandler && typeof externalConnectHandler.addListener === 'fun
         });
       });
     });
+  });
+}
+
+const internalMessageHandler = globalThis.chrome?.runtime?.onMessage;
+if (internalMessageHandler && typeof internalMessageHandler.addListener === 'function') {
+  internalMessageHandler.addListener((message: unknown) => {
+    if (!isOpenLocalModelOptionsMessage(message)) return false;
+    void globalThis.chrome.tabs.create({
+      url: globalThis.chrome.runtime.getURL('options.html#local-model-heading')
+    });
+    return false;
   });
 }

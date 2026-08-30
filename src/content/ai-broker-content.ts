@@ -11,10 +11,11 @@ import {
 import { captureAudioTracksForDrafting } from '../core/audio-cues';
 import { redistributeTextWithBroker, transcribeSegmentWithBroker } from '../core/backend-client';
 import { generateL0SegmentDraft } from '../core/l0-client';
+import { generateLocalL0SegmentDraft } from '../core/local-model-client';
 import { prepareL0TimingTracks } from '../core/l0-timing-client';
 import { loadSettings } from '../core/settings';
 import { buildCanonicalTaskIdentity, captureTranscriptJob } from '../core/transcript';
-import type { ExtensionSettings, TranscriptRow } from '../core/types';
+import type { CapturedAudioTrack, ExtensionSettings, TranscriptRow } from '../core/types';
 
 const AI_BROKER_CONTENT_BUILD = 'port-stream-postmortem-2026-06-23';
 const AI_BROKER_CONTENT_BUILD_ATTR = 'data-babel-gold-drafting-ai-broker-build';
@@ -33,16 +34,30 @@ function formatElapsedSeconds(elapsedMs: number): string {
   return Math.max(0, Math.round(elapsedMs / 1000)) + 's';
 }
 
+function allowsBrokerFallback(message: AiBrokerInternalRequest, settings: ExtensionSettings | null): boolean {
+  if (message.operation === 'transcribeSegmentL0' && settings?.localModelsEnabled) {
+    return false;
+  }
+  return settings === null || providerAllowsLocalFallback(settings.aiBrokerProvider);
+}
+
 async function withBrokerBackendProgress<T>(
   operation: AiBrokerInternalRequest['operation'],
   emit: ((message: AiBrokerPortMessage) => void) | undefined,
-  request: () => Promise<T>
+  request: () => Promise<T>,
+  waitingTarget = 'Gold Drafting backend'
 ): Promise<T> {
   const startedAt = Date.now();
   const intervalId = emit
     ? setInterval(() => {
         const elapsedMs = Math.max(0, Date.now() - startedAt);
-        emit({ type: 'event', event: 'backend-waiting', operation, elapsedMs, message: 'Still waiting for Gold Drafting backend after ' + formatElapsedSeconds(elapsedMs) + '.' });
+        emit({
+          type: 'event',
+          event: 'backend-waiting',
+          operation,
+          elapsedMs,
+          message: `Still waiting for ${waitingTarget} after ${formatElapsedSeconds(elapsedMs)}.`
+        });
       }, BROKER_BACKEND_PROGRESS_INTERVAL_MS)
     : null;
 
@@ -120,6 +135,31 @@ function isValidL0TargetRow(row: TranscriptRow): boolean {
 function captureCurrentCanonicalTaskId(): string {
   return buildCanonicalTaskIdentity(captureTranscriptJob());
 }
+
+export type L0SegmentGenerators = {
+  remote: typeof generateL0SegmentDraft;
+  local: typeof generateLocalL0SegmentDraft;
+};
+
+const DEFAULT_L0_SEGMENT_GENERATORS: L0SegmentGenerators = {
+  remote: generateL0SegmentDraft,
+  local: generateLocalL0SegmentDraft
+};
+
+export async function generateConfiguredL0SegmentText(
+  settings: ExtensionSettings,
+  taskId: string,
+  targetRow: TranscriptRow,
+  audioTracks: CapturedAudioTrack[],
+  generators: L0SegmentGenerators = DEFAULT_L0_SEGMENT_GENERATORS
+): Promise<string> {
+  const segmentJob = { jobId: taskId, rows: [targetRow] };
+  const tracks = prepareL0TimingTracks(segmentJob, audioTracks);
+  return settings.localModelsEnabled
+    ? generators.local(settings, taskId, targetRow, tracks)
+    : generators.remote(settings, taskId, targetRow, tracks);
+}
+
 async function handleBrokerRequest(
   message: AiBrokerInternalRequest,
   emit?: (message: AiBrokerPortMessage) => void
@@ -149,15 +189,21 @@ async function handleBrokerRequest(
       text: '',
       index: 0
     };
-    const segmentJob = { jobId: message.taskId, rows: [targetRow] };
-    const tracks = prepareL0TimingTracks(segmentJob, audioTracks);
     if (emit) {
-      emit({ type: 'event', event: 'calling-backend', operation: message.operation, message: 'Calling the local L0 drafting engine.' });
+      emit({
+        type: 'event',
+        event: 'calling-backend',
+        operation: message.operation,
+        message: settings.localModelsEnabled
+          ? 'Running local browser models for the requested segment.'
+          : 'Calling the local L0 drafting engine.'
+      });
     }
     const text = await withBrokerBackendProgress(
       message.operation,
       emit,
-      () => generateL0SegmentDraft(settings, message.taskId, targetRow, tracks)
+      () => generateConfiguredL0SegmentText(settings, message.taskId, targetRow, audioTracks),
+      settings.localModelsEnabled ? 'local browser models' : 'Gold Drafting backend'
     );
     if (captureCurrentCanonicalTaskId() !== message.taskId) {
       return brokerError('stale-task', 'The transcript task changed before L0 drafting completed.', false);
@@ -266,26 +312,23 @@ export function registerAiBrokerContentHandler(): void {
           .catch((error) => {
             void loadSettings()
               .then((settings) => {
-                logBrokerRequestFailure(
-                  message,
-                  settings,
-                  error,
-                  providerAllowsLocalFallback(settings.aiBrokerProvider)
-                );
+                const fallbackAllowed = allowsBrokerFallback(message, settings);
+                logBrokerRequestFailure(message, settings, error, fallbackAllowed);
                 port.postMessage({
                   type: 'error',
                   response: brokerError(
                     'broker-error',
                     error instanceof Error ? error.message : String(error),
-                    providerAllowsLocalFallback(settings.aiBrokerProvider)
+                    fallbackAllowed
                   )
                 });
               })
               .catch(() => {
-                logBrokerRequestFailure(message, null, error, true);
+                const fallbackAllowed = allowsBrokerFallback(message, null);
+                logBrokerRequestFailure(message, null, error, fallbackAllowed);
                 port.postMessage({
                   type: 'error',
-                  response: brokerError('broker-error', error instanceof Error ? error.message : String(error), true)
+                  response: brokerError('broker-error', error instanceof Error ? error.message : String(error), fallbackAllowed)
                 });
               });
           });
@@ -307,24 +350,21 @@ export function registerAiBrokerContentHandler(): void {
       .catch((error) => {
         void loadSettings()
           .then((settings) => {
-            logBrokerRequestFailure(
-              message,
-              settings,
-              error,
-              providerAllowsLocalFallback(settings.aiBrokerProvider)
-            );
+            const fallbackAllowed = allowsBrokerFallback(message, settings);
+            logBrokerRequestFailure(message, settings, error, fallbackAllowed);
             sendResponse(
               brokerError(
                 'broker-error',
                 error instanceof Error ? error.message : String(error),
-                providerAllowsLocalFallback(settings.aiBrokerProvider)
+                fallbackAllowed
               )
             );
           })
           .catch(() => {
-            logBrokerRequestFailure(message, null, error, true);
+            const fallbackAllowed = allowsBrokerFallback(message, null);
+            logBrokerRequestFailure(message, null, error, fallbackAllowed);
             sendResponse(
-              brokerError('broker-error', error instanceof Error ? error.message : String(error), true)
+              brokerError('broker-error', error instanceof Error ? error.message : String(error), fallbackAllowed)
             );
           });
       });

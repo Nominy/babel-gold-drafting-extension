@@ -79,6 +79,21 @@ test('manifest and build expose the AI broker service worker', () => {
   assert.match(packSource, /externally_connectable: \{\s*ids: STORE_EXTERNALLY_CONNECTABLE_IDS\s*\}/);
 });
 
+test('extension permissions and CSP narrowly allow hosted model assets', () => {
+  const manifest = JSON.parse(fs.readFileSync(new URL('../manifest.json', import.meta.url), 'utf8'));
+  const extensionCsp = manifest.content_security_policy.extension_pages as string;
+  const runtimeSource = fs.readFileSync(new URL('../src/core/local-model-runtime.ts', import.meta.url), 'utf8');
+  const modelHostPermissions = (manifest.host_permissions as string[]).filter((permission) =>
+    permission.includes('reviewgen.ovh')
+  );
+
+  assert.deepEqual(modelHostPermissions, ['https://reviewgen.ovh/*']);
+  assert.deepEqual(manifest.optional_host_permissions, ['http://*/*', 'https://*/*']);
+  assert.doesNotMatch(extensionCsp, /\bblob:/);
+  assert.match(extensionCsp, /'wasm-unsafe-eval'/);
+  assert.match(runtimeSource, /ort\.env\.wasm\.numThreads = 1/);
+});
+
 test('AI broker redistribution review uses the Helper review contract', () => {
   const typesSource = fs.readFileSync(new URL('../src/core/types.ts', import.meta.url), 'utf8');
   const protocolSource = fs.readFileSync(new URL('../src/core/ai-broker-protocol.ts', import.meta.url), 'utf8');
@@ -130,7 +145,7 @@ test('AI broker uses external and internal ports for streaming progress', () => 
   assert.match(contentSource, /port\.name !== AI_BROKER_INTERNAL_PORT_NAME/);
   assert.match(contentSource, /emit\(\{ type: 'event', event: 'capturing-audio'/);
   assert.match(contentSource, /emit\(\{ type: 'event', event: 'calling-backend'/);
-  assert.match(contentSource, /emit\(\{ type: 'event', event: 'backend-waiting'/);
+  assert.match(contentSource, /emit\(\{\s*type: 'event',\s*event: 'backend-waiting'/);
   assert.match(contentSource, /setInterval/);
   assert.match(contentSource, /port\.postMessage\(\{ type: 'result', response \}\)/);
 });

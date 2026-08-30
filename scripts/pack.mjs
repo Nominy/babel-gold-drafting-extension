@@ -30,7 +30,8 @@ try {
 
       const files = [
         { full: tempManifestPath, rel: 'manifest.json' },
-        { full: join(ROOT, 'options.html'), rel: 'options.html' }
+        { full: join(ROOT, 'options.html'), rel: 'options.html' },
+        { full: join(ROOT, 'offscreen.html'), rel: 'offscreen.html' }
       ];
 
       for (const entry of collectFiles(join(ROOT, 'icons'), 'icons')) {
@@ -38,7 +39,7 @@ try {
       }
 
       for (const entry of collectFiles(join(ROOT, 'dist'), 'dist')) {
-        if (entry.full.endsWith('.js')) {
+        if (entry.full.endsWith('.js') || entry.full.endsWith('.mjs') || entry.full.endsWith('.wasm')) {
           files.push(entry);
         }
       }

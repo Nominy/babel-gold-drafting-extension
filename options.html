@@ -113,6 +113,41 @@
         line-height: 1.4;
         font-weight: 400;
       }
+      .local-model-panel {
+        margin-top: 22px;
+        padding: 16px;
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        background: rgba(11, 110, 79, 0.035);
+      }
+
+      .local-model-panel h2 {
+        margin: 0;
+        font-size: 20px;
+      }
+
+      [data-role="local-model-remove"] {
+        background: #6d3535;
+      }
+
+      button:disabled,
+      input:disabled {
+        cursor: not-allowed;
+        opacity: 0.55;
+      }
+
+      [data-role="local-model-progress"] {
+        width: 100%;
+        margin-top: 12px;
+      }
+
+      [data-role="local-model-status"] {
+        min-height: 20px;
+        margin-top: 10px;
+        color: var(--muted);
+        overflow-wrap: anywhere;
+      }
+
 
       .support-footer {
         margin: 18px 0 0;
@@ -216,9 +251,43 @@
             </span>
           </span>
         </label>
+        <section class="local-model-panel" data-role="local-model-setup" aria-labelledby="local-model-heading">
+          <h2 id="local-model-heading">Local browser models</h2>
+          <p class="field-help">
+            Optional. Download Babel's compatible speech model bundle into this browser, then explicitly enable it.
+            Remote drafting remains the default.
+          </p>
+
+          <p class="field-help"><strong>1. Download</strong> and verify the Babel model bundle in this browser.</p>
+          <button type="button" data-role="local-model-download" disabled>Download</button>
+
+          <p class="field-help"><strong>2. Test</strong> with audio no longer than 15 seconds.</p>
+          <button type="button" data-role="local-model-supplied-test" disabled>Test supplied public-domain sample</button>
+          <p class="field-help">
+            Supplied sample: LibriVox, “Aesop's Fables in Russian”, section 01, Public Domain.
+            <a href="https://archive.org/details/aesops_fables_russian_0905_librivox" target="_blank" rel="noopener noreferrer">Source</a>.
+          </p>
+          <label for="localModelTestAudio">Or choose your own short audio</label>
+          <input id="localModelTestAudio" name="localModelTestAudio" type="file" accept="audio/*,.wav" />
+          <button type="button" data-role="local-model-test" disabled>Test selected audio</button>
+
+          <label class="checkbox-row" for="localModelsEnabled">
+            <input id="localModelsEnabled" name="localModelsEnabled" type="checkbox" disabled />
+            <span>
+              3. Enable downloaded local browser models
+              <span class="field-help">Available only after the current bundle is ready and passes the audio test.</span>
+            </span>
+          </label>
+
+          <button type="button" data-role="local-model-remove" disabled>Remove downloaded models</button>
+
+          <progress data-role="local-model-progress" max="1" value="0" aria-label="Local model download progress" hidden></progress>
+          <div data-role="local-model-status" role="status" aria-live="polite">Checking local model status…</div>
+        </section>
+
 
         <button type="button" data-role="save">Save Settings</button>
-        <div data-role="status"></div>
+        <div data-role="status" role="status" aria-live="polite"></div>
         <p class="support-footer">
           These Babel tools are maintained by Naftsan;
           <a href="https://ko-fi.com/naftsan" target="_blank" rel="noopener noreferrer">if this extension saves you time, consider supporting development on Ko-Fi</a>.

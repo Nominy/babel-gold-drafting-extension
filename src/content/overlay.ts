@@ -1,5 +1,6 @@
 import { generateDraftStream } from '../core/backend-client';
 import { generateL0Draft } from '../core/l0-client';
+import { generateLocalL0Draft } from '../core/local-model-client';
 import { replaceTranscriptWithL0Rows } from '../core/l0-replacement-bridge';
 import { matchL0CreatedRows } from '../core/l0-created-row-matcher';
 import { assessAudioCaptureForDrafting, type AudioCaptureIssue } from '../core/audio-capture-guard';
@@ -26,6 +27,27 @@ const STYLE_ID = 'babel-gold-drafting-style';
 const BUTTON_ID = 'babel-gold-drafting-magic-button';
 const OVERLAY_ID = 'babel-gold-drafting-overlay';
 const TOOLBAR_BUTTON_SELECTOR = 'button[aria-label="Play all tracks"]';
+export type L0DraftGenerators = {
+  remote: typeof generateL0Draft;
+  local: typeof generateLocalL0Draft;
+};
+
+const DEFAULT_L0_DRAFT_GENERATORS: L0DraftGenerators = {
+  remote: generateL0Draft,
+  local: generateLocalL0Draft
+};
+
+export function generateConfiguredL0Draft(
+  settings: ExtensionSettings,
+  job: TranscriptJob,
+  tracks: CapturedAudioTrack[],
+  generators: L0DraftGenerators = DEFAULT_L0_DRAFT_GENERATORS
+) {
+  return settings.localModelsEnabled
+    ? generators.local(settings, job, tracks)
+    : generators.remote(settings, job, tracks);
+}
+
 
 function createDraftSessionId(jobId: string): string {
   const randomId =
@@ -1132,8 +1154,12 @@ export class DraftingOverlayController {
     this.setStatus('Capturing exactly two WAV speaker tracks for L0 replacement...');
     const audioTracks = await captureAudioTracksForDrafting();
     this.logCapturedAudioTracks(audioTracks);
-    this.setStatus('Generating replacement segments with the self-hosted L0 endpoint...');
-    const response = await generateL0Draft(settings, capturedJob, audioTracks);
+    this.setStatus(
+      settings.localModelsEnabled
+        ? 'Generating replacement segments with local browser models...'
+        : 'Generating replacement segments with the self-hosted L0 endpoint...'
+    );
+    const response = await generateConfiguredL0Draft(settings, capturedJob, audioTracks);
 
     this.setStatus(`Replacing current transcript with ${response.rows.length} L0 segment(s) through Babel Helper...`);
     const created = await replaceTranscriptWithL0Rows(response.rows);

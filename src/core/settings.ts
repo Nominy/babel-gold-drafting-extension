@@ -4,6 +4,8 @@ import type { ExtensionSettings } from './types';
 export const SETTINGS_STORAGE_KEY = 'babel_gold_drafting_settings';
 const DEFAULT_L0_CUSTOM_BASE_URL =
   'https://reviewgen.ovh/a3f73d6cf25fa138be653daaf2d7cd0702c0b2d69c40fb9eaee4e07d4b067dd5';
+export const LOCAL_MODEL_BASE_URL = 'https://reviewgen.ovh/browser-model';
+export const LOCAL_MODEL_SAMPLE_URL = `${LOCAL_MODEL_BASE_URL}/sample-russian-15s.wav`;
 
 
 export const DEFAULT_SETTINGS: ExtensionSettings = {
@@ -17,7 +19,8 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
   l0ReplacementPreviewEnabled: true,
   l0CustomBaseUrl: DEFAULT_L0_CUSTOM_BASE_URL,
   l0DontRunLlm: false,
-  audioInputEnabled: true
+  audioInputEnabled: true,
+  localModelsEnabled: false,
 };
 
 function getStorageArea() {
@@ -45,6 +48,7 @@ export function normalizeL0CustomBaseUrl(input: unknown): string {
     return DEFAULT_L0_CUSTOM_BASE_URL;
   }
 }
+
 
 
 export function normalizeSettings(input: unknown): ExtensionSettings {
@@ -86,6 +90,7 @@ export function normalizeSettings(input: unknown): ExtensionSettings {
     typeof raw.audioInputEnabled === 'boolean'
       ? raw.audioInputEnabled
       : DEFAULT_SETTINGS.audioInputEnabled;
+  const localModelsEnabled = raw.localModelsEnabled === true;
 
   return {
     backendBaseUrl,
@@ -98,7 +103,8 @@ export function normalizeSettings(input: unknown): ExtensionSettings {
     l0ReplacementPreviewEnabled,
     l0CustomBaseUrl,
     l0DontRunLlm,
-    audioInputEnabled
+    audioInputEnabled,
+    localModelsEnabled
   };
 }
 
