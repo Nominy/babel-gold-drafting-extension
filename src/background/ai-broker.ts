@@ -13,6 +13,7 @@ import {
 } from '../core/ai-broker-protocol';
 import { getLocalModelStatus, type LocalModelStatus } from '../core/local-model-bundle';
 import { LOCAL_MODEL_BASE_URL, loadSettings } from '../core/settings';
+import { isOpenLocalModelOptionsMessage } from '../core/local-model-suggestion-protocol';
 import type { ExtensionSettings } from '../core/types';
 
 export async function resolveBrokerCapabilities(
@@ -317,5 +318,16 @@ if (externalConnectHandler && typeof externalConnectHandler.addListener === 'fun
         });
       });
     });
+  });
+}
+
+const internalMessageHandler = globalThis.chrome?.runtime?.onMessage;
+if (internalMessageHandler && typeof internalMessageHandler.addListener === 'function') {
+  internalMessageHandler.addListener((message: unknown) => {
+    if (!isOpenLocalModelOptionsMessage(message)) return false;
+    void globalThis.chrome.tabs.create({
+      url: globalThis.chrome.runtime.getURL('options.html#local-model-heading')
+    });
+    return false;
   });
 }
