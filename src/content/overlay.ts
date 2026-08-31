@@ -551,6 +551,7 @@ export class DraftingOverlayController {
   };
   private streamedRows: DraftRowResult[] = [];
   private streamedSummary: DraftSummary | null = null;
+  private l0WarningsByRowId = new Map<string, string[]>();
   private streamedCompletedRows = 0;
   private streamedTotalRows = 0;
   private activeDraftLabel = 'Gold / OpenRouter';
@@ -1077,6 +1078,7 @@ export class DraftingOverlayController {
     this.openDialog();
     this.activeDraftLabel = 'Gold / OpenRouter';
     this.clearAudioGuard();
+    this.l0WarningsByRowId.clear();
     this.state = {
       capturedJob: null,
       draftResponse: null,
@@ -1169,20 +1171,29 @@ export class DraftingOverlayController {
     }
     const populatedJob = captureTranscriptJob();
     const matchedRows = matchL0CreatedRows(response.rows, populatedJob.rows);
+    const visibleTextMismatchCount = matchedRows.filter(({ warnings }) => warnings.length > 0).length;
+    this.l0WarningsByRowId = new Map(
+      matchedRows.map(({ capturedRow, warnings }) => [capturedRow.rowId, [...new Set(warnings)]])
+    );
+    const visibleTextMismatchStatus =
+      visibleTextMismatchCount > 0
+        ? ` ${visibleTextMismatchCount} visible text mismatch warning${visibleTextMismatchCount === 1 ? '' : 's'}.`
+        : '';
     this.state.capturedJob = populatedJob;
     this.state.draftResponse = {
-      draftRows: matchedRows.map(({ engineRow, capturedRow }) => ({
+      draftRows: matchedRows.map(({ engineRow, capturedRow, warnings }) => ({
         rowId: capturedRow.rowId,
         rewrittenText: engineRow.text,
         status: 'rewritten',
-        warnings: []
+        warnings: [...warnings]
       })),
       summary: {
         totalRows: created.length,
         rewrittenRows: created.length,
         unchangedRows: 0,
         failedRows: 0,
-        anomalyCounts: {}
+        anomalyCounts:
+          visibleTextMismatchCount > 0 ? { l0VisibleTextMismatch: visibleTextMismatchCount } : {}
       },
       generationMeta: {
         model: Object.keys(response.models).join(' + ') || 'L0 two-model engine',
@@ -1192,8 +1203,8 @@ export class DraftingOverlayController {
     };
     this.setStatus(
       settings.l0DontRunLlm
-        ? `L0 replacement complete: ${created.length} segment(s). LLM drafting was skipped.`
-        : `L0 replacement complete: ${created.length} segment(s). Recaptured transcript for Gold LLM drafting.`
+        ? `L0 replacement complete: ${created.length} segment(s). LLM drafting was skipped.${visibleTextMismatchStatus}`
+        : `L0 replacement complete: ${created.length} segment(s). Recaptured transcript for Gold LLM drafting.${visibleTextMismatchStatus}`
     );
     this.render();
     return populatedJob;
@@ -1253,9 +1264,39 @@ export class DraftingOverlayController {
       }
     }, audioTracks);
 
-    this.state.draftResponse = draftResponse;
+    const l0VisibleTextMismatchCount = [...this.l0WarningsByRowId.values()].filter(
+      (warnings) => warnings.length > 0
+    ).length;
+    const finalDraftResponse =
+      l0VisibleTextMismatchCount > 0
+        ? {
+            ...draftResponse,
+            draftRows: draftResponse.draftRows.map((row) => ({
+              ...row,
+              warnings: [...new Set([...row.warnings, ...(this.l0WarningsByRowId.get(row.rowId) ?? [])])]
+            })),
+            summary: {
+              ...draftResponse.summary,
+              anomalyCounts: {
+                ...draftResponse.summary.anomalyCounts,
+                l0VisibleTextMismatch:
+                  (draftResponse.summary.anomalyCounts.l0VisibleTextMismatch ?? 0) +
+                  l0VisibleTextMismatchCount
+              }
+            }
+          }
+        : draftResponse;
+    this.streamedRows = finalDraftResponse.draftRows;
+    this.streamedSummary = finalDraftResponse.summary;
+    this.streamedCompletedRows = finalDraftResponse.summary.totalRows;
+    this.streamedTotalRows = finalDraftResponse.summary.totalRows;
+    this.state.draftResponse = finalDraftResponse;
     this.setStatus(
-      `Draft ready. ${draftResponse.summary.rewrittenRows} rewritten, ${draftResponse.summary.failedRows} failed fallback rows.`
+      `Draft ready. ${finalDraftResponse.summary.rewrittenRows} rewritten, ${finalDraftResponse.summary.failedRows} failed fallback rows.${
+        l0VisibleTextMismatchCount > 0
+          ? ` ${l0VisibleTextMismatchCount} visible text mismatch warning${l0VisibleTextMismatchCount === 1 ? '' : 's'}.`
+          : ''
+      }`
     );
     this.setButtonState('done', 'Draft Ready');
     window.setTimeout(() => this.setButtonState('idle', 'Gold Draft'), 1600);

@@ -10,6 +10,7 @@ export const L0_VISIBLE_TIMESTAMP_TOLERANCE_SECONDS = 0.005 + 1e-9;
 export interface MatchedL0CreatedRow {
   engineRow: L0DraftRow;
   capturedRow: TranscriptRow;
+  warnings: string[];
 }
 
 function normalizeLane(lane: string): string {
@@ -130,9 +131,12 @@ export function matchL0CreatedRows(
       rowShapeMatches(engineRow, capturedRow) ? [capturedIndex] : []
     )
   );
-  const textCandidates = structuralCandidates.map((candidates, engineIndex) =>
-    candidates.filter((capturedIndex) => capturedRows[capturedIndex].text === engineRows[engineIndex].text)
-  );
+  const matchingCandidates = structuralCandidates.map((candidates, engineIndex) => {
+    const exactTextCandidates = candidates.filter(
+      (capturedIndex) => capturedRows[capturedIndex].text === engineRows[engineIndex].text
+    );
+    return exactTextCandidates.length > 0 ? exactTextCandidates : candidates;
+  });
 
   const problems: string[] = [];
   if (capturedRows.length < engineRows.length) {
@@ -146,13 +150,6 @@ export function matchL0CreatedRows(
     problems.push(`Missing: ${missingRows.map(describeEngineRow).join(', ')}.`);
   }
 
-  const textMismatchRows = engineRows.filter(
-    (_, index) => structuralCandidates[index].length > 0 && textCandidates[index].length === 0
-  );
-  if (textMismatchRows.length) {
-    problems.push(`Final text mismatch: ${textMismatchRows.map(describeEngineRow).join(', ')}.`);
-  }
-
   const unexpectedRows = capturedRows.filter((_, capturedIndex) =>
     structuralCandidates.every((candidates) => !candidates.includes(capturedIndex))
   );
@@ -164,20 +161,37 @@ export function matchL0CreatedRows(
     throw new Error(`Could not verify Helper-created L0 rows without rewriting the transcript. ${problems.join(' ')}`);
   }
 
-  const matching = findPerfectMatching(textCandidates, capturedRows.length);
-  if (!matching || matching.expectedToCaptured.some((capturedIndex) => capturedIndex < 0)) {
+  let candidatesUsedForMatching = matchingCandidates;
+  let matching = findPerfectMatching(candidatesUsedForMatching, capturedRows.length);
+  if (!matching) {
+    candidatesUsedForMatching = structuralCandidates;
+    matching = findPerfectMatching(candidatesUsedForMatching, capturedRows.length);
+  }
+  const selectedMatching = matching;
+  if (!selectedMatching || selectedMatching.expectedToCaptured.some((capturedIndex) => capturedIndex < 0)) {
     throw new Error(
       'Could not bijectively match Helper-created L0 rows; visible rows are missing, duplicated, or conflict within the timestamp tolerance.'
     );
   }
-  if (hasAlternativeMatchingCycle(textCandidates, matching.expectedToCaptured, matching.capturedToExpected)) {
+  if (
+    hasAlternativeMatchingCycle(
+      candidatesUsedForMatching,
+      selectedMatching.expectedToCaptured,
+      selectedMatching.capturedToExpected
+    )
+  ) {
     throw new Error(
       'Ambiguous duplicate Helper-created L0 rows: more than one lane/timestamp/text bijection matches the visible transcript.'
     );
   }
 
-  return engineRows.map((engineRow, expectedIndex) => ({
-    engineRow,
-    capturedRow: capturedRows[matching.expectedToCaptured[expectedIndex]]
-  }));
+  return engineRows.map((engineRow, expectedIndex) => {
+    const capturedRow = capturedRows[selectedMatching.expectedToCaptured[expectedIndex]];
+    return {
+      engineRow,
+      capturedRow,
+      warnings:
+        capturedRow.text === engineRow.text ? [] : ['Visible text differs from the generated L0 text.']
+    };
+  });
 }
