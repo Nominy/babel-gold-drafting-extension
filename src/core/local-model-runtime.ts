@@ -43,6 +43,16 @@ const ASR_CHUNK_OVERLAP_SECONDS = 1;
 const ASR_CHUNK_SAMPLES = ASR_CHUNK_SECONDS * SAMPLE_RATE;
 const ASR_CHUNK_OVERLAP_SAMPLES = ASR_CHUNK_OVERLAP_SECONDS * SAMPLE_RATE;
 const ASR_CHUNK_STRIDE_SAMPLES = ASR_CHUNK_SAMPLES - ASR_CHUNK_OVERLAP_SAMPLES;
+const ACTIVITY_FRAME_SAMPLES = SAMPLE_RATE / 100;
+const ACTIVITY_BRIDGE_FRAMES = 16;
+const MINIMUM_ACTIVITY_FRAMES = 12;
+const COARSE_SILENCE_FRAMES = 100;
+const NOISE_FLOOR_PERCENTILE = 0.2;
+const DBFS_FLOOR = 1 / 32_768;
+const ACTIVITY_THRESHOLD_MARGIN_DB = 8;
+const ACTIVITY_THRESHOLD_MIN_DBFS = -60;
+const ACTIVITY_THRESHOLD_MAX_DBFS = -36;
+
 
 const ASR_MODEL_PATH = 'asr/v3_ctc.onnx';
 const PUNCTUATION_MODEL_PATH = 'punctuation/model.int8.onnx';
@@ -69,6 +79,10 @@ type TranscriptWithLabels = LocalTranscriptResult & { labels: PunctuationLabel[]
 type SampleRecognition = { durationSeconds: number; tokens: LocalWord[] };
 type SampleRecognizer = (samples: Float32Array, startSample: number) => Promise<SampleRecognition>;
 type WordPunctuator = (words: readonly string[]) => Promise<PunctuationLabel[]>;
+type ActivitySegment = { startSample: number; endSample: number };
+type SegmentedWordRange = ActivitySegment & { wordStart: number; wordEnd: number };
+type RecognitionWithLabels = SampleRecognition & { labels: PunctuationLabel[] };
+
 
 type Radix2Plan = {
   size: number;
@@ -957,6 +971,213 @@ async function recognizeSamplesInChunks(
   );
   return { durationSeconds: samples.length / SAMPLE_RATE, tokens };
 }
+function frameDbfs(samples: Float32Array, startSample: number, endSample: number): number {
+  let squaredSum = 0;
+  for (let index = startSample; index < endSample; index += 1) {
+    const sample = samples[index];
+    squaredSum += sample * sample;
+  }
+  const rms = Math.sqrt(squaredSum / (endSample - startSample));
+  return 20 * Math.log10(Math.max(rms, DBFS_FLOOR));
+}
+
+function smoothActivity(activity: Uint8Array): void {
+  let runStart = 0;
+  while (runStart < activity.length) {
+    const active = activity[runStart];
+    let runEnd = runStart + 1;
+    while (runEnd < activity.length && activity[runEnd] === active) runEnd += 1;
+    if (
+      active === 0 &&
+      runStart > 0 &&
+      runEnd < activity.length &&
+      runEnd - runStart <= ACTIVITY_BRIDGE_FRAMES
+    ) {
+      activity.fill(1, runStart, runEnd);
+    }
+    runStart = runEnd;
+  }
+
+  runStart = 0;
+  while (runStart < activity.length) {
+    const active = activity[runStart];
+    let runEnd = runStart + 1;
+    while (runEnd < activity.length && activity[runEnd] === active) runEnd += 1;
+    if (active === 1 && runEnd - runStart < MINIMUM_ACTIVITY_FRAMES) {
+      activity.fill(0, runStart, runEnd);
+    }
+    runStart = runEnd;
+  }
+}
+
+function appendTrimmedActivitySegment(
+  segments: ActivitySegment[],
+  activity: Uint8Array,
+  sampleCount: number,
+  leftSample: number,
+  rightSample: number
+): void {
+  const firstFrame = Math.floor(leftSample / ACTIVITY_FRAME_SAMPLES);
+  const frameEnd = Math.min(
+    activity.length,
+    Math.ceil(rightSample / ACTIVITY_FRAME_SAMPLES)
+  );
+  let firstActive = -1;
+  let lastActive = -1;
+  for (let frame = firstFrame; frame < frameEnd; frame += 1) {
+    if (activity[frame] === 0) continue;
+    if (firstActive < 0) firstActive = frame;
+    lastActive = frame;
+  }
+  if (firstActive < 0) return;
+  const startSample = Math.max(leftSample, firstActive * ACTIVITY_FRAME_SAMPLES);
+  const endSample = Math.min(
+    rightSample,
+    sampleCount,
+    (lastActive + 1) * ACTIVITY_FRAME_SAMPLES
+  );
+  if (endSample > startSample) segments.push({ startSample, endSample });
+}
+
+function segmentSamplesByActivity(samples: Float32Array): ActivitySegment[] {
+  if (!samples.length) return [];
+  const frameCount = Math.ceil(samples.length / ACTIVITY_FRAME_SAMPLES);
+  const frameDbfsValues = new Float64Array(frameCount);
+  for (let frame = 0; frame < frameCount; frame += 1) {
+    const startSample = frame * ACTIVITY_FRAME_SAMPLES;
+    frameDbfsValues[frame] = frameDbfs(
+      samples,
+      startSample,
+      Math.min(samples.length, startSample + ACTIVITY_FRAME_SAMPLES)
+    );
+  }
+  const orderedDbfs = frameDbfsValues.slice();
+  orderedDbfs.sort();
+  const percentilePosition = (orderedDbfs.length - 1) * NOISE_FLOOR_PERCENTILE;
+  const percentileLower = Math.floor(percentilePosition);
+  const percentileUpper = Math.ceil(percentilePosition);
+  const percentileFraction = percentilePosition - percentileLower;
+  const noiseFloor =
+    orderedDbfs[percentileLower] * (1 - percentileFraction) +
+    orderedDbfs[percentileUpper] * percentileFraction;
+  const threshold = Math.min(
+    ACTIVITY_THRESHOLD_MAX_DBFS,
+    Math.max(ACTIVITY_THRESHOLD_MIN_DBFS, noiseFloor + ACTIVITY_THRESHOLD_MARGIN_DB)
+  );
+
+  const activity = new Uint8Array(frameCount);
+  for (let frame = 0; frame < frameCount; frame += 1) {
+    if (frameDbfsValues[frame] >= threshold) activity[frame] = 1;
+  }
+  smoothActivity(activity);
+
+  let firstActive = 0;
+  while (firstActive < activity.length && activity[firstActive] === 0) firstActive += 1;
+  if (firstActive === activity.length) return [];
+  let lastActiveEnd = activity.length;
+  while (lastActiveEnd > firstActive && activity[lastActiveEnd - 1] === 0) lastActiveEnd -= 1;
+
+  const segments: ActivitySegment[] = [];
+  let leftSample = firstActive * ACTIVITY_FRAME_SAMPLES;
+  let frame = firstActive;
+  while (frame < lastActiveEnd) {
+    if (activity[frame] !== 0) {
+      frame += 1;
+      continue;
+    }
+    const silenceStart = frame;
+    while (frame < lastActiveEnd && activity[frame] === 0) frame += 1;
+    if (
+      frame - silenceStart >= COARSE_SILENCE_FRAMES &&
+      silenceStart > firstActive &&
+      frame < lastActiveEnd
+    ) {
+      const rightSample =
+        Math.floor((silenceStart + frame) / 2) * ACTIVITY_FRAME_SAMPLES;
+      appendTrimmedActivitySegment(
+        segments,
+        activity,
+        samples.length,
+        leftSample,
+        rightSample
+      );
+      leftSample = rightSample;
+    }
+  }
+  appendTrimmedActivitySegment(
+    segments,
+    activity,
+    samples.length,
+    leftSample,
+    Math.min(samples.length, lastActiveEnd * ACTIVITY_FRAME_SAMPLES)
+  );
+  return segments;
+}
+
+function firstWordAtOrAfterMidpoint(words: readonly LocalWord[], seconds: number): number {
+  let left = 0;
+  let right = words.length;
+  while (left < right) {
+    const middle = left + Math.floor((right - left) / 2);
+    const word = words[middle];
+    if ((word.startSeconds + word.endSeconds) / 2 < seconds) left = middle + 1;
+    else right = middle;
+  }
+  return left;
+}
+
+function groupWordsByActivitySegments(
+  words: readonly LocalWord[],
+  segments: readonly ActivitySegment[]
+): SegmentedWordRange[] {
+  const groups: SegmentedWordRange[] = [];
+  for (const segment of segments) {
+    const startSeconds = segment.startSample / SAMPLE_RATE;
+    const endSeconds = segment.endSample / SAMPLE_RATE;
+    const wordStart = firstWordAtOrAfterMidpoint(words, startSeconds);
+    const wordEnd = firstWordAtOrAfterMidpoint(words, endSeconds);
+    if (wordStart < wordEnd) groups.push({ ...segment, wordStart, wordEnd });
+  }
+  return groups;
+}
+
+function compareWordsByMidpoint(left: LocalWord, right: LocalWord): number {
+  return (
+    (left.startSeconds + left.endSeconds) / 2 -
+      (right.startSeconds + right.endSeconds) / 2 ||
+    left.startSeconds - right.startSeconds ||
+    left.endSeconds - right.endSeconds ||
+    left.text.localeCompare(right.text)
+  );
+}
+
+async function labelRecognition(
+  recognized: SampleRecognition,
+  punctuator: WordPunctuator
+): Promise<RecognitionWithLabels> {
+  const labels = await punctuator(recognized.tokens.map((word) => word.text));
+  return { ...recognized, labels };
+}
+
+async function recognizeAndLabelSamples(
+  samples: Float32Array,
+  recognizer?: SampleRecognizer,
+  punctuator: WordPunctuator = predictPunctuation
+): Promise<RecognitionWithLabels> {
+  const recognized = recognizer
+    ? await recognizer(samples, 0)
+    : await recognizeSamplesInChunks(samples);
+  return labelRecognition(recognized, punctuator);
+}
+
+async function recognizeAndLabelDraftSamples(
+  samples: Float32Array
+): Promise<RecognitionWithLabels> {
+  const recognized = await recognizeSamplesInChunks(samples);
+  recognized.tokens.sort(compareWordsByMidpoint);
+  return labelRecognition(recognized, predictPunctuation);
+}
+
 
 
 async function transcribeSamples(
@@ -964,17 +1185,17 @@ async function transcribeSamples(
   recognizer?: SampleRecognizer,
   punctuator: WordPunctuator = predictPunctuation
 ): Promise<TranscriptWithLabels> {
-  const recognized = recognizer
-    ? await recognizer(samples, 0)
-    : await recognizeSamplesInChunks(samples);
-  const words = recognized.tokens.map((word) => word.text);
-  const labels = await punctuator(words);
-  const rendered = renderBoundaryLabels(words, labels);
+  const recognized = await recognizeAndLabelSamples(samples, recognizer, punctuator);
+  const rendered = renderBoundaryLabels(
+    recognized.tokens.map((word) => word.text),
+    recognized.labels
+  );
   if (recognized.tokens.length && !rendered.text) {
     throw new Error('Punctuation rendering produced empty text for non-empty ASR words.');
   }
-  return { text: rendered.text, ...recognized, labels };
+  return { text: rendered.text, ...recognized };
 }
+
 
 export async function transcribeLocalAudio(
   blob: Blob,
@@ -1130,23 +1351,6 @@ export async function generateLocalL0SegmentDraft(
   }
 }
 
-function groupWordRows(words: readonly LocalWord[]): Array<{ start: number; end: number }> {
-  const groups: Array<{ start: number; end: number }> = [];
-  if (!words.length) return groups;
-  let start = 0;
-  for (let index = 1; index < words.length; index += 1) {
-    const shouldSplit =
-      words[index].startSeconds - words[index - 1].endSeconds >= 0.8 ||
-      words[index].endSeconds - words[start].startSeconds > 12 ||
-      index - start >= 32;
-    if (shouldSplit) {
-      groups.push({ start, end: index });
-      start = index;
-    }
-  }
-  groups.push({ start, end: words.length });
-  return groups;
-}
 
 export async function generateLocalL0Draft(
   _settings: ExtensionSettings,
@@ -1165,32 +1369,34 @@ export async function generateLocalL0Draft(
   let wordCount = 0;
   for (let laneIndex = 0; laneIndex < prepared.length; laneIndex += 1) {
     const track = prepared[laneIndex];
-    let transcript: TranscriptWithLabels;
+    let transcript: RecognitionWithLabels;
+    let segments: ActivitySegment[];
     try {
       const samples = await decodeAndResampleAudio(track.audio.blob, null);
-      transcript = await transcribeSamples(samples);
+      segments = segmentSamplesByActivity(samples);
+      transcript = await recognizeAndLabelDraftSamples(samples);
     } catch (error) {
       throw actionableError(`draft lane "${track.lane}"`, error);
     }
-    wordCount += transcript.tokens.length;
-    const groups = groupWordRows(transcript.tokens);
+    const groups = groupWordsByActivitySegments(transcript.tokens, segments);
     let sentenceStart = true;
     for (let groupIndex = 0; groupIndex < groups.length; groupIndex += 1) {
       const group = groups[groupIndex];
-      const lexicalWords = transcript.tokens.slice(group.start, group.end).map((word) => word.text);
+      const lexicalWords = transcript.tokens
+        .slice(group.wordStart, group.wordEnd)
+        .map((word) => word.text);
       const rendered = renderBoundaryLabels(
         lexicalWords,
-        transcript.labels.slice(group.start, group.end),
+        transcript.labels.slice(group.wordStart, group.wordEnd),
         sentenceStart
       );
       sentenceStart = rendered.sentenceStart;
-      const first = transcript.tokens[group.start];
-      const last = transcript.tokens[group.end - 1];
+      wordCount += group.wordEnd - group.wordStart;
       rows.push({
         id: `${job.jobId}:${track.lane}:${String(groupIndex).padStart(6, '0')}`,
         lane: track.lane,
-        startSeconds: Math.max(0, Number((first.startSeconds - 0.01).toFixed(6))),
-        endSeconds: Number(Math.min(transcript.durationSeconds, last.endSeconds + 0.01).toFixed(6)),
+        startSeconds: Number((group.startSample / SAMPLE_RATE).toFixed(6)),
+        endSeconds: Number((group.endSample / SAMPLE_RATE).toFixed(6)),
         text: rendered.text
       });
     }
@@ -1271,7 +1477,9 @@ export const __localModelRuntimeTesting = {
   renderBoundaryLabels,
   resolveMaxDurationSeconds,
   clippedFrameCount,
-  groupWordRows,
+  segmentSamplesByActivity,
+  groupWordsByActivitySegments,
+  compareWordsByMidpoint,
   float32ToFloat16,
   float16ToFloat32
 };
