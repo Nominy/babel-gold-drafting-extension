@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { captureAudioTracksForDrafting, installAudioRequestCapture } from '../src/core/audio-cues';
-import { AUDIO_RESPONSE_MESSAGE_TYPE, AUDIO_SOURCE_MESSAGE_TYPE } from '../src/core/audio-intercept-protocol';
+import { AUDIO_RESPONSE_MESSAGE_TYPE, AUDIO_SOURCE_MESSAGE_TYPE, PAGE_TASK_ID_ATTRIBUTE } from '../src/core/audio-intercept-protocol';
 
 function installDom(html: string) {
   const dom = new JSDOM(html, { url: 'https://dashboard.babel.audio/transcription/RU-transcription?jobId=job-42' });
@@ -526,4 +526,176 @@ test('captureAudioTracksForDrafting skips DOM fallback audio when lane-mapped tr
     'https://dashboard.babel.audio/audio-speaker-1.webm',
     'https://dashboard.babel.audio/audio-speaker-2.webm'
   ]);
+});
+
+test('concurrent audio consumers cannot clear each other’s pending capture', async () => {
+  const dom = installDom('<main></main>');
+  installAudioRequestCapture();
+  const flushes: Array<() => void> = [];
+  dom.window.setTimeout = ((callback: () => void) => {
+    flushes.push(callback);
+    return flushes.length;
+  }) as typeof dom.window.setTimeout;
+
+  const firstCapture = captureAudioTracksForDrafting();
+  const secondCapture = captureAudioTracksForDrafting();
+  window.dispatchEvent(new dom.window.MessageEvent('message', {
+    source: window,
+    data: {
+      type: AUDIO_RESPONSE_MESSAGE_TYPE,
+      url: 'https://dashboard.babel.audio/audio/speaker-1.wav',
+      mimeType: 'audio/wav',
+      trackId: 'speaker-1',
+      speakerKey: 'speaker-1',
+      source: 'fetch',
+      capturedAt: 1,
+      bytes: new Uint8Array([1, 2, 3, 4]).buffer
+    }
+  }));
+
+  flushes[0]!();
+  const first = await firstCapture;
+  flushes[1]!();
+  const second = await secondCapture;
+  for (const tracks of [first, second]) {
+    assert.deepEqual(tracks.map((track) => [track.speakerKey, track.blob.size]), [['speaker-1', 4]]);
+  }
+});
+
+test('unavailable lane URLs preserve captured lanes and allow a working alternate source', async () => {
+  const dom = installDom('<main></main>');
+  installAudioRequestCapture();
+  const blobUrl = 'blob:https://dashboard.babel.audio/available-lane';
+  globalThis.fetch = async (input: RequestInfo | URL) => ({
+    ok: String(input) === blobUrl,
+    status: String(input) === blobUrl ? 200 : 404,
+    blob: async () => new dom.window.Blob(['audio'], { type: 'audio/wav' })
+  }) as Response;
+
+  for (const [url, speakerKey] of [
+    ['https://dashboard.babel.audio/audio/speaker-2.wav', 'speaker-2'],
+    ['https://dashboard.babel.audio/audio/speaker-1.wav', 'speaker-1'],
+    [blobUrl, 'speaker-1']
+  ]) {
+    window.dispatchEvent(new dom.window.MessageEvent('message', {
+      source: window,
+      data: {
+        type: AUDIO_SOURCE_MESSAGE_TYPE,
+        url,
+        speakerKey,
+        discoveredAt: 1
+      }
+    }));
+  }
+
+  const tracks = await captureAudioTracksForDrafting();
+  assert.deepEqual(tracks.map((track) => [track.speakerKey, track.source, track.blob.size]), [
+    ['speaker-1', blobUrl, 5]
+  ]);
+});
+
+test('rejected source requests and body reads preserve valid lanes and working alternates', async () => {
+  const dom = installDom('<main></main>');
+  installAudioRequestCapture();
+  const revokedUrl = 'blob:https://dashboard.babel.audio/revoked';
+  const unreadableUrl = 'blob:https://dashboard.babel.audio/unreadable';
+  const workingUrl = 'blob:https://dashboard.babel.audio/working';
+  window.dispatchEvent(new dom.window.MessageEvent('message', {
+    source: window,
+    data: {
+      type: AUDIO_RESPONSE_MESSAGE_TYPE,
+      url: 'https://dashboard.babel.audio/audio/speaker-1.wav',
+      mimeType: 'audio/wav',
+      speakerKey: 'speaker-1',
+      source: 'fetch',
+      capturedAt: 1,
+      bytes: new Uint8Array([1, 2, 3, 4]).buffer
+    }
+  }));
+  for (const [url, speakerKey] of [
+    ['https://dashboard.babel.audio/audio/speaker-1.wav', 'speaker-1'],
+    [revokedUrl, 'speaker-2'],
+    [unreadableUrl, 'speaker-3'],
+    [workingUrl, 'speaker-2']
+  ]) {
+    window.dispatchEvent(new dom.window.MessageEvent('message', {
+      source: window,
+      data: { type: AUDIO_SOURCE_MESSAGE_TYPE, url, speakerKey, discoveredAt: 1 }
+    }));
+  }
+  globalThis.fetch = async (input: RequestInfo | URL) => {
+    if (String(input) === revokedUrl) throw new TypeError('Failed to fetch');
+    return {
+      ok: true,
+      status: 200,
+      blob: async () => {
+        if (String(input) === unreadableUrl) throw new TypeError('Response body stream failed');
+        return new dom.window.Blob(['audio'], { type: 'audio/wav' });
+      }
+    } as Response;
+  };
+
+  const tracks = await captureAudioTracksForDrafting();
+  assert.deepEqual(tracks.map((track) => [track.speakerKey, track.blob.size]), [
+    ['speaker-1', 4],
+    ['speaker-2', 5]
+  ]);
+});
+
+test('SPA task changes isolate concurrent capture caches and reject stale completions', async () => {
+  const dom = installDom('<main></main>');
+  // The published identity can lag behind navigation until page-world refresh.
+  dom.window.document.documentElement.setAttribute(PAGE_TASK_ID_ATTRIBUTE, 'task-a');
+  installAudioRequestCapture();
+  const flushes: Array<() => void> = [];
+  dom.window.setTimeout = ((callback: () => void) => {
+    flushes.push(callback);
+    return flushes.length;
+  }) as typeof dom.window.setTimeout;
+  const taskAUrl = 'https://dashboard.babel.audio/audio/task-a.wav';
+  const taskBUrl = 'https://dashboard.babel.audio/audio/task-b.wav';
+  const announce = (url: string) => window.dispatchEvent(new dom.window.MessageEvent('message', {
+    source: window,
+    data: { type: AUDIO_SOURCE_MESSAGE_TYPE, url, speakerKey: 'speaker-1', discoveredAt: 1 }
+  }));
+  const response = () => ({
+    ok: true,
+    status: 200,
+    blob: async () => new dom.window.Blob(['audio'], { type: 'audio/wav' })
+  }) as Response;
+  let finishOldFetch!: (response: Response) => void;
+  let reachedOldFetch!: () => void;
+  const oldFetchStarted = new Promise<void>((resolve) => { reachedOldFetch = resolve; });
+  let taskAFetches = 0;
+  globalThis.fetch = async (input: RequestInfo | URL) => {
+    if (String(input) === taskAUrl && ++taskAFetches === 2) {
+      return new Promise<Response>((resolve) => {
+        finishOldFetch = resolve;
+        reachedOldFetch();
+      });
+    }
+    return response();
+  };
+
+  announce(taskAUrl);
+  const firstA = captureAudioTracksForDrafting();
+  const pendingA = captureAudioTracksForDrafting();
+  flushes[0]!();
+  assert.deepEqual((await firstA).map((track) => track.source), [taskAUrl]);
+  flushes[1]!();
+  await oldFetchStarted;
+
+  dom.window.history.replaceState({}, '', '?jobId=task-b');
+  announce(taskBUrl);
+  const firstB = captureAudioTracksForDrafting();
+  const pendingB = captureAudioTracksForDrafting();
+  flushes[2]!();
+  assert.deepEqual((await firstB).map((track) => track.source), [taskBUrl]);
+
+  const staleCompletion = assert.rejects(pendingA, /Audio capture task changed/);
+  finishOldFetch(response());
+  await staleCompletion;
+  flushes[3]!();
+  assert.deepEqual((await pendingB).map((track) => track.source), [taskBUrl]);
+  assert.equal(taskAFetches, 2);
 });

@@ -1,4 +1,4 @@
-import { createJsonClient, normalizeBaseUrl } from '@nominy/babel-extension-frontend';
+import { normalizeBaseUrl } from '@nominy/babel-extension-frontend';
 import type {
   GenerateDraftErrorEvent,
   GenerateDraftRequest,
@@ -55,29 +55,8 @@ function getErrorMessage(status: number, payload: unknown): string {
   return `HTTP ${status}`;
 }
 
-async function parseGenerateDraftResponse(response: Response): Promise<GenerateDraftResponse> {
-  const payload = await parseJsonResponse(response);
-  if (!response.ok) {
-    throw new Error(getErrorMessage(response.status, payload));
-  }
-  if (!payload || typeof payload !== 'object') {
-    throw new Error('Backend returned non-JSON payload.');
-  }
-  return payload as GenerateDraftResponse;
-}
-
-export async function generateDraft(
-  backendBaseUrl: string,
-  payload: GenerateDraftRequest
-): Promise<GenerateDraftResponse> {
-  const client = createJsonClient({
-    getBaseCandidates: () => [normalizeBaseUrl(backendBaseUrl)]
-  });
-  return client.post<GenerateDraftResponse>('/api/draft/generate', payload);
-}
-
-function createBrokerFormData(
-  payload: BrokerTranscribeSegmentRequest | BrokerRedistributeTextRequest,
+function createRequestFormData(
+  payload: GenerateDraftRequest | BrokerTranscribeSegmentRequest | BrokerRedistributeTextRequest,
   audioTracks: CapturedAudioTrack[] = []
 ): FormData {
   const body = new FormData();
@@ -98,7 +77,7 @@ function createBrokerFormData(
   return body;
 }
 
-async function parseBrokerJsonResponse<T>(response: Response): Promise<T> {
+async function parseObjectResponse<T>(response: Response): Promise<T> {
   const payload = await parseJsonResponse(response);
   if (!response.ok) {
     throw new Error(getErrorMessage(response.status, payload));
@@ -133,11 +112,11 @@ async function fetchBrokerJsonResponse<T>(
       headers: {
         Accept: 'application/json'
       },
-      body: createBrokerFormData(payload, audioTracks),
+      body: createRequestFormData(payload, audioTracks),
       signal: controller.signal
     });
 
-    return await parseBrokerJsonResponse<T>(response);
+    return await parseObjectResponse<T>(response);
   } catch (error) {
     if (controller.signal.aborted) {
       const reason = (controller.signal as AbortSignal & { reason?: unknown }).reason;
@@ -186,7 +165,7 @@ async function reconcileDraftWithFormPayload(
   payload: GenerateDraftRequest,
   audioTracks: CapturedAudioTrack[] = []
 ): Promise<GenerateDraftResponse> {
-  const body = createGenerateDraftFormData(payload, audioTracks);
+  const body = createRequestFormData(payload, audioTracks);
 
   const response = await fetch(getEndpointUrl(backendBaseUrl, '/api/draft/generate'), {
     method: 'POST',
@@ -196,7 +175,7 @@ async function reconcileDraftWithFormPayload(
     body
   });
 
-  return parseGenerateDraftResponse(response);
+  return parseObjectResponse<GenerateDraftResponse>(response);
 }
 
 function normalizeError(error: unknown): Error {
@@ -249,28 +228,6 @@ async function reconcileDraftSession(
   throw lastError;
 }
 
-function createGenerateDraftFormData(
-  payload: GenerateDraftRequest,
-  audioTracks: CapturedAudioTrack[] = []
-): FormData {
-  const body = new FormData();
-  body.set('payload', JSON.stringify(payload));
-  for (const track of audioTracks) {
-    const extension = track.mimeType.includes('wav') ? 'wav' : track.mimeType.includes('mpeg') ? 'mp3' : 'bin';
-    body.append(`audioTrack:${track.trackId}`, track.blob, `${track.trackId}.${extension}`);
-    body.set(
-      `audioTrackMeta:${track.trackId}`,
-      JSON.stringify({
-        source: track.source,
-        speakerKey: track.speakerKey || '',
-        trackLabel: track.trackLabel || '',
-        mimeType: track.mimeType
-      })
-    );
-  }
-  return body;
-}
-
 async function generateDraftStreamCore(
   backendBaseUrl: string,
   payload: GenerateDraftRequest,
@@ -278,7 +235,7 @@ async function generateDraftStreamCore(
   audioTracks: CapturedAudioTrack[] = []
 ): Promise<GenerateDraftResponse> {
   const hasAudioTracks = audioTracks.length > 0;
-  const body = hasAudioTracks ? createGenerateDraftFormData(payload, audioTracks) : JSON.stringify(payload);
+  const body = hasAudioTracks ? createRequestFormData(payload, audioTracks) : JSON.stringify(payload);
   const headers: Record<string, string> = {
     Accept: 'text/event-stream'
   };

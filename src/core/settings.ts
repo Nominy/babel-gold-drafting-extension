@@ -23,10 +23,6 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
   localModelsEnabled: false,
 };
 
-function getStorageArea() {
-  const chromeApi = globalThis.chrome;
-  return chromeApi?.storage?.local ?? null;
-}
 export function normalizeL0CustomBaseUrl(input: unknown): string {
   if (typeof input !== 'string' || !input.trim()) {
     return DEFAULT_L0_CUSTOM_BASE_URL;
@@ -52,7 +48,7 @@ export function normalizeL0CustomBaseUrl(input: unknown): string {
 
 
 export function normalizeSettings(input: unknown): ExtensionSettings {
-  const raw = input && typeof input === 'object' ? (input as Partial<ExtensionSettings>) : {};
+  const raw = input && typeof input === 'object' ? (input as Record<string, unknown>) : {};
   const backendBaseUrl =
     typeof raw.backendBaseUrl === 'string' && raw.backendBaseUrl.trim()
       ? raw.backendBaseUrl.trim().replace(/\/+$/, '')
@@ -111,14 +107,13 @@ export function normalizeSettings(input: unknown): ExtensionSettings {
 const settingsStore = createSettingsStore<ExtensionSettings>({
   storageKey: SETTINGS_STORAGE_KEY,
   defaults: DEFAULT_SETTINGS,
-  normalize: normalizeSettings,
-  getStorageArea
+  normalize: normalizeSettings
 });
 
 export async function loadSettings(): Promise<ExtensionSettings> {
   return settingsStore.loadSettings();
 }
 
-export async function saveSettings(settings: ExtensionSettings): Promise<ExtensionSettings> {
-  return settingsStore.saveSettings(settings);
+export async function saveSettings(settings: unknown): Promise<ExtensionSettings> {
+  return settingsStore.saveSettings(normalizeSettings(settings));
 }

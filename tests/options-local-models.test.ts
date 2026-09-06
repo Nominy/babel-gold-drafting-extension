@@ -317,3 +317,67 @@ test('supplied sample fetch failures are actionable and never run inference', as
   assert.match(status.textContent ?? '', /Babel model supplier returned HTTP 404/);
   assert.equal(status.getAttribute('role'), 'alert');
 });
+
+test('settings controls use canonical enum normalization and retain unsaved edits on failure', async (t) => {
+  const dom = createDom();
+  t.after(() => dom.window.close());
+  const storageData = {
+    [SETTINGS_KEY]: {
+      ...defaultSettings(),
+      serviceTier: 'priority',
+      reasoningEffort: 'high',
+      aiBrokerProvider: 'remote-openrouter',
+      l0ReplacementPreviewEnabled: false
+    }
+  };
+  const storage = installChromeStorage(storageData);
+  await boot(unusedDependencies());
+  const select = (id: string) => {
+    const element = dom.window.document.querySelector<HTMLSelectElement>(`#${id}`);
+    assert.ok(element);
+    return element;
+  };
+  const serviceTier = select('serviceTier');
+  const reasoningEffort = select('reasoningEffort');
+  const provider = select('aiBrokerProvider');
+  const save = dom.window.document.querySelector<HTMLButtonElement>('[data-role="save"]');
+  const status = dom.window.document.querySelector<HTMLElement>('[data-role="status"]');
+  assert.ok(save);
+  assert.ok(status);
+  assert.equal(serviceTier.value, 'priority');
+  assert.equal(reasoningEffort.value, 'high');
+  assert.equal(provider.value, 'remote-openrouter');
+
+  // An unrecognized DOM selection must use the same fallback as persisted raw input.
+  serviceTier.value = 'invalid';
+  reasoningEffort.value = 'invalid';
+  provider.value = 'invalid';
+  save.click();
+  await waitForImmediate();
+  assert.equal(storage.getStoredSettings()?.serviceTier, 'flex');
+  assert.equal(storage.getStoredSettings()?.reasoningEffort, 'low');
+  assert.equal(storage.getStoredSettings()?.aiBrokerProvider, 'auto');
+  assert.equal(serviceTier.value, 'flex');
+  assert.equal(reasoningEffort.value, 'low');
+  assert.equal(provider.value, 'auto');
+
+  serviceTier.value = 'default';
+  reasoningEffort.value = 'xhigh';
+  provider.value = 'local-gemini-nano';
+  save.click();
+  await waitForImmediate();
+  assert.equal(storage.getStoredSettings()?.serviceTier, 'default');
+  assert.equal(storage.getStoredSettings()?.reasoningEffort, 'xhigh');
+  assert.equal(storage.getStoredSettings()?.aiBrokerProvider, 'local-gemini-nano');
+
+  Object.assign(globalThis.chrome.storage.local, {
+    set() { throw new Error('Storage write failed'); }
+  });
+  serviceTier.value = 'priority';
+  save.click();
+  await waitForImmediate();
+  assert.equal(status.getAttribute('role'), 'alert');
+  assert.match(status.textContent ?? '', /Storage write failed/);
+  assert.equal(serviceTier.value, 'priority');
+  assert.equal(storage.getStoredSettings()?.serviceTier, 'default');
+});

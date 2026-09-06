@@ -12,7 +12,7 @@ import {
   type AudioResponseMessage,
   type PageTaskIdResponseMessage
 } from '../core/audio-intercept-protocol';
-import { isLikelyAudioSource } from '../core/audio-url';
+import { isBlobUrl, isLikelyAudioSource } from '../core/audio-url';
 
 declare global {
   interface Window {
@@ -78,20 +78,56 @@ function getReactFiber(element: Element | null): Record<string, unknown> | null 
   return fiber && typeof fiber === 'object' ? (fiber as Record<string, unknown>) : null;
 }
 
-function readCurrentReviewActionId(): string {
-  const textarea = document.querySelector('textarea[placeholder^="What was said"]');
-  let fiber = getReactFiber(textarea);
-  let depth = 0;
-  while (fiber && depth <= 30) {
-    const props = fiber.memoizedProps;
-    if (props && typeof props === 'object' && 'reviewActionId' in props) {
-      const reviewActionId = readString((props as Record<string, unknown>).reviewActionId);
-      if (reviewActionId) return reviewActionId;
+type ReactFiberNode = {
+  memoizedProps?: unknown;
+  return?: ReactFiberNode;
+  child?: ReactFiberNode;
+  sibling?: ReactFiberNode;
+  alternate?: ReactFiberNode;
+  stateNode?: { current?: ReactFiberNode };
+};
+
+function getCommittedReactPath(element: Element | null): ReactFiberNode[] {
+  let fiber = getReactFiber(element) as ReactFiberNode | null;
+  if (!fiber) return [];
+  const ancestry: ReactFiberNode[] = [];
+  while (fiber.return) {
+    ancestry.push(fiber);
+    fiber = fiber.return;
+  }
+  const root = fiber.stateNode?.current;
+  if (!root) return [];
+  let current: ReactFiberNode = root;
+  const committed: ReactFiberNode[] = [current];
+  // DOM expandos can retain either alternate. Use the same committed-root
+  // descent as Helper's native annotation bindings, not stale return props.
+  for (let index = ancestry.length - 1; index >= 0; index -= 1) {
+    const expected = ancestry[index]!;
+    let child: ReactFiberNode | undefined = current.child;
+    while (child && child !== expected && child !== expected.alternate) {
+      child = child.sibling;
     }
-    fiber = fiber.return && typeof fiber.return === 'object'
-      ? (fiber.return as Record<string, unknown>)
-      : null;
-    depth += 1;
+    if (!child) return [];
+    committed.push(child);
+    current = child;
+  }
+  return committed;
+}
+
+function readCurrentReviewActionId(): string {
+  const seeds = [
+    document.querySelector('textarea[placeholder^="What was said"]'),
+    ...document.querySelectorAll('tbody, table, main')
+  ];
+  for (const seed of seeds) {
+    const path = getCommittedReactPath(seed);
+    for (let index = path.length - 1; index >= Math.max(0, path.length - 31); index -= 1) {
+      const props = path[index]!.memoizedProps;
+      if (props && typeof props === 'object' && 'reviewActionId' in props) {
+        const reviewActionId = readString((props as Record<string, unknown>).reviewActionId);
+        if (reviewActionId) return reviewActionId;
+      }
+    }
   }
   return '';
 }
@@ -196,7 +232,7 @@ function collectAudioUrls(value: unknown, urls: Set<string> = new Set(), depth =
     'waveformUrl'
   ]) {
     const text = readString(record[key]);
-    if (text && isAudioResponse(text, '')) {
+    if (text && (isBlobUrl(text) || isAudioResponse(text, ''))) {
       urls.add(toAbsoluteUrl(text));
     }
   }
@@ -254,8 +290,7 @@ function collectWaveformAudioMappings(): Map<string, TrackMapping> {
   return mappings;
 }
 
-function postAudioSources(): void {
-  const mappings = collectWaveformAudioMappings();
+function postAudioSources(mappings = collectWaveformAudioMappings()): void {
   for (const [url, mapping] of mappings.entries()) {
     window.postMessage(
       {
@@ -270,19 +305,14 @@ function postAudioSources(): void {
   }
 }
 
-function getTrackMapping(url: string): TrackMapping {
-  const mappings = collectWaveformAudioMappings();
-  return mappings.get(toAbsoluteUrl(url)) || {};
-}
-
-function enrichAudioRecord(record: StoredAudioResponse): StoredAudioResponse {
-  if (record.speakerKey || record.trackId || record.trackLabel) {
-    return record;
-  }
-
+function enrichAudioRecord(record: StoredAudioResponse, mappings = collectWaveformAudioMappings()): StoredAudioResponse {
+  const mapping = mappings.get(toAbsoluteUrl(record.url));
   return {
     ...record,
-    ...getTrackMapping(record.url)
+    trackId: mapping?.trackId,
+    speakerKey: mapping?.speakerKey,
+    trackLabel: mapping?.trackLabel,
+    mappingSource: mapping?.mappingSource
   };
 }
 
@@ -315,7 +345,6 @@ async function captureArrayBuffer(args: {
 
   rememberAndPost({
     url: args.url,
-    ...getTrackMapping(args.url),
     mimeType: args.mimeType || 'application/octet-stream',
     source: args.source,
     capturedAt: Date.now(),
@@ -326,7 +355,7 @@ async function captureArrayBuffer(args: {
 function captureFetchResponse(response: Response, requestUrl: string): void {
   const url = response.url || requestUrl;
   const mimeType = response.headers.get('content-type') || '';
-  if (!isAudioResponse(url, mimeType)) {
+  if (!response.ok || !isAudioResponse(url, mimeType)) {
     return;
   }
 
@@ -389,7 +418,7 @@ function installXhrInterceptor(): void {
       () => {
         const url = this.responseURL || requestUrls.get(this) || '';
         const mimeType = this.getResponseHeader('content-type') || '';
-        if (!isAudioResponse(url, mimeType)) {
+        if (this.status < 200 || this.status >= 300 || !isAudioResponse(url, mimeType)) {
           return;
         }
 
@@ -434,9 +463,12 @@ function installFlushHandler(): void {
     if (!event.data || typeof event.data !== 'object' || event.data.type !== AUDIO_FLUSH_REQUEST_MESSAGE_TYPE) {
       return;
     }
-    postAudioSources();
+    const mappings = collectWaveformAudioMappings();
+    postAudioSources(mappings);
     for (let index = 0; index < storedResponses.length; index += 1) {
-      const record = enrichAudioRecord(storedResponses[index]!);
+      // A buffered response only belongs to a lane while its URL is still
+      // present in the current task's native waveform registry.
+      const record = enrichAudioRecord(storedResponses[index]!, mappings);
       storedResponses[index] = record;
       window.postMessage(
         {

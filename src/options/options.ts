@@ -12,6 +12,7 @@ import {
   type LocalModelStatus
 } from '../core/local-model-bundle';
 import { transcribeLocalAudio } from '../core/local-model-runtime';
+import type { ExtensionSettings } from '../core/types';
 
 const MAX_TEST_AUDIO_SECONDS = 15;
 
@@ -180,21 +181,25 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
     renderLocalModelControls();
   };
 
+  const writeSettingsToControls = (settings: ExtensionSettings): void => {
+    backendBaseUrlInput.value = settings.backendBaseUrl;
+    projectPresetSelect.value = settings.projectPreset;
+    openRouterApiKeyInput.value = settings.openRouterApiKey;
+    modelInput.value = settings.model;
+    serviceTierSelect.value = settings.serviceTier;
+    reasoningEffortSelect.value = settings.reasoningEffort;
+    aiBrokerProviderSelect.value = settings.aiBrokerProvider;
+    l0ReplacementPreviewEnabledInput.checked = settings.l0ReplacementPreviewEnabled;
+    l0CustomBaseUrlInput.value = settings.l0CustomBaseUrl;
+    l0DontRunLlmInput.checked = settings.l0DontRunLlm;
+    audioInputEnabledInput.checked = settings.audioInputEnabled;
+    localModelsEnabledInput.checked = settings.localModelsEnabled;
+    renderL0ReplacementSettings();
+  };
+
   let persistedSettings = await loadSettings();
   const settings = persistedSettings;
-  backendBaseUrlInput.value = settings.backendBaseUrl;
-  projectPresetSelect.value = settings.projectPreset;
-  openRouterApiKeyInput.value = settings.openRouterApiKey;
-  modelInput.value = settings.model;
-  serviceTierSelect.value = settings.serviceTier;
-  reasoningEffortSelect.value = settings.reasoningEffort;
-  aiBrokerProviderSelect.value = settings.aiBrokerProvider;
-  l0ReplacementPreviewEnabledInput.checked = settings.l0ReplacementPreviewEnabled;
-  l0CustomBaseUrlInput.value = settings.l0CustomBaseUrl;
-  l0DontRunLlmInput.checked = settings.l0DontRunLlm;
-  audioInputEnabledInput.checked = settings.audioInputEnabled;
-  localModelsEnabledInput.checked = settings.localModelsEnabled;
-  renderL0ReplacementSettings();
+  writeSettingsToControls(settings);
   await refreshLocalModelStatus();
   if (settings.localModelsEnabled && localModelStatus.state === 'ready') {
     localModelTestSucceeded = true;
@@ -385,26 +390,9 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
           projectPreset: 'ru-gold-2sp-v1',
           openRouterApiKey: openRouterApiKeyInput.value,
           model: modelInput.value,
-          serviceTier:
-            serviceTierSelect.value === 'default' || serviceTierSelect.value === 'priority' || serviceTierSelect.value === 'flex'
-              ? serviceTierSelect.value
-              : 'flex',
-          reasoningEffort:
-            reasoningEffortSelect.value === 'default' ||
-            reasoningEffortSelect.value === 'none' ||
-            reasoningEffortSelect.value === 'minimal' ||
-            reasoningEffortSelect.value === 'low' ||
-            reasoningEffortSelect.value === 'medium' ||
-            reasoningEffortSelect.value === 'high' ||
-            reasoningEffortSelect.value === 'xhigh'
-              ? reasoningEffortSelect.value
-              : 'low',
-          aiBrokerProvider:
-            aiBrokerProviderSelect.value === 'auto' ||
-            aiBrokerProviderSelect.value === 'remote-openrouter' ||
-            aiBrokerProviderSelect.value === 'local-gemini-nano'
-              ? aiBrokerProviderSelect.value
-              : 'auto',
+          serviceTier: serviceTierSelect.value,
+          reasoningEffort: reasoningEffortSelect.value,
+          aiBrokerProvider: aiBrokerProviderSelect.value,
           l0ReplacementPreviewEnabled: l0ReplacementPreviewEnabledInput.checked,
           l0CustomBaseUrl,
           l0DontRunLlm: l0DontRunLlmInput.checked,
@@ -414,19 +402,7 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
       )
       .then((saved) => {
         persistedSettings = saved;
-        backendBaseUrlInput.value = saved.backendBaseUrl;
-        projectPresetSelect.value = saved.projectPreset;
-        openRouterApiKeyInput.value = saved.openRouterApiKey;
-        modelInput.value = saved.model;
-        serviceTierSelect.value = saved.serviceTier;
-        reasoningEffortSelect.value = saved.reasoningEffort;
-        aiBrokerProviderSelect.value = saved.aiBrokerProvider;
-        l0ReplacementPreviewEnabledInput.checked = saved.l0ReplacementPreviewEnabled;
-        l0CustomBaseUrlInput.value = saved.l0CustomBaseUrl;
-        l0DontRunLlmInput.checked = saved.l0DontRunLlm;
-        audioInputEnabledInput.checked = saved.audioInputEnabled;
-        localModelsEnabledInput.checked = saved.localModelsEnabled;
-        renderL0ReplacementSettings();
+        writeSettingsToControls(saved);
         renderLocalModelControls();
         status.textContent = 'Saved. Reload Babel tabs to pick up the new settings.';
         status.setAttribute('role', 'status');

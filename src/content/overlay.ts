@@ -1,12 +1,12 @@
 import { generateDraftStream } from '../core/backend-client';
 import { generateL0Draft } from '../core/l0-client';
 import { generateLocalL0Draft } from '../core/local-model-client';
-import { replaceTranscriptWithL0Rows } from '../core/l0-replacement-bridge';
+import { replaceTranscriptWithL0Rows, requireL0ReplacementConsumer } from '../core/l0-replacement-bridge';
 import { matchL0CreatedRows } from '../core/l0-created-row-matcher';
 import { assessAudioCaptureForDrafting, type AudioCaptureIssue } from '../core/audio-capture-guard';
 import { captureAudioTracksForDrafting } from '../core/audio-cues';
 import { loadSettings } from '../core/settings';
-import { applyDraftRows, buildDiffPreviewItems, captureTranscriptJob, restoreCapturedRows } from '../core/transcript';
+import { applyDraftRows, buildCanonicalTaskIdentity, buildDiffPreviewItems, captureTranscriptJob, restoreCapturedRows } from '../core/transcript';
 import {
   getL0TimingAvailability,
   requestL0TimingRegeneration,
@@ -533,6 +533,7 @@ export class DraftingOverlayController {
   private button: HTMLButtonElement | null = null;
   private overlay: HTMLDivElement | null = null;
   private dialogEl: HTMLDivElement | null = null;
+  private dialogRoute: string | null = null;
   private statusEl: HTMLDivElement | null = null;
   private audioGuardEl: HTMLDivElement | null = null;
   private summaryEl: HTMLDivElement | null = null;
@@ -547,7 +548,6 @@ export class DraftingOverlayController {
   private state: DraftSessionState = {
     capturedJob: null,
     draftResponse: null,
-    lastApplyResult: null
   };
   private streamedRows: DraftRowResult[] = [];
   private streamedSummary: DraftSummary | null = null;
@@ -578,6 +578,13 @@ export class DraftingOverlayController {
 
   ensureMagicButton(): void {
     ensureStyles();
+    if (this.dialogRoute !== null && this.dialogRoute !== window.location.pathname + window.location.search) {
+      this.dialogRoute = null;
+      if (this.overlay) this.overlay.hidden = true;
+      this.cancelTimingPanelHide();
+      if (this.button) this.button.dataset.timingOpen = 'false';
+      if (this.timingPanel) this.timingPanel.dataset.open = 'false';
+    }
     this.ensureButton();
   }
 
@@ -590,6 +597,7 @@ export class DraftingOverlayController {
     this.button = null;
     this.overlay = null;
     this.dialogEl = null;
+    this.dialogRoute = null;
     this.statusEl = null;
     this.audioGuardEl = null;
     this.summaryEl = null;
@@ -1074,13 +1082,13 @@ export class DraftingOverlayController {
   }
 
   private async runMagicDraft(): Promise<void> {
+    this.dialogRoute = window.location.pathname + window.location.search;
     this.openDialog();
     this.activeDraftLabel = 'Gold / OpenRouter';
     this.clearAudioGuard();
     this.state = {
       capturedJob: null,
       draftResponse: null,
-      lastApplyResult: null
     };
     this.streamedRows = [];
     this.streamedSummary = null;
@@ -1147,22 +1155,34 @@ export class DraftingOverlayController {
     }
   }
 
+  private requireCurrentTask(capturedJob: TranscriptJob): void {
+    if (buildCanonicalTaskIdentity(captureTranscriptJob()) !== buildCanonicalTaskIdentity(capturedJob)) {
+      throw new Error('The task changed while drafting. Discard this draft and generate again for the current task.');
+    }
+  }
+
   private async runL0Replacement(
     capturedJob: TranscriptJob,
     settings: ExtensionSettings
   ): Promise<TranscriptJob> {
+    this.setStatus('Checking Babel Helper availability...');
+    await requireL0ReplacementConsumer();
+    this.requireCurrentTask(capturedJob);
     this.setStatus('Capturing exactly two WAV speaker tracks for L0 replacement...');
     const audioTracks = await captureAudioTracksForDrafting();
     this.logCapturedAudioTracks(audioTracks);
+    this.requireCurrentTask(capturedJob);
     this.setStatus(
       settings.localModelsEnabled
         ? 'Generating replacement segments with local browser models...'
         : 'Generating replacement segments with the self-hosted L0 endpoint...'
     );
     const response = await generateConfiguredL0Draft(settings, capturedJob, audioTracks);
+    this.requireCurrentTask(capturedJob);
 
     this.setStatus(`Replacing current transcript with ${response.rows.length} L0 segment(s) through Babel Helper...`);
     const created = await replaceTranscriptWithL0Rows(response.rows);
+    this.requireCurrentTask(capturedJob);
     const createdIds = new Set(created.map((mapping) => mapping.id));
     if (createdIds.size !== response.rows.length || response.rows.some((row) => !createdIds.has(row.id))) {
       throw new Error('Babel Helper returned incomplete or duplicate L0 row mappings.');
@@ -1205,6 +1225,7 @@ export class DraftingOverlayController {
     settings: ExtensionSettings,
     audioTracks: CapturedAudioTrack[]
   ): Promise<void> {
+    this.requireCurrentTask(capturedJob);
     this.clearAudioGuard();
     const streamStatusLabel = audioTracks.length ? 'Streaming Gold draft with audio cues' : 'Streaming Gold draft';
     this.setStatus(
@@ -1252,6 +1273,7 @@ export class DraftingOverlayController {
         this.render();
       }
     }, audioTracks);
+    this.requireCurrentTask(capturedJob);
 
     this.state.draftResponse = draftResponse;
     this.setStatus(
@@ -1323,9 +1345,15 @@ export class DraftingOverlayController {
       this.setStatus('No draft available yet.', true);
       return;
     }
+    if (!this.state.capturedJob) return;
+    try {
+      this.requireCurrentTask(this.state.capturedJob);
+    } catch (error) {
+      this.setStatus(error instanceof Error ? error.message : String(error), true);
+      return;
+    }
 
     const result = applyDraftRows(this.state.draftResponse.draftRows);
-    this.state.lastApplyResult = result;
     const missingNote = result.missingRowIds.length ? ` Missing ${result.missingRowIds.length} rows during apply.` : '';
     this.setStatus(`Applied draft to ${result.appliedCount} rows.${missingNote}`);
     this.setButtonState('done', 'Applied');
@@ -1339,9 +1367,14 @@ export class DraftingOverlayController {
       this.setStatus('No captured snapshot to restore.', true);
       return;
     }
+    try {
+      this.requireCurrentTask(this.state.capturedJob);
+    } catch (error) {
+      this.setStatus(error instanceof Error ? error.message : String(error), true);
+      return;
+    }
 
     const result = restoreCapturedRows(this.state.capturedJob);
-    this.state.lastApplyResult = result;
     const missingNote = result.missingRowIds.length ? ` Missing ${result.missingRowIds.length} rows during restore.` : '';
     this.setStatus(`Restored ${result.appliedCount} original rows.${missingNote}`);
     this.setButtonState('done', 'Restored');

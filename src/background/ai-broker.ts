@@ -49,7 +49,7 @@ function unavailable(
   reason: Extract<AiBrokerResponse, { ok: false }>['reason'],
   message: string,
   fallbackAllowed: boolean
-): AiBrokerResponse {
+): Extract<AiBrokerResponse, { ok: false }> {
   return {
     ok: false,
     reason,
@@ -109,7 +109,7 @@ function forwardPortToTab(
           'tab-broker-unavailable',
           error instanceof Error ? error.message : String(error),
           fallbackAllowed
-        ) as Extract<AiBrokerResponse, { ok: false }>
+        )
       }
     );
     return;
@@ -150,7 +150,7 @@ function forwardPortToTab(
           'tab-broker-unavailable',
           chrome.runtime.lastError?.message || 'Gold Drafting tab AI broker disconnected before returning a result.',
           fallbackAllowed
-        ) as Extract<AiBrokerResponse, { ok: false }>
+        )
       }
     );
   });
@@ -176,105 +176,86 @@ function forwardPortToTab(
           'tab-broker-unavailable',
           error instanceof Error ? error.message : String(error),
           fallbackAllowed
-        ) as Extract<AiBrokerResponse, { ok: false }>
+        )
       }
     );
   }
 }
 
-async function handleBrokerRequest(
+type BrokerAdmission =
+  | { response: AiBrokerResponse }
+  | { tabId: number; fallbackAllowed: boolean };
+
+async function admitBrokerRequest(
   request: AiBrokerExternalRequest,
-  sender: chrome.runtime.MessageSender
-): Promise<AiBrokerResponse> {
+  sender: chrome.runtime.MessageSender | undefined,
+  onAccepted?: () => void
+): Promise<BrokerAdmission> {
   const settings = await loadSettings();
   const fallbackAllowed = request.operation === 'transcribeSegmentL0'
     ? false
     : providerAllowsLocalFallback(settings.aiBrokerProvider);
   const remoteConfigured = Boolean(settings.openRouterApiKey);
+  onAccepted?.();
 
   if (request.operation === 'ping') {
     const capabilities = await resolveBrokerCapabilities(settings);
     return {
-      ok: true,
-      provider: settings.aiBrokerProvider,
-      remoteConfigured,
-      capabilities
-    };
-  }
-
-  if (request.operation !== 'transcribeSegmentL0' && !shouldUseRemoteBroker(settings.aiBrokerProvider)) {
-    return unavailable('provider-local-gemini-nano', 'Gold Drafting is configured to use local Gemini Nano.', true);
-  }
-
-  if (request.operation !== 'transcribeSegmentL0' && !remoteConfigured) {
-    return unavailable('remote-not-configured', 'Gold Drafting OpenRouter API key is not configured.', fallbackAllowed);
-  }
-
-  const tabId = Number(sender.tab?.id);
-  if (!Number.isFinite(tabId)) {
-    return unavailable('missing-tab', 'Helper AI broker requests must originate from a Babel tab.', fallbackAllowed);
-  }
-
-  return forwardToTab(tabId, request, fallbackAllowed);
-}
-
-async function handleBrokerPortRequest(
-  request: AiBrokerExternalRequest,
-  port: chrome.runtime.Port
-): Promise<void> {
-  const settings = await loadSettings();
-  const fallbackAllowed = request.operation === 'transcribeSegmentL0'
-    ? false
-    : providerAllowsLocalFallback(settings.aiBrokerProvider);
-  const remoteConfigured = Boolean(settings.openRouterApiKey);
-
-  postPortMessage(port, {
-    type: 'event',
-    event: 'accepted',
-    operation: request.operation,
-    message: 'Gold Drafting AI broker accepted the request.'
-  });
-
-  if (request.operation === 'ping') {
-    const capabilities = await resolveBrokerCapabilities(settings);
-    postPortMessage(port, {
-      type: 'result',
       response: {
         ok: true,
         provider: settings.aiBrokerProvider,
         remoteConfigured,
         capabilities
       }
-    });
-    return;
+    };
   }
 
   if (request.operation !== 'transcribeSegmentL0' && !shouldUseRemoteBroker(settings.aiBrokerProvider)) {
-    postPortMessage(port, {
-      type: 'error',
-      response: unavailable('provider-local-gemini-nano', 'Gold Drafting is configured to use local Gemini Nano.', true) as Extract<AiBrokerResponse, { ok: false }>
-    });
-    return;
+    return { response: unavailable('provider-local-gemini-nano', 'Gold Drafting is configured to use local Gemini Nano.', true) };
   }
 
   if (request.operation !== 'transcribeSegmentL0' && !remoteConfigured) {
-    postPortMessage(port, {
-      type: 'error',
-      response: unavailable('remote-not-configured', 'Gold Drafting OpenRouter API key is not configured.', fallbackAllowed) as Extract<AiBrokerResponse, { ok: false }>
-    });
-    return;
+    return { response: unavailable('remote-not-configured', 'Gold Drafting OpenRouter API key is not configured.', fallbackAllowed) };
   }
 
-  const tabId = Number(port.sender?.tab?.id);
+  const tabId = Number(sender?.tab?.id);
   if (!Number.isFinite(tabId)) {
+    return { response: unavailable('missing-tab', 'Helper AI broker requests must originate from a Babel tab.', fallbackAllowed) };
+  }
+
+  return { tabId, fallbackAllowed };
+}
+
+async function handleBrokerRequest(
+  request: AiBrokerExternalRequest,
+  sender: chrome.runtime.MessageSender
+): Promise<AiBrokerResponse> {
+  const admission = await admitBrokerRequest(request, sender);
+  return 'response' in admission
+    ? admission.response
+    : forwardToTab(admission.tabId, request, admission.fallbackAllowed);
+}
+
+async function handleBrokerPortRequest(
+  request: AiBrokerExternalRequest,
+  port: chrome.runtime.Port
+): Promise<void> {
+  const admission = await admitBrokerRequest(request, port.sender, () => {
     postPortMessage(port, {
-      type: 'error',
-      response: unavailable('missing-tab', 'Helper AI broker requests must originate from a Babel tab.', fallbackAllowed) as Extract<AiBrokerResponse, { ok: false }>
+      type: 'event',
+      event: 'accepted',
+      operation: request.operation,
+      message: 'Gold Drafting AI broker accepted the request.'
     });
+  });
+
+  if ('response' in admission) {
+    const { response } = admission;
+    postPortMessage(port, response.ok ? { type: 'result', response } : { type: 'error', response });
     return;
   }
 
-  forwardPortToTab(tabId, request, fallbackAllowed, port);
+  forwardPortToTab(admission.tabId, request, admission.fallbackAllowed, port);
 }
 
 const externalMessageHandler = globalThis.chrome?.runtime?.onMessageExternal;
@@ -306,7 +287,7 @@ if (externalConnectHandler && typeof externalConnectHandler.addListener === 'fun
       if (!isBrokerRequest(message)) {
         postPortMessage(port, {
           type: 'error',
-          response: unavailable('invalid-request', 'Invalid Helper AI broker port request.', true) as Extract<AiBrokerResponse, { ok: false }>
+          response: unavailable('invalid-request', 'Invalid Helper AI broker port request.', true)
         });
         return;
       }
@@ -314,7 +295,7 @@ if (externalConnectHandler && typeof externalConnectHandler.addListener === 'fun
       void handleBrokerPortRequest(message, port).catch((error) => {
         postPortMessage(port, {
           type: 'error',
-          response: unavailable('broker-error', error instanceof Error ? error.message : String(error), true) as Extract<AiBrokerResponse, { ok: false }>
+          response: unavailable('broker-error', error instanceof Error ? error.message : String(error), true)
         });
       });
     });

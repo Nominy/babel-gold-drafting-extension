@@ -97,12 +97,8 @@ test('timing lifecycle deduplicates in-flight and successful tasks and publishes
   assert.equal(requestCount, 1);
 });
 
-test('timing lifecycle forwards queue states and clears status before publishing success', async () => {
-  const events: string[] = [];
+test('timing lifecycle preserves queued and running availability across DOM changes until completion', async () => {
   const service = new L0TimingService(dependencies({
-    activateStatusTask: () => events.push('activate'),
-    updateStatus: (_taskId, status) => events.push(status.status),
-    clearStatus: () => events.push('clear'),
     requestTiming: async (_settings, _job, _tracks, callbacks) => {
       callbacks.onQueueStatus?.({
         requestId: 'request-1',
@@ -110,20 +106,23 @@ test('timing lifecycle forwards queue states and clears status before publishing
         position: 2,
         queuedCount: 2
       });
+      service.onLifecycleOpportunity();
+      assert.deepEqual(getL0TimingAvailability(), { taskId, status: 'queued', position: 2 });
       callbacks.onQueueStatus?.({
         requestId: 'request-1',
         status: 'running',
         position: 0,
         queuedCount: 1
       });
+      service.onLifecycleOpportunity();
+      assert.deepEqual(getL0TimingAvailability(), { taskId, status: 'running' });
       return response;
-    },
-    publish: () => events.push('publish')
+    }
   }));
 
   service.onLifecycleOpportunity();
   await flushAsyncWork();
-  assert.deepEqual(events, ['activate', 'queued', 'running', 'clear', 'publish']);
+  assert.deepEqual(getL0TimingAvailability(), { taskId, status: 'available' });
 });
 
 test('timing lifecycle suppresses stale task results', async () => {
@@ -249,6 +248,10 @@ test('timing lifecycle exposes unavailable after bounded retries and gates manua
     await flushAsyncWork();
   }
 
+  assert.equal(requestCount, 4);
+  assert.deepEqual(getL0TimingAvailability(), { taskId, status: 'unavailable' });
+  service.onLifecycleOpportunity();
+  await flushAsyncWork();
   assert.equal(requestCount, 4);
   assert.deepEqual(getL0TimingAvailability(), { taskId, status: 'unavailable' });
   assert.equal(service.retryCurrentTask(), true);

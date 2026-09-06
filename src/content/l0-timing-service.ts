@@ -106,7 +106,10 @@ export class L0TimingService {
       return;
     }
     if (state.inFlight) {
-      publishL0TimingAvailability({ taskId, status: 'preparing' });
+      return;
+    }
+    if (state.failureCount > MAX_AUTOMATIC_RETRIES) {
+      publishL0TimingAvailability({ taskId, status: 'unavailable' });
       return;
     }
     if (state.retryScheduled || this.dependencies.now() < state.retryNotBefore) {

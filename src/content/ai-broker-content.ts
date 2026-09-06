@@ -21,7 +21,7 @@ const AI_BROKER_CONTENT_BUILD = 'port-stream-postmortem-2026-06-23';
 const AI_BROKER_CONTENT_BUILD_ATTR = 'data-babel-gold-drafting-ai-broker-build';
 const BROKER_BACKEND_PROGRESS_INTERVAL_MS = 5000;
 
-function brokerError(reason: Extract<AiBrokerResponse, { ok: false }>['reason'], message: string, fallbackAllowed: boolean): AiBrokerResponse {
+function brokerError(reason: Extract<AiBrokerResponse, { ok: false }>['reason'], message: string, fallbackAllowed: boolean): Extract<AiBrokerResponse, { ok: false }> {
   return {
     ok: false,
     reason,
@@ -283,6 +283,21 @@ export function publishGoldDraftingExtensionId(root: HTMLElement = document.docu
   }
 }
 
+async function brokerFailureResponse(
+  message: AiBrokerInternalRequest,
+  error: unknown
+): Promise<Extract<AiBrokerResponse, { ok: false }>> {
+  let settings: ExtensionSettings | null = null;
+  try {
+    settings = await loadSettings();
+  } catch {
+    // Settings may also be unavailable while reporting the original request failure.
+  }
+  const fallbackAllowed = allowsBrokerFallback(message, settings);
+  logBrokerRequestFailure(message, settings, error, fallbackAllowed);
+  return brokerError('broker-error', error instanceof Error ? error.message : String(error), fallbackAllowed);
+}
+
 export function registerAiBrokerContentHandler(): void {
   const runtime = globalThis.chrome?.runtime;
   if (!runtime) {
@@ -309,28 +324,9 @@ export function registerAiBrokerContentHandler(): void {
           .then((response) => {
             port.postMessage({ type: 'result', response });
           })
-          .catch((error) => {
-            void loadSettings()
-              .then((settings) => {
-                const fallbackAllowed = allowsBrokerFallback(message, settings);
-                logBrokerRequestFailure(message, settings, error, fallbackAllowed);
-                port.postMessage({
-                  type: 'error',
-                  response: brokerError(
-                    'broker-error',
-                    error instanceof Error ? error.message : String(error),
-                    fallbackAllowed
-                  )
-                });
-              })
-              .catch(() => {
-                const fallbackAllowed = allowsBrokerFallback(message, null);
-                logBrokerRequestFailure(message, null, error, fallbackAllowed);
-                port.postMessage({
-                  type: 'error',
-                  response: brokerError('broker-error', error instanceof Error ? error.message : String(error), fallbackAllowed)
-                });
-              });
+          .catch(async (error) => {
+            const response = await brokerFailureResponse(message, error);
+            port.postMessage({ type: 'error', response });
           });
       });
     });
@@ -347,26 +343,8 @@ export function registerAiBrokerContentHandler(): void {
 
     void handleBrokerRequest(message)
       .then(sendResponse)
-      .catch((error) => {
-        void loadSettings()
-          .then((settings) => {
-            const fallbackAllowed = allowsBrokerFallback(message, settings);
-            logBrokerRequestFailure(message, settings, error, fallbackAllowed);
-            sendResponse(
-              brokerError(
-                'broker-error',
-                error instanceof Error ? error.message : String(error),
-                fallbackAllowed
-              )
-            );
-          })
-          .catch(() => {
-            const fallbackAllowed = allowsBrokerFallback(message, null);
-            logBrokerRequestFailure(message, null, error, fallbackAllowed);
-            sendResponse(
-              brokerError('broker-error', error instanceof Error ? error.message : String(error), fallbackAllowed)
-            );
-          });
+      .catch(async (error) => {
+        sendResponse(await brokerFailureResponse(message, error));
       });
     return true;
   });
