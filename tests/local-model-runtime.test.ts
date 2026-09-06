@@ -29,6 +29,20 @@ const PYTHON_LOG_MEL_FIXTURE = [
   -13.68295955657959,
   -5.215675354003906
 ];
+function activitySamples(...runs: Array<[durationMs: number, amplitude: number]>): Float32Array {
+  const sampleRate = 16_000;
+  const samples = new Float32Array(
+    runs.reduce((total, [durationMs]) => total + Math.round(durationMs * sampleRate / 1_000), 0)
+  );
+  let offset = 0;
+  for (const [durationMs, amplitude] of runs) {
+    const end = offset + Math.round(durationMs * sampleRate / 1_000);
+    samples.fill(amplitude, offset, end);
+    offset = end;
+  }
+  return samples;
+}
+
 test('GigaAM frontend has exact dimensions and matches the Python numeric fixture', () => {
   const samples = new Float32Array(640);
   for (let index = 0; index < samples.length; index += 1) {
@@ -238,34 +252,105 @@ test('float16 tensor output decodes Uint16 bits but preserves native decoded val
   assert.equal(runtime.readFloat16Value(decodedValues), 1.5);
 });
 
-test('draft row grouping follows production gap, span, and 32-word boundaries', () => {
-  const gapWords = [
-    { text: 'а', startSeconds: 0, endSeconds: 0.4 },
-    { text: 'б', startSeconds: 0.5, endSeconds: 1 },
-    { text: 'в', startSeconds: 1.8, endSeconds: 2.1 }
-  ];
-  assert.deepEqual(runtime.groupWordRows(gapWords), [
-    { start: 0, end: 2 },
-    { start: 2, end: 3 }
-  ]);
+test('S2 activity segmentation keeps 0.9 seconds of internal silence in one row', () => {
+  const samples = activitySamples(
+    [200, 0],
+    [300, 0.1],
+    [900, 0],
+    [300, 0.1],
+    [200, 0]
+  );
 
-  const spanWords = [
-    { text: 'а', startSeconds: 0, endSeconds: 5.5 },
-    { text: 'б', startSeconds: 6, endSeconds: 11.5 },
-    { text: 'в', startSeconds: 12, endSeconds: 12.01 }
-  ];
-  assert.deepEqual(runtime.groupWordRows(spanWords), [
-    { start: 0, end: 2 },
-    { start: 2, end: 3 }
+  assert.deepEqual(runtime.segmentSamplesByActivity(samples), [
+    { startSample: 3_200, endSample: 27_200 }
   ]);
+});
 
-  const cappedWords = Array.from({ length: 33 }, (_, index) => ({
+test('S2 activity segmentation splits on exactly 1.0 seconds and trims to active frames', () => {
+  const samples = activitySamples(
+    [200, 0],
+    [300, 0.1],
+    [1_000, 0],
+    [300, 0.1],
+    [200, 0]
+  );
+
+  assert.deepEqual(runtime.segmentSamplesByActivity(samples), [
+    { startSample: 3_200, endSample: 8_000 },
+    { startSample: 24_000, endSample: 28_800 }
+  ]);
+});
+
+test('S2 row assignment uses word midpoints and half-open activity boundaries', () => {
+  const segments = [
+    { startSample: 3_200, endSample: 8_000 },
+    { startSample: 24_000, endSample: 28_800 }
+  ];
+  const words = [
+    { text: 'start', startSeconds: 0.19, endSeconds: 0.21 },
+    { text: 'first-end', startSeconds: 0.49, endSeconds: 0.51 },
+    { text: 'second-start', startSeconds: 1.49, endSeconds: 1.51 },
+    { text: 'second-end', startSeconds: 1.79, endSeconds: 1.81 }
+  ];
+
+  assert.deepEqual(runtime.groupWordsByActivitySegments(words, segments), [
+    { ...segments[0], wordStart: 0, wordEnd: 1 },
+    { ...segments[1], wordStart: 2, wordEnd: 3 }
+  ]);
+});
+
+test('S2 draft ordering sorts overlapping words by midpoint before grouping', () => {
+  const startSorted = [
+    { text: 'later-midpoint', startSeconds: 0, endSeconds: 1.2 },
+    { text: 'earlier-midpoint', startSeconds: 0.3, endSeconds: 0.5 }
+  ];
+  const midpointSorted = [...startSorted].sort(runtime.compareWordsByMidpoint);
+
+  assert.deepEqual(midpointSorted.map((word) => word.text), [
+    'earlier-midpoint',
+    'later-midpoint'
+  ]);
+  assert.deepEqual(
+    runtime.groupWordsByActivitySegments(midpointSorted, [
+      { startSample: 0, endSample: 8_000 },
+      { startSample: 8_000, endSample: 16_000 }
+    ]),
+    [
+      { startSample: 0, endSample: 8_000, wordStart: 0, wordEnd: 1 },
+      { startSample: 8_000, endSample: 16_000, wordStart: 1, wordEnd: 2 }
+    ]
+  );
+});
+
+test('S2 smoothing bridges 160ms gaps before applying the 120ms minimum activity', () => {
+  const bridged = activitySamples(
+    [200, 0],
+    [70, 0.1],
+    [160, 0],
+    [70, 0.1],
+    [200, 0]
+  );
+  const tooShort = activitySamples([200, 0], [110, 0.1], [200, 0]);
+  const minimum = activitySamples([200, 0], [120, 0.1], [200, 0]);
+
+  assert.deepEqual(runtime.segmentSamplesByActivity(bridged), [
+    { startSample: 3_200, endSample: 8_000 }
+  ]);
+  assert.deepEqual(runtime.segmentSamplesByActivity(tooShort), []);
+  assert.deepEqual(runtime.segmentSamplesByActivity(minimum), [
+    { startSample: 3_200, endSample: 5_120 }
+  ]);
+});
+
+test('S2 grouping has no word-count or transcript-span row cap', () => {
+  const words = Array.from({ length: 33 }, (_, index) => ({
     text: `w${index}`,
-    startSeconds: index * 0.1,
-    endSeconds: index * 0.1 + 0.05
+    startSeconds: index * 0.4,
+    endSeconds: index * 0.4 + 0.1
   }));
-  assert.deepEqual(runtime.groupWordRows(cappedWords), [
-    { start: 0, end: 32 },
-    { start: 32, end: 33 }
-  ]);
+
+  assert.deepEqual(
+    runtime.groupWordsByActivitySegments(words, [{ startSample: 0, endSample: 224_000 }]),
+    [{ startSample: 0, endSample: 224_000, wordStart: 0, wordEnd: 33 }]
+  );
 });

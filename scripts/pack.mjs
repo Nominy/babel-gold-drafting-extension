@@ -25,7 +25,6 @@ try {
         },
         host_permissions: ['https://dashboard.babel.audio/*', 'https://reviewgen.ovh/*']
       };
-      delete storeManifest.optional_host_permissions;
       writeFileSync(tempManifestPath, `${JSON.stringify(storeManifest, null, 2)}\n`);
 
       const files = [

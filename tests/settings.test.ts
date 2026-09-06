@@ -5,7 +5,10 @@ import {
   LOCAL_MODEL_BASE_URL,
   LOCAL_MODEL_SAMPLE_URL,
   normalizeL0CustomBaseUrl,
-  normalizeSettings
+  normalizeSettings,
+  loadSettings,
+  saveSettings,
+  SETTINGS_STORAGE_KEY
 } from '../src/core/settings';
 
 test('audio-enhanced drafting is on by default and explicit opt-out persists', () => {
@@ -144,4 +147,38 @@ test('normalizeSettings keeps only supported AI broker providers', () => {
   assert.equal(normalizeSettings({ aiBrokerProvider: 'remote-openrouter' }).aiBrokerProvider, 'remote-openrouter');
   assert.equal(normalizeSettings({ aiBrokerProvider: 'local-gemini-nano' }).aiBrokerProvider, 'local-gemini-nano');
   assert.equal(normalizeSettings({ aiBrokerProvider: 'remote' }).aiBrokerProvider, 'auto');
+});
+
+test('raw settings normalize without storage and use Chrome when it becomes available later', async (t) => {
+  const previousChrome = globalThis.chrome;
+  t.after(() => Object.assign(globalThis, { chrome: previousChrome }));
+  Object.assign(globalThis, { chrome: undefined });
+  const input: unknown = {
+    serviceTier: 'invalid',
+    reasoningEffort: 'xhigh',
+    aiBrokerProvider: 'remote-openrouter',
+    model: '  test-model  '
+  };
+  const normalized = await saveSettings(input);
+  assert.equal(normalized.serviceTier, 'flex');
+  assert.equal(normalized.reasoningEffort, 'xhigh');
+  assert.equal(normalized.aiBrokerProvider, 'remote-openrouter');
+  assert.equal(normalized.model, 'test-model');
+
+  let stored: Record<string, unknown> = {};
+  Object.assign(globalThis, {
+    chrome: {
+      runtime: {},
+      storage: { local: {
+        get(_key: string, callback: (items: Record<string, unknown>) => void) { callback(stored); },
+        set(items: Record<string, unknown>, callback: () => void) {
+          stored = items;
+          callback();
+        }
+      } }
+    }
+  });
+  await saveSettings(input);
+  assert.deepEqual(stored[SETTINGS_STORAGE_KEY], normalized);
+  assert.deepEqual(await loadSettings(), normalized);
 });

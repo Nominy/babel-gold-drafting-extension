@@ -2,8 +2,11 @@ import type { L0DraftRow } from './types';
 
 export const L0_REPLACE_REQUEST_TYPE = 'babel-gold-drafting:l0-replace-request';
 export const L0_REPLACE_RESPONSE_TYPE = 'babel-gold-drafting:l0-replace-response';
+export const L0_REPLACE_READY_REQUEST_TYPE = 'babel-gold-drafting:l0-replace-ready-request';
+export const L0_REPLACE_READY_RESPONSE_TYPE = 'babel-gold-drafting:l0-replace-ready-response';
 const L0_REPLACE_PROTOCOL_VERSION = 1;
 const L0_REPLACE_TIMEOUT_MS = 300000;
+const L0_REPLACE_READY_TIMEOUT_MS = 5000;
 
 export interface L0CreatedRowMapping {
   id: string;
@@ -71,6 +74,38 @@ function isReplaceResponse(value: unknown, requestId: string): value is L0Replac
     'message' in value &&
     typeof value.message === 'string'
   );
+}
+
+export function requireL0ReplacementConsumer(): Promise<void> {
+  const requestId = crypto.randomUUID();
+  const { promise, resolve, reject } = Promise.withResolvers<void>();
+  const cleanup = (): void => {
+    window.clearTimeout(timeoutId);
+    window.removeEventListener('message', onMessage);
+  };
+  const onMessage = (event: MessageEvent): void => {
+    const data = event.data;
+    if (
+      event.source !== window
+      || !data || typeof data !== 'object'
+      || data.type !== L0_REPLACE_READY_RESPONSE_TYPE
+      || data.version !== L0_REPLACE_PROTOCOL_VERSION
+      || data.requestId !== requestId
+    ) return;
+    cleanup();
+    resolve();
+  };
+  const timeoutId = window.setTimeout(() => {
+    cleanup();
+    reject(new Error('Babel Helper is required for L0 transcript replacement. Enable Babel Helper and reload this task.'));
+  }, L0_REPLACE_READY_TIMEOUT_MS);
+  window.addEventListener('message', onMessage);
+  window.postMessage({
+    type: L0_REPLACE_READY_REQUEST_TYPE,
+    version: L0_REPLACE_PROTOCOL_VERSION,
+    requestId
+  }, '*');
+  return promise;
 }
 
 export function replaceTranscriptWithL0Rows(rows: L0DraftRow[]): Promise<L0CreatedRowMapping[]> {

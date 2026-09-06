@@ -240,7 +240,6 @@ export interface ApplyDraftResult {
 export interface DraftSessionState {
   capturedJob: TranscriptJob | null;
   draftResponse: GenerateDraftResponse | null;
-  lastApplyResult: ApplyDraftResult | null;
 }
 
 export interface DraftingMountController {
