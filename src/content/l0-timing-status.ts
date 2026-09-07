@@ -1,3 +1,4 @@
+import { ensureUiStyles, themeRoot, applyComponent } from '@nominy/babel-extension-frontend';
 import type { L0TimingQueueStatus } from '../core/l0-timing-client';
 
 const STATUS_ID = 'babel-gold-l0-timing-status';
@@ -7,53 +8,13 @@ const SHOW_DELAY_MS = 1_500;
 export type L0TimingDisplayStatus = L0TimingQueueStatus | { status: 'retrying' };
 
 function ensureStatusStyles(documentRef: Document): void {
-  if (documentRef.getElementById(STYLE_ID)) return;
-  const style = documentRef.createElement('style');
-  style.id = STYLE_ID;
-  style.textContent = `
-    #${STATUS_ID} {
-      position: fixed;
-      right: 18px;
-      bottom: 18px;
-      z-index: 2147483646;
-      min-width: 188px;
-      max-width: 260px;
-      box-sizing: border-box;
-      padding: 9px 12px 7px;
-      border: 1px solid rgba(148, 163, 184, 0.28);
-      border-radius: 999px;
-      background: rgba(15, 23, 42, 0.94);
-      color: #f8fafc;
-      box-shadow: 0 8px 24px rgba(15, 23, 42, 0.22);
-      font: 600 12px/1.25 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      pointer-events: none;
-    }
-    #${STATUS_ID} .babel-gold-l0-timing-activity {
-      height: 2px;
-      margin-top: 6px;
-      overflow: hidden;
-      border-radius: 999px;
-      background: rgba(148, 163, 184, 0.24);
-    }
-    #${STATUS_ID} .babel-gold-l0-timing-activity::after {
-      display: block;
-      width: 44%;
-      height: 100%;
-      border-radius: inherit;
-      background: #60a5fa;
-      content: "";
-      animation: babel-gold-l0-timing-activity 1.1s ease-in-out infinite;
-    }
-    @keyframes babel-gold-l0-timing-activity {
-      from { transform: translateX(-110%); }
-      to { transform: translateX(330%); }
-    }
-    @media (prefers-reduced-motion: reduce) {
-      #${STATUS_ID} .babel-gold-l0-timing-activity::after { animation-duration: 2.4s; }
-    }
-  `;
-  (documentRef.head ?? documentRef.documentElement).append(style);
-}
+    ensureUiStyles(documentRef);
+    if (documentRef.getElementById(STYLE_ID)) return;
+    const style = documentRef.createElement('style');
+    style.id = STYLE_ID;
+    style.textContent = `#${STATUS_ID} { position: fixed; right: 18px; bottom: 18px; pointer-events: none; }`;
+    (documentRef.head ?? documentRef.documentElement).append(style);
+  }
 
 function statusCopy(status: L0TimingDisplayStatus): string | null {
   switch (status.status) {
@@ -124,13 +85,19 @@ export class L0TimingStatusPill {
     if (!pill) {
       pill = this.documentRef.createElement('div');
       pill.id = STATUS_ID;
+      themeRoot(pill, 'purple');
+      applyComponent(pill, 'toast');
       pill.setAttribute('role', 'status');
       pill.setAttribute('aria-live', 'polite');
       pill.setAttribute('aria-atomic', 'true');
       const copyNode = this.documentRef.createElement('span');
       copyNode.className = 'babel-gold-l0-timing-copy';
       const activity = this.documentRef.createElement('div');
-      activity.className = 'babel-gold-l0-timing-activity';
+      activity.className = 'babel-gold-l0-timing-activity bui-progress';
+      activity.dataset.indeterminate = 'true';
+      const fill = this.documentRef.createElement('div');
+      fill.className = 'bui-progress-fill';
+      activity.append(fill);
       activity.setAttribute('aria-hidden', 'true');
       pill.append(copyNode, activity);
       (this.documentRef.body ?? this.documentRef.documentElement).append(pill);

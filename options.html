@@ -1,225 +1,74 @@
 <!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+<html lang="en" class="bui-settings-document">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Babel Gold Drafting Options</title>
-    <style>
-      :root {
-        color-scheme: light;
-        --bg: #f6f1e7;
-        --panel: #fffdf7;
-        --ink: #17221f;
-        --muted: #5d6d67;
-        --accent: #0b6e4f;
-        --border: #d9d1c0;
-      }
 
-      body {
-        margin: 0;
-        font-family: Georgia, "Times New Roman", serif;
-        background:
-          radial-gradient(circle at top left, rgba(11, 110, 79, 0.1), transparent 32%),
-          linear-gradient(180deg, #fbf7ee 0%, var(--bg) 100%);
-        color: var(--ink);
-      }
-
-      main {
-        max-width: 760px;
-        margin: 32px auto;
-        padding: 0 20px 32px;
-      }
-
-      .panel {
-        background: var(--panel);
-        border: 1px solid var(--border);
-        border-radius: 18px;
-        box-shadow: 0 18px 60px rgba(23, 34, 31, 0.08);
-        padding: 24px;
-      }
-
-      h1 {
-        margin: 0 0 8px;
-        font-size: 34px;
-        line-height: 1.05;
-      }
-
-      p {
-        margin: 0 0 18px;
-        color: var(--muted);
-        font-size: 16px;
-      }
-
-      label {
-        display: block;
-        margin: 18px 0 8px;
-        font-weight: 700;
-      }
-
-      input,
-      select,
-      button {
-        font: inherit;
-      }
-
-      input,
-      select {
-        width: 100%;
-        box-sizing: border-box;
-        border: 1px solid var(--border);
-        border-radius: 12px;
-        background: white;
-        padding: 12px 14px;
-      }
-
-      button {
-        margin-top: 20px;
-        border: 0;
-        border-radius: 999px;
-        padding: 12px 18px;
-        background: var(--accent);
-        color: white;
-        cursor: pointer;
-      }
-
-      [data-role="status"] {
-        margin-top: 14px;
-        color: var(--muted);
-        min-height: 20px;
-      }
-
-      .checkbox-row {
-        display: grid;
-        grid-template-columns: auto 1fr;
-        align-items: start;
-        gap: 10px;
-        margin-top: 18px;
-        font-weight: 700;
-      }
-
-      .checkbox-row input {
-        width: auto;
-        margin-top: 3px;
-      }
-
-      .checkbox-row span {
-        display: block;
-      }
-
-      .field-help {
-        margin: 4px 0 0;
-        color: var(--muted);
-        font-size: 13px;
-        line-height: 1.4;
-        font-weight: 400;
-      }
-      .local-model-panel {
-        margin-top: 22px;
-        padding: 16px;
-        border: 1px solid var(--border);
-        border-radius: 14px;
-        background: rgba(11, 110, 79, 0.035);
-      }
-
-      .local-model-panel h2 {
-        margin: 0;
-        font-size: 20px;
-      }
-
-      [data-role="local-model-remove"] {
-        background: #6d3535;
-      }
-
-      button:disabled,
-      input:disabled {
-        cursor: not-allowed;
-        opacity: 0.55;
-      }
-
-      [data-role="local-model-progress"] {
-        width: 100%;
-        margin-top: 12px;
-      }
-
-      [data-role="local-model-status"] {
-        min-height: 20px;
-        margin-top: 10px;
-        color: var(--muted);
-        overflow-wrap: anywhere;
-      }
-
-
-      .support-footer {
-        margin: 18px 0 0;
-        padding-top: 16px;
-        border-top: 1px solid var(--border);
-        color: var(--muted);
-        font-size: 13px;
-        line-height: 1.45;
-      }
-
-      .support-footer a {
-        color: var(--accent);
-        font-weight: 700;
-        text-decoration: none;
-      }
-
-      .support-footer a:hover {
-        text-decoration: underline;
-      }
-    </style>
   </head>
-  <body>
-    <main>
-      <section class="panel">
-        <h1>Babel Gold Drafting</h1>
-        <p>Configure the drafting backend, project preset, and OpenRouter model for Silver-to-Gold generation.</p>
-
-        <label for="backendBaseUrl">Backend Base URL</label>
-        <input id="backendBaseUrl" name="backendBaseUrl" placeholder="https://reviewgen.ovh" />
-
-        <label class="checkbox-row" for="l0ReplacementPreviewEnabled">
-          <input id="l0ReplacementPreviewEnabled" name="l0ReplacementPreviewEnabled" type="checkbox" />
+  <body data-bui-accent="purple" class="bui-page bui-root">
+    <main class="bui-settings-shell">
+<section class="bui-surface">
+<header class="bui-header">
+<div>
+<h1 class="bui-title">Babel Gold Drafting settings</h1>
+<p class="bui-hint">Configure drafting, audio, and local models.</p>
+</div>
+</header>
+<div class="bui-body">
+<div class="bui-stack">
+<div class="bui-card">
+<label for="backendBaseUrl" class="bui-label">Backend Base URL</label>
+<input id="backendBaseUrl" name="backendBaseUrl" placeholder="https://reviewgen.ovh" class="bui-input">
+</div>
+<label class="checkbox-row bui-label bui-card bui-setting-toggle" for="l0ReplacementPreviewEnabled">
+          <input id="l0ReplacementPreviewEnabled" name="l0ReplacementPreviewEnabled" type="checkbox" class="bui-checkbox">
           <span>
             L0 replacement
-            <span class="field-help">Enabled by default. Replaces current segments from two captured audio lanes before optional Gold LLM drafting.</span>
+            <span class="field-help bui-hint">Enabled by default. Replaces current segments from two captured audio lanes before optional Gold LLM drafting.</span>
           </span>
         </label>
+<div data-role="l0-replacement-settings" hidden="" class="bui-stack">
+          <div class="bui-card">
+<label for="l0CustomBaseUrl" class="bui-label">L0 Base URL</label>
+<input id="l0CustomBaseUrl" name="l0CustomBaseUrl" inputmode="url" placeholder="https://reviewgen.ovh/a3f73d6cf25fa138be653daaf2d7cd0702c0b2d69c40fb9eaee4e07d4b067dd5" class="bui-input">
+<p class="field-help bui-hint">Uses the free hosted L0 service by default and posts to <code class="bui-code">/v1/draft</code>. Enter a self-hosted base URL to override it.</p>
+</div>
 
-        <div data-role="l0-replacement-settings" hidden>
-          <label for="l0CustomBaseUrl">L0 Base URL</label>
-          <input id="l0CustomBaseUrl" name="l0CustomBaseUrl" inputmode="url" placeholder="https://reviewgen.ovh/a3f73d6cf25fa138be653daaf2d7cd0702c0b2d69c40fb9eaee4e07d4b067dd5" />
-          <p class="field-help">Uses the free hosted L0 service by default and posts to <code>/v1/draft</code>. Enter a self-hosted base URL to override it.</p>
 
-          <label class="checkbox-row" for="l0DontRunLlm">
-            <input id="l0DontRunLlm" name="l0DontRunLlm" type="checkbox" />
+          <label class="checkbox-row bui-label bui-card bui-setting-toggle" for="l0DontRunLlm">
+            <input id="l0DontRunLlm" name="l0DontRunLlm" type="checkbox" class="bui-checkbox">
             <span>Don't run the LLM</span>
           </label>
         </div>
-
-        <label for="projectPreset">Project Preset</label>
-        <select id="projectPreset" name="projectPreset">
+<div class="bui-card">
+<label for="projectPreset" class="bui-label">Project Preset</label>
+<select id="projectPreset" name="projectPreset" class="bui-select">
           <option value="ru-gold-2sp-v1">Russian Gold 2-speaker v1</option>
         </select>
-
-        <label for="openRouterApiKey">OpenRouter API Key</label>
-        <input id="openRouterApiKey" name="openRouterApiKey" type="password" autocomplete="off" placeholder="sk-or-..." />
-
-        <label for="model">Model</label>
-        <input id="model" name="model" placeholder="google/gemini-3-flash-preview" />
-
-        <label for="serviceTier">OpenRouter Service Tier</label>
-        <select id="serviceTier" name="serviceTier">
+</div>
+<div class="bui-card">
+<label for="openRouterApiKey" class="bui-label">OpenRouter API Key</label>
+<input id="openRouterApiKey" name="openRouterApiKey" type="password" autocomplete="off" placeholder="sk-or-..." class="bui-input">
+</div>
+<div class="bui-card">
+<label for="model" class="bui-label">Model</label>
+<input id="model" name="model" placeholder="google/gemini-3-flash-preview" class="bui-input">
+</div>
+<div class="bui-card">
+<label for="serviceTier" class="bui-label">OpenRouter Service Tier</label>
+<select id="serviceTier" name="serviceTier" class="bui-select">
           <option value="flex">Flex</option>
           <option value="default">Default</option>
           <option value="priority">Priority</option>
         </select>
-        <p class="field-help">
+<p class="field-help bui-hint">
           Flex is cheaper and can be slower. Default leaves service tier selection to OpenRouter/provider. Priority is faster and can cost more.
         </p>
-
-        <label for="reasoningEffort">Reasoning Effort</label>
-        <select id="reasoningEffort" name="reasoningEffort">
+</div>
+<div class="bui-card">
+<label for="reasoningEffort" class="bui-label">Reasoning Effort</label>
+<select id="reasoningEffort" name="reasoningEffort" class="bui-select">
           <option value="low">Low</option>
           <option value="default">Provider default</option>
           <option value="none">None</option>
@@ -228,72 +77,77 @@
           <option value="high">High</option>
           <option value="xhigh">XHigh</option>
         </select>
-        <p class="field-help">
+<p class="field-help bui-hint">
           Low preserves the current drafting default. Provider default omits the reasoning parameter and lets OpenRouter choose.
         </p>
-
-        <label for="aiBrokerProvider">Helper AI Broker</label>
-        <select id="aiBrokerProvider" name="aiBrokerProvider">
+</div>
+<div class="bui-card">
+<label for="aiBrokerProvider" class="bui-label">Helper AI Broker</label>
+<select id="aiBrokerProvider" name="aiBrokerProvider" class="bui-select">
           <option value="auto">Auto: remote if configured, else Gemini Nano</option>
           <option value="remote-openrouter">Remote OpenRouter model only</option>
           <option value="local-gemini-nano">Local Gemini Nano only</option>
         </select>
-        <p class="field-help">
+<p class="field-help bui-hint">
           Controls how Babel Helper AI shortcuts use this extension when Gold Drafting is installed.
         </p>
-
-        <label class="checkbox-row" for="audioInputEnabled">
-          <input id="audioInputEnabled" name="audioInputEnabled" type="checkbox" />
+</div>
+<label class="checkbox-row bui-label bui-card bui-setting-toggle" for="audioInputEnabled">
+          <input id="audioInputEnabled" name="audioInputEnabled" type="checkbox" class="bui-checkbox">
           <span>
             Audio-enhanced drafting
-            <span class="field-help">
+            <span class="field-help bui-hint">
               Enabled by default. Sends available task audio with drafting requests so audio-capable models can add audible-event and vocal-style tags.
             </span>
           </span>
         </label>
-        <section class="local-model-panel" data-role="local-model-setup" aria-labelledby="local-model-heading">
-          <h2 id="local-model-heading">Local browser models</h2>
-          <p class="field-help">
+<section class="local-model-panel bui-card" data-role="local-model-setup" aria-labelledby="local-model-heading">
+          <h2 id="local-model-heading" class="bui-title">Local browser models</h2>
+          <p class="field-help bui-hint">
             Optional. Download Babel's compatible speech model bundle into this browser, then explicitly enable it.
             Remote drafting remains the default.
           </p>
-
-          <p class="field-help"><strong>1. Download</strong> and verify the Babel model bundle in this browser.</p>
-          <button type="button" data-role="local-model-download" disabled>Download</button>
-
-          <p class="field-help"><strong>2. Test</strong> with audio no longer than 15 seconds.</p>
-          <button type="button" data-role="local-model-supplied-test" disabled>Test supplied public-domain sample</button>
-          <p class="field-help">
+          <p class="field-help bui-hint">
+<strong>1. Download</strong> and verify the Babel model bundle in this browser.</p>
+          <button type="button" data-role="local-model-download" disabled="" class="bui-button">Download</button>
+          <p class="field-help bui-hint">
+<strong>2. Test</strong> with audio no longer than 15 seconds.</p>
+          <button type="button" data-role="local-model-supplied-test" disabled="" class="bui-button">Test supplied public-domain sample</button>
+          <p class="field-help bui-hint">
             Supplied sample: LibriVox, “Aesop's Fables in Russian”, section 01, Public Domain.
-            <a href="https://archive.org/details/aesops_fables_russian_0905_librivox" target="_blank" rel="noopener noreferrer">Source</a>.
+            <a href="https://archive.org/details/aesops_fables_russian_0905_librivox" target="_blank" rel="noopener noreferrer" class="bui-link">Source</a>.
           </p>
-          <label for="localModelTestAudio">Or choose your own short audio</label>
-          <input id="localModelTestAudio" name="localModelTestAudio" type="file" accept="audio/*,.wav" />
-          <button type="button" data-role="local-model-test" disabled>Test selected audio</button>
-
-          <label class="checkbox-row" for="localModelsEnabled">
-            <input id="localModelsEnabled" name="localModelsEnabled" type="checkbox" disabled />
+          <label for="localModelTestAudio" class="bui-label">Or choose your own short audio</label>
+          <input id="localModelTestAudio" name="localModelTestAudio" type="file" accept="audio/*,.wav" class="bui-input">
+          <button type="button" data-role="local-model-test" disabled="" class="bui-button">Test selected audio</button>
+          <label class="checkbox-row bui-label bui-card bui-setting-toggle" for="localModelsEnabled">
+            <input id="localModelsEnabled" name="localModelsEnabled" type="checkbox" disabled="" class="bui-checkbox">
             <span>
               3. Enable downloaded local browser models
-              <span class="field-help">Available only after the current bundle is ready and passes the audio test.</span>
+              <span class="field-help bui-hint">Available only after the current bundle is ready and passes the audio test.</span>
             </span>
           </label>
-
-          <button type="button" data-role="local-model-remove" disabled>Remove downloaded models</button>
-
-          <progress data-role="local-model-progress" max="1" value="0" aria-label="Local model download progress" hidden></progress>
-          <div data-role="local-model-status" role="status" aria-live="polite">Checking local model status…</div>
+          <button type="button" data-role="local-model-remove" disabled="" class="bui-button">Remove downloaded models</button>
+          <progress data-role="local-model-progress" max="1" value="0" aria-label="Local model download progress" hidden="">
+</progress>
+          <div data-role="local-model-status" role="status" aria-live="polite" class="bui-status">Checking local model status…</div>
         </section>
-
-
-        <button type="button" data-role="save">Save Settings</button>
-        <div data-role="status" role="status" aria-live="polite"></div>
-        <p class="support-footer">
+<div class="bui-row">
+<button data-variant="primary" type="button" data-role="save" class="bui-button">Save Settings</button>
+</div>
+<div data-role="status" role="status" aria-live="polite" class="bui-status">
+</div>
+<p class="support-footer bui-hint bui-card">
           These Babel tools are maintained by Naftsan;
-          <a href="https://ko-fi.com/naftsan" target="_blank" rel="noopener noreferrer">if this extension saves you time, consider supporting development on Ko-Fi</a>.
+          <a href="https://ko-fi.com/naftsan" target="_blank" rel="noopener noreferrer" class="bui-link">if this extension saves you time, consider supporting development on Ko-Fi</a>.
         </p>
-      </section>
-    </main>
-    <script src="dist/options/options.js"></script>
-  </body>
+</div>
+</div>
+</section>
+</main>
+    <script src="dist/options/options.js">
+</script>
+
+
+</body>
 </html>

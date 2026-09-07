@@ -1,3 +1,4 @@
+import { ensureUiStyles, themeRoot, applyComponent } from '@nominy/babel-extension-frontend';
 import { generateDraftStream } from '../core/backend-client';
 import { generateL0Draft } from '../core/l0-client';
 import { generateLocalL0Draft } from '../core/local-model-client';
@@ -93,459 +94,25 @@ function createElement<K extends keyof HTMLElementTagNameMap>(
 }
 
 function ensureStyles(): void {
-  if (document.getElementById(STYLE_ID)) {
-    return;
-  }
-
+  ensureUiStyles();
+  if (document.getElementById(STYLE_ID)) return;
   const style = document.createElement('style');
   style.id = STYLE_ID;
   style.textContent = `
-    :root {
-      --bgd-surface: #ffffff;
-      --bgd-surface-muted: #faf5ff;
-      --bgd-ink: #221b2d;
-      --bgd-muted: #7c6995;
-      --bgd-line: #eadff7;
-      --bgd-accent: #7c3aed;
-      --bgd-accent-hover: #6d28d9;
-      --bgd-accent-soft: rgba(124, 58, 237, 0.08);
-      --bgd-danger: #dc2626;
-      --bgd-success: #16a34a;
-      --bgd-radius: 10px;
-      --bgd-font: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    }
-
-    .bgd-toolbar-button {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      gap: 0;
-      width: 36px;
-      height: 36px;
-      border: 1px solid #d8b4fe;
-      background: #faf5ff;
-      color: var(--bgd-accent);
-      border-radius: 8px;
-      padding: 0;
-      font: 600 13px/1 var(--bgd-font);
-      cursor: pointer;
-      flex: 0 0 auto;
-    }
-
-    .bgd-toolbar-button:hover {
-      background: #f3e8ff;
-      border-color: #c084fc;
-    }
-
-    .bgd-toolbar-button[data-timing-open="true"] {
-      border-radius: 8px 0 0 8px;
-      background: #f3e8ff;
-      border-color: #c084fc;
-    }
-
-    .bgd-toolbar-button[data-state="loading"] {
-      cursor: wait;
-      opacity: 0.92;
-    }
-
-    .bgd-toolbar-button[data-state="done"] {
-      background: var(--bgd-success);
-      border-color: var(--bgd-success);
-    }
-
-    .bgd-toolbar-button[data-state="error"] {
-      background: var(--bgd-danger);
-      border-color: var(--bgd-danger);
-    }
-
-    .bgd-toolbar-button .bgd-icon {
-      font-size: 16px;
-      line-height: 1;
-    }
-
-    .bgd-toolbar-button .bgd-spinner {
-      width: 14px;
-      height: 14px;
-      border-radius: 50%;
-      border: 2px solid currentColor;
-      border-right-color: transparent;
-      display: none;
-    }
-
-    .bgd-toolbar-button[data-state="loading"] .bgd-spinner {
-      display: inline-block;
-      animation: bgd-spin 0.7s linear infinite;
-    }
-
-    .bgd-toolbar-button[data-state="loading"] .bgd-icon {
-      display: none;
-    }
-
-    .bgd-timing-hover-panel {
-      position: fixed;
-      z-index: 2147483647;
-      display: flex;
-      align-items: center;
-      width: max-content;
-      max-width: min(360px, calc(100vw - 24px));
-      height: 36px;
-      box-sizing: border-box;
-      padding: 0 12px;
-      border: 1px solid #c084fc;
-      border-left: 0;
-      border-radius: 0 8px 8px 0;
-      background: #f3e8ff;
-      color: var(--bgd-accent);
-      box-shadow: none;
-      font: 600 12px/1.2 var(--bgd-font);
-      white-space: nowrap;
-      opacity: 0;
-      pointer-events: none;
-      transform: translateX(-6px);
-      transition: opacity 130ms ease, transform 130ms ease;
-    }
-    .bgd-timing-hover-panel[data-open="true"] {
-      opacity: 1;
-      pointer-events: auto;
-      transform: translateX(0);
-    }
-    .bgd-timing-hover-panel .bgd-timing-state {
-      display: flex;
-      align-items: center;
-    }
-    .bgd-timing-hover-panel .bgd-timing-dot {
-      display: none;
-    }
-    .bgd-timing-hover-panel .bgd-timing-retry {
-      width: auto;
-      margin: 0 0 0 10px;
-      padding: 0;
-      border: 0;
-      background: transparent;
-      color: var(--bgd-accent-hover);
-      font: 700 12px/1.2 var(--bgd-font);
-      text-decoration: underline;
-      cursor: pointer;
-    }
-
-    #${OVERLAY_ID} {
-      position: fixed;
-      inset: 0;
-      z-index: 2147483647;
-      font: 13px/1.5 var(--bgd-font);
-    }
-
-    #${OVERLAY_ID}[hidden] {
-      display: none;
-    }
-
-    #${OVERLAY_ID} .bgd-backdrop {
-      position: absolute;
-      inset: 0;
-      background: rgba(15, 10, 25, 0.42);
-      backdrop-filter: blur(2px);
-    }
-
-    #${OVERLAY_ID} .bgd-shell {
-      position: relative;
-      height: 100%;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 16px;
-    }
-
-    #${OVERLAY_ID} .bgd-dialog {
-      width: min(980px, calc(100vw - 24px));
-      max-height: calc(100vh - 24px);
-      overflow: auto;
-      background: var(--bgd-surface);
-      border: 1px solid var(--bgd-line);
-      border-radius: var(--bgd-radius);
-      box-shadow: 0 30px 80px rgba(15, 10, 25, 0.28);
-      color: var(--bgd-ink);
-    }
-
-    #${OVERLAY_ID} .bgd-header {
-      padding: 12px 16px;
-      border-bottom: 1px solid var(--bgd-line);
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      position: sticky;
-      top: 0;
-      background: var(--bgd-surface);
-      z-index: 1;
-    }
-
-    #${OVERLAY_ID} .bgd-header-title {
-      font-weight: 700;
-      font-size: 14px;
-    }
-
-    #${OVERLAY_ID} .bgd-header-title-row {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      flex-wrap: wrap;
-    }
-
-    #${OVERLAY_ID} .bgd-support-link {
-      color: var(--bgd-accent);
-      font-size: 11px;
-      font-weight: 700;
-      text-decoration: none;
-      white-space: normal;
-    }
-
-    #${OVERLAY_ID} .bgd-support-link:hover {
-      text-decoration: underline;
-    }
-
-    #${OVERLAY_ID} .bgd-header-subtitle {
-      color: var(--bgd-muted);
-      font-size: 12px;
-      margin-top: 2px;
-    }
-
-    #${OVERLAY_ID} .bgd-close {
-      border: 1px solid var(--bgd-line);
-      border-radius: 8px;
-      padding: 7px 10px;
-      background: #fff;
-      color: var(--bgd-ink);
-      font: inherit;
-      cursor: pointer;
-    }
-
-    #${OVERLAY_ID} .bgd-main {
-      padding: 14px 16px 16px;
-      display: grid;
-      gap: 12px;
-    }
-
-    #${OVERLAY_ID} .bgd-status {
-      font-size: 12px;
-      color: var(--bgd-muted);
-    }
-
-    #${OVERLAY_ID} .bgd-status[data-error="true"] {
-      color: var(--bgd-danger);
-    }
-
-    #${OVERLAY_ID} .bgd-audio-guard {
-      border: 1px solid #f0d9a8;
-      border-radius: 8px;
-      background: #fffbeb;
-      color: #5f4312;
-      padding: 10px 12px;
-      display: grid;
-      gap: 10px;
-      font-size: 12px;
-    }
-
-    #${OVERLAY_ID} .bgd-audio-guard[hidden] {
-      display: none;
-    }
-
-    #${OVERLAY_ID} .bgd-audio-actions {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      flex-wrap: wrap;
-    }
-
-    #${OVERLAY_ID} .bgd-summary {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      flex-wrap: wrap;
-      font-size: 12px;
-      color: var(--bgd-muted);
-    }
-
-    #${OVERLAY_ID} .bgd-summary-pill {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-    }
-
-    #${OVERLAY_ID} .bgd-summary-dot {
-      width: 7px;
-      height: 7px;
-      border-radius: 999px;
-      background: var(--bgd-accent);
-    }
-
-    #${OVERLAY_ID} .bgd-block {
-      border: 1px solid var(--bgd-line);
-      border-radius: var(--bgd-radius);
-      background: var(--bgd-surface-muted);
-      overflow: hidden;
-    }
-
-    #${OVERLAY_ID} .bgd-block-header {
-      padding: 10px 12px;
-      border-bottom: 1px solid var(--bgd-line);
-      font-size: 12px;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.06em;
-      color: var(--bgd-muted);
-    }
-
-    #${OVERLAY_ID} .bgd-block-body {
-      padding: 12px;
-    }
-
-    #${OVERLAY_ID} .bgd-empty {
-      color: var(--bgd-muted);
-      font-size: 12px;
-      text-align: center;
-      padding: 12px;
-      background: #fff;
-      border-radius: 8px;
-    }
-
-    #${OVERLAY_ID} .bgd-diff-list {
-      display: grid;
-      gap: 10px;
-      max-height: 56vh;
-      overflow: auto;
-    }
-
-    #${OVERLAY_ID} .bgd-card {
-      border: 1px solid var(--bgd-line);
-      border-radius: 8px;
-      background: #fff;
-      padding: 10px;
-      display: grid;
-      gap: 8px;
-    }
-
-    #${OVERLAY_ID} .bgd-card.failed {
-      border-color: #fecaca;
-      background: #fff5f5;
-    }
-
-    #${OVERLAY_ID} .bgd-card-top {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      flex-wrap: wrap;
-    }
-
-    #${OVERLAY_ID} .bgd-card-title {
-      font-size: 12px;
-      font-weight: 600;
-    }
-
-    #${OVERLAY_ID} .bgd-badge {
-      display: inline-flex;
-      align-items: center;
-      border-radius: 999px;
-      padding: 2px 8px;
-      font-size: 11px;
-      font-weight: 600;
-      background: var(--bgd-accent-soft);
-      color: var(--bgd-accent);
-    }
-
-    #${OVERLAY_ID} .bgd-diff-view {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 8px;
-      background: #fcfbff;
-    }
-
-    #${OVERLAY_ID} .bgd-diff-pane {
-      min-width: 0;
-    }
-
-    #${OVERLAY_ID} .bgd-diff-label {
-      font-size: 10px;
-      font-weight: 700;
-      text-transform: uppercase;
-      color: var(--bgd-muted);
-      margin-bottom: 4px;
-    }
-
-    #${OVERLAY_ID} .bgd-diff-content {
-      border: 1px solid var(--bgd-line);
-      border-radius: 8px;
-      background: #fff;
-      padding: 8px;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-      font-size: 11px;
-      white-space: pre-wrap;
-      word-break: break-word;
-      min-height: 58px;
-    }
-
-    #${OVERLAY_ID} .bgd-warning-list {
-      margin: 0;
-      padding-left: 18px;
-      font-size: 12px;
-      color: var(--bgd-muted);
-    }
-
-    #${OVERLAY_ID} .bgd-footer {
-      padding: 12px 16px 16px;
-      border-top: 1px solid var(--bgd-line);
-      display: flex;
-      align-items: center;
-      justify-content: flex-end;
-      gap: 8px;
-      flex-wrap: wrap;
-      background: var(--bgd-surface);
-      position: sticky;
-      bottom: 0;
-    }
-
-    #${OVERLAY_ID} .bgd-button {
-      border: 1px solid var(--bgd-line);
-      border-radius: 8px;
-      padding: 8px 12px;
-      background: #fff;
-      color: var(--bgd-ink);
-      font: inherit;
-      font-weight: 600;
-      cursor: pointer;
-    }
-
-    #${OVERLAY_ID} .bgd-button:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-    }
-
-    #${OVERLAY_ID} .bgd-button[data-variant="primary"] {
-      border-color: transparent;
-      background: var(--bgd-accent);
-      color: #fff;
-    }
-
-    @keyframes bgd-spin {
-      to { transform: rotate(360deg); }
-    }
-
-    @media (max-width: 720px) {
-      #${OVERLAY_ID} .bgd-shell {
-        padding: 8px;
-      }
-
-      #${OVERLAY_ID} .bgd-dialog {
-        width: calc(100vw - 16px);
-        max-height: calc(100vh - 16px);
-      }
-
-      #${OVERLAY_ID} .bgd-diff-view {
-        grid-template-columns: 1fr;
-      }
-    }
+    .bgd-toolbar-button[data-state="loading"] { cursor: wait; }
+    .bgd-toolbar-button .bgd-spinner { display: none; }
+    .bgd-toolbar-button[data-state="loading"] .bgd-spinner { display: inline-block; }
+    .bgd-toolbar-button[data-state="loading"] .bgd-icon { display: none; }
+    .bgd-toolbar-button .bgd-icon { font-size: 16px; line-height: 1; }
+    .bgd-timing-hover-panel { position: fixed; z-index: 2147483647; display: flex; align-items: center;
+      opacity: 0; pointer-events: none; }
+    .bgd-timing-hover-panel[data-open="true"] { opacity: 1; pointer-events: auto; }
+    .bgd-timing-dot { display: none; }
+    .bgd-timing-retry { margin-left: 10px; }
+    .bgd-diff-list { max-height: 56vh; overflow: auto; }
+    .bgd-card-top { justify-content: space-between; }
+    .bgd-card.failed { border-color: var(--bui-danger); }
   `;
-
   document.documentElement.appendChild(style);
 }
 
@@ -602,7 +169,7 @@ export class DraftingOverlayController {
       this.dialogTask = null;
       if (this.overlay) this.overlay.hidden = true;
       this.cancelTimingPanelHide();
-      if (this.button) this.button.dataset.timingOpen = 'false';
+      if (this.button) { this.button.dataset.timingOpen = 'false'; this.button.dataset.attachedOpen = 'false'; }
       if (this.timingPanel) this.timingPanel.dataset.open = 'false';
     }
     this.ensureButton();
@@ -645,12 +212,13 @@ export class DraftingOverlayController {
     const button = document.createElement('button');
     button.id = BUTTON_ID;
     button.type = 'button';
-    button.className = 'bgd-toolbar-button';
+    button.className = 'bgd-toolbar-button bui-icon-button';
+    themeRoot(button, 'purple');
+    applyComponent(button, 'icon-button', { variant: 'soft' });
     button.setAttribute('aria-label', 'Gold Draft');
-    button.title = 'Gold Draft';
     button.innerHTML = `
       <span class="bgd-icon">\u{1FA84}</span>
-      <span class="bgd-spinner"></span>
+      <span class="bgd-spinner bui-spinner"></span>
     `;
     button.addEventListener('click', () => {
       void this.runMagicDraft();
@@ -666,16 +234,24 @@ export class DraftingOverlayController {
 
   private ensureTimingPanel(): HTMLDivElement {
     if (this.timingPanel?.isConnected) return this.timingPanel;
-    const panel = createElement('div', 'bgd-timing-hover-panel');
+    const panel = createElement('div', 'bgd-timing-hover-panel bui-attached-status');
+    themeRoot(panel, 'purple');
     panel.dataset.open = 'false';
     panel.setAttribute('role', 'status');
     panel.setAttribute('aria-live', 'polite');
-    const state = createElement('div', 'bgd-timing-state');
+    const state = createElement('div', 'bgd-timing-state bui-row');
     state.append(
       createElement('span', 'bgd-timing-dot'),
-      createElement('span', 'bgd-timing-copy')
+      createElement('span', 'bgd-timing-copy bui-status-copy')
     );
-    const retry = createElement('button', 'bgd-timing-retry', 'Regenerate timestamp data');
+    const activity = createElement('div', 'bgd-timing-activity bui-progress');
+    activity.dataset.indeterminate = 'true';
+    activity.style.width = '140px';
+    activity.setAttribute('aria-hidden', 'true');
+    activity.append(createElement('div', 'bui-progress-fill'));
+    activity.hidden = true;
+    state.append(activity);
+    const retry = createElement('button', 'bgd-timing-retry bui-button', 'Regenerate timestamp data');
     retry.type = 'button';
     retry.addEventListener('click', () => {
       if (requestL0TimingRegeneration()) {
@@ -700,7 +276,7 @@ export class DraftingOverlayController {
       panel.style.top = `${buttonRect.top}px`;
       panel.style.left = `${buttonRect.right - 1}px`;
     }
-    if (this.button) this.button.dataset.timingOpen = 'true';
+    if (this.button) { this.button.dataset.timingOpen = 'true'; this.button.dataset.attachedOpen = 'true'; }
     panel.dataset.open = 'true';
   }
 
@@ -708,7 +284,7 @@ export class DraftingOverlayController {
     this.cancelTimingPanelHide();
     this.timingPanelHideTimer = window.setTimeout(() => {
       this.timingPanelHideTimer = null;
-      if (this.button) this.button.dataset.timingOpen = 'false';
+      if (this.button) { this.button.dataset.timingOpen = 'false'; this.button.dataset.attachedOpen = 'false'; }
       if (this.timingPanel) this.timingPanel.dataset.open = 'false';
     }, 180);
   }
@@ -737,7 +313,11 @@ export class DraftingOverlayController {
     this.timingPanel.dataset.status = status;
     this.timingPanel.dataset.taskId = availability?.taskId ?? '';
     const copy = this.timingPanel.querySelector<HTMLElement>('.bgd-timing-copy');
-    if (copy) copy.textContent = copyByStatus[status];
+    const loading = ['preparing', 'queued', 'running', 'retrying'].includes(status);
+    if (copy) { copy.textContent = copyByStatus[status]; copy.hidden = loading; }
+    this.timingPanel.setAttribute('aria-label', copyByStatus[status]);
+    const activity = this.timingPanel.querySelector<HTMLElement>('.bgd-timing-activity');
+    if (activity) activity.hidden = !loading;
     const retry = this.timingPanel.querySelector<HTMLButtonElement>('.bgd-timing-retry');
     if (retry) retry.hidden = status !== 'unavailable';
   }
@@ -759,59 +339,67 @@ export class DraftingOverlayController {
 
     const overlay = createElement('div');
     overlay.id = OVERLAY_ID;
+    themeRoot(overlay, 'purple');
+    applyComponent(overlay, 'overlay', { variant: 'tinted' });
     overlay.hidden = true;
 
-    const backdrop = createElement('div', 'bgd-backdrop');
+    const backdrop = createElement('div', 'bgd-backdrop bui-backdrop');
     backdrop.addEventListener('click', () => this.closeDialog());
 
-    const shell = createElement('div', 'bgd-shell');
-    const dialog = createElement('div', 'bgd-dialog');
+    const shell = createElement('div', 'bgd-shell bui-dialog-position');
+    const dialog = createElement('div', 'bgd-dialog bui-dialog');
     dialog.addEventListener('click', (event) => event.stopPropagation());
 
-    const header = createElement('div', 'bgd-header');
+    const header = createElement('div', 'bgd-header bui-header');
     const titleWrap = createElement('div');
-    const titleRow = createElement('div', 'bgd-header-title-row');
+    const titleRow = createElement('div', 'bgd-header-title-row bui-row');
     const supportLink = createElement(
       'a',
-      'bgd-support-link',
+      'bgd-support-link bui-link',
       'if this extension saves you time, consider supporting development on Ko-Fi',
     );
     supportLink.href = 'https://ko-fi.com/naftsan';
     supportLink.target = '_blank';
     supportLink.rel = 'noopener noreferrer';
-    titleRow.append(createElement('div', 'bgd-header-title', 'Gold Draft'), supportLink);
-    titleWrap.append(titleRow, createElement('div', 'bgd-header-subtitle', 'Silver -> Gold draft preview before apply'));
-    const closeButton = createElement('button', 'bgd-close', 'Close');
+    titleRow.append(createElement('div', 'bgd-header-title bui-title', 'Gold Draft'), supportLink);
+    titleWrap.append(titleRow, createElement('div', 'bgd-header-subtitle bui-subtitle', 'Silver -> Gold draft preview before apply'));
+    const closeButton = createElement('button', 'bgd-close bui-button', 'Close');
     closeButton.type = 'button';
     closeButton.addEventListener('click', () => this.closeDialog());
     header.append(titleWrap, closeButton);
 
-    const main = createElement('div', 'bgd-main');
-    const statusEl = createElement('div', 'bgd-status', 'Click the wand to generate a draft.');
-    const audioGuardEl = createElement('div', 'bgd-audio-guard');
+    const main = createElement('div', 'bgd-main bui-body');
+    const statusEl = createElement('div', 'bgd-status bui-status', 'Click the wand to generate a draft.');
+    const activity = createElement('div', 'bgd-activity bui-progress');
+    activity.dataset.indeterminate = 'true';
+    activity.setAttribute('aria-hidden', 'true');
+    activity.hidden = !this.busy;
+    activity.append(createElement('div', 'bui-progress-fill'));
+    const audioGuardEl = createElement('div', 'bgd-audio-guard bui-notice');
+    audioGuardEl.dataset.tone = 'warning';
     audioGuardEl.hidden = true;
 
-    const summaryBlock = createElement('section', 'bgd-block');
-    summaryBlock.append(createElement('div', 'bgd-block-header', 'Summary'));
-    const summaryBody = createElement('div', 'bgd-block-body');
-    const summaryEl = createElement('div', 'bgd-empty', 'No draft generated yet.');
+    const summaryBlock = createElement('section', 'bgd-block bui-panel');
+    summaryBlock.append(createElement('div', 'bgd-block-header bui-section-title', 'Summary'));
+    const summaryBody = createElement('div', 'bgd-block-body bui-body');
+    const summaryEl = createElement('div', 'bgd-empty bui-empty', 'No draft generated yet.');
     summaryBody.append(summaryEl);
     summaryBlock.append(summaryBody);
 
-    const previewBlock = createElement('section', 'bgd-block');
-    previewBlock.append(createElement('div', 'bgd-block-header', 'Diff Preview'));
-    const previewBody = createElement('div', 'bgd-block-body');
-    const previewEl = createElement('div', 'bgd-empty', 'The diff will appear here after generation.');
+    const previewBlock = createElement('section', 'bgd-block bui-panel');
+    previewBlock.append(createElement('div', 'bgd-block-header bui-section-title', 'Diff Preview'));
+    const previewBody = createElement('div', 'bgd-block-body bui-body');
+    const previewEl = createElement('div', 'bgd-empty bui-empty', 'The diff will appear here after generation.');
     previewBody.append(previewEl);
     previewBlock.append(previewBody);
 
-    main.append(statusEl, audioGuardEl, summaryBlock, previewBlock);
+    main.append(statusEl, activity, audioGuardEl, summaryBlock, previewBlock);
 
-    const footer = createElement('div', 'bgd-footer');
-    const restoreButton = createElement('button', 'bgd-button', 'Restore Original');
+    const footer = createElement('div', 'bgd-footer bui-footer');
+    const restoreButton = createElement('button', 'bgd-button bui-button', 'Restore Original');
     restoreButton.type = 'button';
     restoreButton.addEventListener('click', () => void this.restoreOriginal());
-    const applyButton = createElement('button', 'bgd-button', 'Apply Draft');
+    const applyButton = createElement('button', 'bgd-button bui-button', 'Apply Draft');
     applyButton.type = 'button';
     applyButton.dataset.variant = 'primary';
     applyButton.addEventListener('click', () => void this.applyDraft());
@@ -852,12 +440,13 @@ export class DraftingOverlayController {
 
     this.button.dataset.state = mode;
     this.button.disabled = mode === 'loading';
-    this.button.title = label;
     this.button.setAttribute('aria-label', label);
   }
 
   private setBusy(nextBusy: boolean): void {
     this.busy = nextBusy;
+    const activity = this.overlay?.querySelector<HTMLElement>('.bgd-activity');
+    if (activity) activity.hidden = !nextBusy;
     if (this.applyButton) {
       this.applyButton.disabled = nextBusy || !this.state.draftResponse;
     }
@@ -915,8 +504,8 @@ export class DraftingOverlayController {
       '',
       `${problem} Audio cues may miss laughter or other events if the draft starts now.`
     );
-    const actions = createElement('div', 'bgd-audio-actions');
-    const retryButton = createElement('button', 'bgd-button', 'Retry Audio');
+    const actions = createElement('div', 'bgd-audio-actions bui-row');
+    const retryButton = createElement('button', 'bgd-button bui-button', 'Retry Audio');
     retryButton.type = 'button';
     retryButton.dataset.bgdAudioAction = 'retry';
     retryButton.addEventListener('click', () => void this.retryPendingAudioCapture());
@@ -924,14 +513,14 @@ export class DraftingOverlayController {
     actions.append(retryButton);
 
     if (issue.kind === 'partial' && audioTracks.length) {
-      const usePartialButton = createElement('button', 'bgd-button', 'Use Captured Audio');
+      const usePartialButton = createElement('button', 'bgd-button bui-button', 'Use Captured Audio');
       usePartialButton.type = 'button';
       usePartialButton.dataset.bgdAudioAction = 'use-partial';
       usePartialButton.addEventListener('click', () => void this.continuePendingDraft('captured-audio'));
       actions.append(usePartialButton);
     }
 
-    const textOnlyButton = createElement('button', 'bgd-button', 'Continue Text Only');
+    const textOnlyButton = createElement('button', 'bgd-button bui-button', 'Continue Text Only');
     textOnlyButton.type = 'button';
     textOnlyButton.dataset.bgdAudioAction = 'text-only';
     textOnlyButton.addEventListener('click', () => void this.continuePendingDraft('text-only'));
@@ -968,12 +557,12 @@ export class DraftingOverlayController {
     }
 
     if (!this.state.capturedJob) {
-      this.summaryEl.className = 'bgd-empty';
+      this.summaryEl.className = 'bgd-empty bui-empty';
       this.summaryEl.textContent = 'No transcript captured yet.';
       return;
     }
 
-    const summary = createElement('div', 'bgd-summary');
+    const summary = createElement('div', 'bgd-summary bui-row');
     summary.append(this.createSummaryPill(this.activeDraftLabel));
     summary.append(
       this.createSummaryPill(`Job ${this.state.capturedJob.jobId}`),
@@ -1002,8 +591,8 @@ export class DraftingOverlayController {
   }
 
   private createSummaryPill(text: string): HTMLDivElement {
-    const pill = createElement('div', 'bgd-summary-pill');
-    pill.append(createElement('span', 'bgd-summary-dot'), createElement('span', '', text));
+    const pill = createElement('div', 'bgd-summary-pill bui-row');
+    pill.append(createElement('span', 'bgd-summary-dot bui-dot'), createElement('span', '', text));
     return pill;
   }
 
@@ -1022,51 +611,51 @@ export class DraftingOverlayController {
     const captured = this.state.capturedJob;
     const draft = this.state.draftResponse;
     if (!captured) {
-      this.previewEl.className = 'bgd-empty';
+      this.previewEl.className = 'bgd-empty bui-empty';
       this.previewEl.textContent = 'The diff will appear here after generation.';
       return;
     }
 
     const sourceRows = draft ? draft.draftRows : this.streamedRows;
     if (!sourceRows.length) {
-      this.previewEl.className = 'bgd-empty';
+      this.previewEl.className = 'bgd-empty bui-empty';
       this.previewEl.textContent = 'Waiting for the first completed row...';
       return;
     }
 
     const diffItems = buildDiffPreviewItems(captured.rows, sourceRows);
     if (!diffItems.length) {
-      this.previewEl.className = 'bgd-empty';
+      this.previewEl.className = 'bgd-empty bui-empty';
       this.previewEl.textContent = draft ? 'No row text changed.' : 'Completed rows have no visible text changes yet.';
       return;
     }
 
-    const list = createElement('div', 'bgd-diff-list');
+    const list = createElement('div', 'bgd-diff-list bui-stack');
     for (const item of diffItems.slice(0, 40)) {
-      const card = createElement('article', `bgd-card ${item.status === 'failed' ? 'failed' : ''}`);
-      const top = createElement('div', 'bgd-card-top');
+      const card = createElement('article', `bgd-card bui-card ${item.status === 'failed' ? 'failed' : ''}`);
+      const top = createElement('div', 'bgd-card-top bui-row');
       top.append(
-        createElement('div', 'bgd-card-title', `Row ${item.index + 1}`),
-        createElement('div', 'bgd-badge', item.status)
+        createElement('div', 'bgd-card-title bui-title', `Row ${item.index + 1}`),
+        createElement('div', 'bgd-badge bui-badge', item.status)
       );
       card.append(top);
 
-      const diffView = createElement('div', 'bgd-diff-view');
-      const beforePane = createElement('div', 'bgd-diff-pane');
+      const diffView = createElement('div', 'bgd-diff-view bui-diff');
+      const beforePane = createElement('div', 'bgd-diff-pane bui-diff-pane');
       beforePane.append(
-        createElement('div', 'bgd-diff-label', 'Before'),
+        createElement('div', 'bgd-diff-label bui-diff-label', 'Before'),
         this.createDiffContent(item.before)
       );
-      const afterPane = createElement('div', 'bgd-diff-pane');
+      const afterPane = createElement('div', 'bgd-diff-pane bui-diff-pane');
       afterPane.append(
-        createElement('div', 'bgd-diff-label', 'After'),
+        createElement('div', 'bgd-diff-label bui-diff-label', 'After'),
         this.createDiffContent(item.after)
       );
       diffView.append(beforePane, afterPane);
       card.append(diffView);
 
       if (item.warnings.length) {
-        const warnings = createElement('ul', 'bgd-warning-list');
+        const warnings = createElement('ul', 'bgd-warning-list bui-list');
         for (const warning of item.warnings) {
           warnings.append(createElement('li', '', warning));
         }
@@ -1077,7 +666,7 @@ export class DraftingOverlayController {
     }
 
     if (diffItems.length > 40) {
-      list.append(createElement('div', 'bgd-empty', `Showing first 40 of ${diffItems.length} changed rows.`));
+      list.append(createElement('div', 'bgd-empty bui-empty', `Showing first 40 of ${diffItems.length} changed rows.`));
     }
 
     this.previewEl.className = '';
@@ -1086,7 +675,7 @@ export class DraftingOverlayController {
   }
 
   private createDiffContent(text: string): HTMLDivElement {
-    const content = createElement('div', 'bgd-diff-content');
+    const content = createElement('div', 'bgd-diff-content bui-diff-text');
     content.textContent = text || '(empty)';
     return content;
   }
