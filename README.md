@@ -59,8 +59,9 @@ The packaged manifest strips local development host permissions and keeps only:
 ## Release
 
 - GitHub Releases are the canonical home for packaged ZIPs.
-- `.github/workflows/deploy-gold-drafting-extension.yml` is the manual Chrome Web Store deployment workflow. It validates the extension, builds the release ZIP, publishes it to the Chrome Web Store, and publishes the GitHub Release asset.
-- The release ZIP inherits the automatic patch bump from `npm run build`; do not run `npm run version:patch` separately before `npm run build:zip` unless you intentionally want an extra bump.
+- The version committed in `manifest.json`, `package.json` and `package-lock.json` is the release version. Bump it in the PR (`npm run version:patch`, or implicitly through `npm run build`); CI never bumps or commits versions. It must be greater than what the Chrome Web Store currently holds; the publish script checks the store's published and submitted versions and aborts otherwise.
+- Push to `main` (`.github/workflows/deploy-gold-drafting-extension.yml`, job `prerelease`) validates, builds the ZIP with `build:core` (no bump), uploads it as a workflow artifact, and creates a GitHub *pre-release* tagged `v<version>` at that commit. It never publishes to the Chrome Web Store. If `v<version>` is already a full release the job fails until the version is bumped.
+- Publishing to the Chrome Web Store is manual only: run the same workflow via `workflow_dispatch` (job `publish`) with `version` (must equal `manifest.json` on the selected ref, whose tag `v<version>` must point at that commit and still be a pre-release) and `confirm` set to `PUBLISH <version>`. `publish_type` defaults to `STAGED_PUBLISH`; `replace_pending_submission` cancels a pending review first. The job re-validates, rebuilds, uploads and publishes, then promotes the pre-release to a full release.
 - Required GitHub Actions secrets:
   - `CWS_CLIENT_ID`
   - `CWS_CLIENT_SECRET`
