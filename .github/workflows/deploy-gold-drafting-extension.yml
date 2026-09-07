@@ -67,6 +67,9 @@ jobs:
         run: npm ci
 
       - name: Install dependencies
+        env:
+          # Gold runs ONNX in the browser; Node CUDA binaries are not used.
+          ONNXRUNTIME_NODE_INSTALL: skip
         run: npm ci
 
       - name: Validate extension
@@ -194,6 +197,9 @@ jobs:
         run: npm ci
 
       - name: Install dependencies
+        env:
+          # Gold runs ONNX in the browser; Node CUDA binaries are not used.
+          ONNXRUNTIME_NODE_INSTALL: skip
         run: npm ci
 
       - name: Validate extension

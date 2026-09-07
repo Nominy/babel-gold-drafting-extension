@@ -100,6 +100,17 @@ export function prepareL0Tracks(job: TranscriptJob, audioTracks: CapturedAudioTr
       laneByKey.set(key, row.speakerKey.trim());
     }
   }
+  // A waveform remains a speaker lane even when it has no transcript rows.
+  // Preserve row labels where present, and discover missing lanes from audio.
+  if (laneByKey.size < 2) {
+    for (const track of audioTracks) {
+      // Newly created rows expose the visible label in the isolated world.
+      const identities = [track.trackLabel, track.speakerKey].filter((value): value is string => Boolean(value?.trim()));
+      if (identities.some((value) => laneByKey.has(normalizedLane(value)))) continue;
+      const lane = identities[0]?.trim();
+      if (lane) laneByKey.set(normalizedLane(lane), lane);
+    }
+  }
   const lanes = Array.from(laneByKey.values());
   if (lanes.length !== 2) {
     throw new Error(`L0 drafting requires exactly two transcript speaker lanes; found ${lanes.length}.`);

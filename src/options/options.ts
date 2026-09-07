@@ -1,3 +1,4 @@
+import { ensureUiStyles, confirmDialog } from '@nominy/babel-extension-frontend';
 import {
   LOCAL_MODEL_BASE_URL,
   LOCAL_MODEL_SAMPLE_URL,
@@ -13,9 +14,7 @@ import {
 } from '../core/local-model-bundle';
 import { transcribeLocalAudio } from '../core/local-model-runtime';
 import type { ExtensionSettings } from '../core/types';
-
 const MAX_TEST_AUDIO_SECONDS = 15;
-
 function requireElement<T extends HTMLElement>(selector: string): T {
   const element = document.querySelector(selector);
   if (!(element instanceof HTMLElement)) {
@@ -23,7 +22,6 @@ function requireElement<T extends HTMLElement>(selector: string): T {
   }
   return element as T;
 }
-
 async function requestHostPermission(baseUrl: string, purpose: string): Promise<void> {
   if (!globalThis.chrome?.permissions?.request) {
     return;
@@ -34,7 +32,6 @@ async function requestHostPermission(baseUrl: string, purpose: string): Promise<
     throw new Error(`Host access is required to ${purpose}: ${originPattern}`);
   }
 }
-
 function formatByteCount(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) {
     return '0 B';
@@ -43,7 +40,6 @@ function formatByteCount(bytes: number): string {
   const unitIndex = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
   return `${(bytes / 1024 ** unitIndex).toFixed(unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
 }
-
 function readAudioDurationSeconds(file: File): Promise<number> {
   const { promise, resolve, reject } = Promise.withResolvers<number>();
   const objectUrl = URL.createObjectURL(file);
@@ -83,15 +79,13 @@ export interface OptionsDependencies {
   readAudioDuration: (file: File) => Promise<number>;
   transcribeAudio: typeof transcribeLocalAudio;
 }
-
 const DEFAULT_OPTIONS_DEPENDENCIES: OptionsDependencies = {
   fetchResource: globalThis.fetch.bind(globalThis),
   readAudioDuration: readAudioDurationSeconds,
   transcribeAudio: transcribeLocalAudio
 };
-
-
 export async function boot(overrides: Partial<OptionsDependencies> = {}): Promise<void> {
+  ensureUiStyles();
   const dependencies = { ...DEFAULT_OPTIONS_DEPENDENCIES, ...overrides };
   const backendBaseUrlInput = requireElement<HTMLInputElement>('#backendBaseUrl');
   const projectPresetSelect = requireElement<HTMLSelectElement>('#projectPreset');
@@ -115,7 +109,6 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
   const localModelProgress = requireElement<HTMLProgressElement>('[data-role="local-model-progress"]');
   const saveButton = requireElement<HTMLButtonElement>('[data-role="save"]');
   const status = requireElement<HTMLElement>('[data-role="status"]');
-
   let localModelStatus: LocalModelStatus = {
     state: 'not-installed',
     completedBytes: 0,
@@ -125,7 +118,6 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
   let localModelNotice = '';
   let localModelNoticeIsError = false;
   let localModelTestSucceeded = false;
-
   const renderL0ReplacementSettings = (): void => {
     l0ReplacementSettings.hidden = !l0ReplacementPreviewEnabledInput.checked;
   };
@@ -140,7 +132,6 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
       localModelOperationRunning || localModelStatus.state !== 'ready' || !hasAudioFile;
     localModelSuppliedTestButton.disabled = localModelOperationRunning || localModelStatus.state !== 'ready';
     saveButton.disabled = localModelOperationRunning;
-
     const showProgress = localModelStatus.state === 'downloading' && localModelStatus.totalBytes > 0;
     localModelProgress.hidden = !showProgress;
     localModelProgress.max = Math.max(localModelStatus.totalBytes, 1);
@@ -148,7 +139,6 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
     const statusIsError = localModelNoticeIsError || localModelStatus.state === 'error';
     localModelStatusElement.setAttribute('role', statusIsError ? 'alert' : 'status');
     localModelStatusElement.setAttribute('aria-live', statusIsError ? 'assertive' : 'polite');
-
     if (localModelNotice) {
       localModelStatusElement.textContent = localModelNotice;
     } else if (localModelStatus.state === 'ready') {
@@ -180,7 +170,6 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
     }
     renderLocalModelControls();
   };
-
   const writeSettingsToControls = (settings: ExtensionSettings): void => {
     backendBaseUrlInput.value = settings.backendBaseUrl;
     projectPresetSelect.value = settings.projectPreset;
@@ -196,7 +185,6 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
     localModelsEnabledInput.checked = settings.localModelsEnabled;
     renderL0ReplacementSettings();
   };
-
   let persistedSettings = await loadSettings();
   const settings = persistedSettings;
   writeSettingsToControls(settings);
@@ -207,10 +195,8 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
     localModelsEnabledInput.checked = false;
   }
   renderLocalModelControls();
-
   l0ReplacementPreviewEnabledInput.addEventListener('change', renderL0ReplacementSettings);
   localModelTestAudioInput.addEventListener('change', renderLocalModelControls);
-
   localModelDownloadButton.addEventListener('click', () => {
     localModelTestSucceeded = false;
     localModelsEnabledInput.checked = false;
@@ -245,18 +231,16 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
         renderLocalModelControls();
       });
   });
-
-  localModelRemoveButton.addEventListener('click', () => {
+  localModelRemoveButton.addEventListener('click', async () => {
     if (localModelStatus.state !== 'ready') {
       localModelNotice = 'Only the ready Babel model bundle can be removed.';
       localModelNoticeIsError = true;
       renderLocalModelControls();
       return;
     }
-    if (!window.confirm('Remove the downloaded local model bundle and disable local browser models?')) {
+    if (!(await confirmDialog({ accent: 'purple', title: 'Remove local models?', message: 'Remove the downloaded local model bundle and disable local browser models?', confirmLabel: 'Remove models' }))) {
       return;
     }
-
     localModelOperationRunning = true;
     localModelNotice = 'Removing downloaded local models…';
     localModelNoticeIsError = false;
@@ -284,7 +268,6 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
         renderLocalModelControls();
       });
   });
-
   const runLocalModelTest = async (file: File): Promise<void> => {
     if (file.size === 0 || (!file.type.startsWith('audio/') && !file.name.toLowerCase().endsWith('.wav'))) {
       throw new Error('Choose a non-empty WAV or another supported audio file.');
@@ -305,7 +288,6 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
     localModelTestSucceeded = true;
     localModelNoticeIsError = false;
   };
-
   const startLocalModelTest = (loadFile: () => Promise<File>): void => {
     localModelOperationRunning = true;
     localModelNoticeIsError = false;
@@ -322,7 +304,6 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
         renderLocalModelControls();
       });
   };
-
   localModelTestButton.addEventListener('click', () => {
     const file = localModelTestAudioInput.files?.[0];
     if (!file) {
@@ -333,7 +314,6 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
     }
     startLocalModelTest(() => Promise.resolve(file));
   });
-
   localModelSuppliedTestButton.addEventListener('click', () => {
     localModelNotice = 'Fetching the supplied public-domain sample…';
     startLocalModelTest(async () => {
@@ -356,13 +336,11 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
       return new File([blob], 'sample-russian-15s.wav', { type: blob.type || 'audio/wav' });
     });
   });
-
   saveButton.addEventListener('click', () => {
     status.textContent = 'Saving...';
     status.setAttribute('role', 'status');
     status.setAttribute('aria-live', 'polite');
     const l0CustomBaseUrl = normalizeL0CustomBaseUrl(l0CustomBaseUrlInput.value);
-
     const validateLocalModels = async (): Promise<void> => {
       if (!localModelsEnabledInput.checked) {
         return;
@@ -377,7 +355,6 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
         throw new Error('Test the ready local model bundle with a short audio sample before enabling it.');
       }
     };
-
     void validateLocalModels()
       .then(() =>
         l0ReplacementPreviewEnabledInput.checked && !localModelsEnabledInput.checked
@@ -415,7 +392,6 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
       });
   });
 }
-
 if (globalThis.document?.currentScript) {
   void boot();
 }

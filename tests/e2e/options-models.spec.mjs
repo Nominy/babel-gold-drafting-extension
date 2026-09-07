@@ -120,12 +120,12 @@ test.describe('Gold actual options, cache, and offscreen controls', () => {
     expect(await cachesIn(options)).toEqual(initialCache);
     await options.reload();
     await expect(options.locator(STATUS)).toContainText('verified and cached');
-    options.once('dialog', (dialog) => dialog.dismiss());
     await remove(options).click();
+    await options.getByRole('dialog', { name: 'Remove local models?' }).getByRole('button', { name: 'Cancel', exact: true }).click();
     await expect(remove(options)).toBeEnabled();
     expect(await cachesIn(options)).toEqual(initialCache);
-    options.once('dialog', (dialog) => dialog.accept());
     await remove(options).click();
+    await options.getByRole('dialog', { name: 'Remove local models?' }).getByRole('button', { name: 'Remove models', exact: true }).click();
     await expect(options.locator(STATUS)).toContainText('removed');
     expect(await cachesIn(options)).toEqual([]);
     await expect(sample(options)).toBeDisabled();
@@ -275,8 +275,8 @@ test.describe('Gold installed-model inference failure boundary', () => {
     // silently select remote inference or pretend the user enabled it.
     expect(await cachesIn(options)).toHaveLength(1);
     expect((await babel.state()).calls.filter((call) => call.path.startsWith('/api/draft/') || call.path === '/v1/draft')).toEqual([]);
-    options.once('dialog', (dialog) => dialog.accept());
     await remove(options).click();
+    await options.getByRole('dialog', { name: 'Remove local models?' }).getByRole('button', { name: 'Remove models', exact: true }).click();
     await expect(options.locator(STATUS)).toContainText('removed');
     await babel.control({ models: {} });
     await install(options);

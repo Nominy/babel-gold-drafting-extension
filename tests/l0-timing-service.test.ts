@@ -68,6 +68,55 @@ test('usable timing jobs accept transcripts with one or more speaker lanes', () 
   assert.equal(isUsableL0TimingJob({ ...job, rows: [job.rows[0]] }), true);
 });
 
+test('timing waits for both nonempty speaker tracks without starting a model or exhausting retries', async (t) => {
+  const scheduled: Array<() => void> = [];
+  const delays: number[] = [];
+  let captured: CapturedAudioTrack[] = [];
+  let requested = 0;
+  const errors: unknown[] = [];
+  t.mock.method(console, 'error', (...args: unknown[]) => errors.push(args));
+  const service = new L0TimingService(dependencies({
+    captureAudio: async () => captured,
+    requestTiming: async () => { requested += 1; return response; },
+    schedule: (callback, delay) => { scheduled.push(callback); delays.push(delay); }
+  }));
+  service.onLifecycleOpportunity();
+  await flushAsyncWork();
+  for (let index = 0; index < 5; index += 1) {
+    captured = index < 3 ? [tracks[0]] : [tracks[0], { ...tracks[1], blob: new Blob([]) }];
+    service.onLifecycleOpportunity();
+    assert.equal(scheduled.length, 1, 'DOM churn must not schedule duplicate captures');
+    scheduled.shift()!();
+    await flushAsyncWork();
+  }
+  assert.equal(requested, 0);
+  assert.deepEqual(errors, []);
+  assert.deepEqual(getL0TimingAvailability(), { taskId, status: 'preparing' });
+  assert.ok(delays.every((delay) => delay >= 5_000 && delay <= 30_000));
+  captured = tracks;
+  scheduled.shift()!();
+  await flushAsyncWork();
+  assert.equal(requested, 1);
+  assert.deepEqual(getL0TimingAvailability(), { taskId, status: 'available' });
+});
+
+test('an audio readiness timer cannot start timing after navigation', async () => {
+  let current = taskId;
+  const scheduled: Array<() => void> = [];
+  let captures = 0;
+  const service = new L0TimingService(dependencies({
+    currentTaskId: () => current,
+    captureAudio: async () => { captures += 1; return []; },
+    schedule: (callback) => scheduled.push(callback)
+  }));
+  service.onLifecycleOpportunity();
+  await flushAsyncWork();
+  current = 'another-task';
+  scheduled.shift()!();
+  await flushAsyncWork();
+  assert.equal(captures, 1);
+});
+
 test('timing lifecycle deduplicates in-flight and successful tasks and publishes only the exact contract', async () => {
   const pending = deferred<L0TimingResponse>();
   const published: unknown[] = [];

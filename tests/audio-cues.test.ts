@@ -699,3 +699,104 @@ test('SPA task changes isolate concurrent capture caches and reject stale comple
   assert.deepEqual((await pendingB).map((track) => track.source), [taskBUrl]);
   assert.equal(taskAFetches, 2);
 });
+
+test('search and hash changes on the same task do not invalidate an in-flight capture', async () => {
+  const dom = installDom('<main></main>');
+  installAudioRequestCapture();
+  const laneUrl = 'https://dashboard.babel.audio/audio/speaker-1.wav';
+  window.dispatchEvent(new dom.window.MessageEvent('message', {
+    source: window,
+    data: { type: AUDIO_SOURCE_MESSAGE_TYPE, url: laneUrl, speakerKey: 'speaker-1', discoveredAt: 1 }
+  }));
+  let releaseFetch!: () => void;
+  const fetchStarted = new Promise<void>((resolve) => {
+    globalThis.fetch = async () => {
+      resolve();
+      await new Promise<void>((release) => { releaseFetch = release; });
+      return {
+        ok: true,
+        status: 200,
+        blob: async () => new dom.window.Blob(['audio'], { type: 'audio/wav' })
+      } as Response;
+    };
+  });
+
+  const capture = captureAudioTracksForDrafting();
+  await fetchStarted;
+  // Router noise: same pathname and same explicit job id, new panel state and hash.
+  dom.window.history.replaceState({}, '', '?jobId=job-42&panel=timing#segment-3');
+  releaseFetch();
+
+  assert.deepEqual((await capture).map((track) => [track.speakerKey, track.source]), [['speaker-1', laneUrl]]);
+});
+
+test('pathname changes invalidate an in-flight capture', async () => {
+  const dom = installDom('<main></main>');
+  installAudioRequestCapture();
+  window.dispatchEvent(new dom.window.MessageEvent('message', {
+    source: window,
+    data: {
+      type: AUDIO_SOURCE_MESSAGE_TYPE,
+      url: 'https://dashboard.babel.audio/audio/speaker-1.wav',
+      speakerKey: 'speaker-1',
+      discoveredAt: 1
+    }
+  }));
+  let releaseFetch!: () => void;
+  const fetchStarted = new Promise<void>((resolve) => {
+    globalThis.fetch = async () => {
+      resolve();
+      await new Promise<void>((release) => { releaseFetch = release; });
+      return {
+        ok: true,
+        status: 200,
+        blob: async () => new dom.window.Blob(['audio'], { type: 'audio/wav' })
+      } as Response;
+    };
+  });
+
+  const capture = captureAudioTracksForDrafting();
+  await fetchStarted;
+  dom.window.history.replaceState({}, '', '/transcription/EN-transcription?jobId=job-42');
+  releaseFetch();
+
+  await assert.rejects(capture, /Audio capture task changed/);
+});
+
+test('unavailable lanes are reported with their reason instead of vanishing silently', async () => {
+  const dom = installDom('<main></main>');
+  installAudioRequestCapture();
+  const missingUrl = 'https://dashboard.babel.audio/audio/speaker-2.wav';
+  const revokedUrl = 'blob:https://dashboard.babel.audio/revoked';
+  for (const [url, speakerKey] of [
+    ['https://dashboard.babel.audio/audio/speaker-1.wav', 'speaker-1'],
+    [missingUrl, 'speaker-2'],
+    [revokedUrl, 'speaker-3']
+  ]) {
+    window.dispatchEvent(new dom.window.MessageEvent('message', {
+      source: window,
+      data: { type: AUDIO_SOURCE_MESSAGE_TYPE, url, speakerKey, discoveredAt: 1 }
+    }));
+  }
+  globalThis.fetch = async (input: RequestInfo | URL) => {
+    if (String(input) === revokedUrl) throw new TypeError('Failed to fetch');
+    return {
+      ok: String(input) !== missingUrl,
+      status: String(input) === missingUrl ? 403 : 200,
+      blob: async () => new dom.window.Blob(['audio'], { type: 'audio/wav' })
+    } as Response;
+  };
+  const warnings: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => warnings.push(args.map(String).join(' '));
+  try {
+    const tracks = await captureAudioTracksForDrafting();
+    assert.deepEqual(tracks.map((track) => track.speakerKey), ['speaker-1']);
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert.deepEqual(warnings, [
+    `[babel-gold-drafting] Audio lane unavailable (HTTP 403): ${missingUrl}`,
+    `[babel-gold-drafting] Audio lane unavailable (Failed to fetch): ${revokedUrl}`
+  ]);
+});
