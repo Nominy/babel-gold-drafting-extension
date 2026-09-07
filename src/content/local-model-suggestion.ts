@@ -57,7 +57,7 @@ function createDefaultDependencies(): LocalModelSuggestionDependencies {
       await storage.set({ [LOCAL_MODEL_SUGGESTION_STORAGE_KEY]: true });
     },
     requestGpuAdapter: () =>
-      ((globalThis.navigator as GpuNavigator).gpu?.requestAdapter({ powerPreference: 'high-performance' }) ??
+      ((globalThis.navigator as GpuNavigator).gpu?.requestAdapter() ??
         Promise.resolve(null)),
     optionsUrl:
       globalThis.chrome?.runtime?.getURL('options.html#local-model-heading') ?? '#local-model-heading',

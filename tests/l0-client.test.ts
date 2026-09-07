@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { generateL0Draft, generateL0SegmentDraft, getL0DraftEndpoint } from '../src/core/l0-client';
+import { generateL0Draft, generateL0SegmentDraft, getL0DraftEndpoint, prepareL0Tracks } from '../src/core/l0-client';
 import { DEFAULT_SETTINGS } from '../src/core/settings';
 import type { CapturedAudioTrack, TranscriptJob } from '../src/core/types';
 
@@ -30,6 +30,25 @@ const canonicalResponse = {
   summary: { rowCount: 2 },
   models: { asr: 'qwen', formatter: 'punctuation' }
 };
+
+test('L0 drafting discovers the empty transcript lane from captured speaker audio', () => {
+  for (const row of job.rows) {
+    const prepared = prepareL0Tracks({ ...job, rows: [row] }, tracks.slice(0, 2));
+    assert.deepEqual(prepared.map((track) => track.lane).sort(), ['speaker-1', 'speaker-2']);
+    assert.equal(new Set(prepared.map((track) => track.audio)).size, 2);
+  }
+  assert.throws(() => prepareL0Tracks({ ...job, rows: [job.rows[0]] }, [tracks[0]]), /exactly two/);
+});
+
+test('empty transcripts use visible audio lane labels so created rows can be recaptured', () => {
+  const audio = tracks.slice(0, 2).map((track, index) => ({ ...track, trackLabel: `Speaker ${index + 1}` }));
+  const prepared = prepareL0Tracks({ ...job, rows: [] }, audio);
+  assert.deepEqual(prepared.map(track => track.lane), ['Speaker 1', 'Speaker 2']);
+  assert.equal(prepared[0].audio, audio[0]);
+  assert.equal(prepared[1].audio, audio[1]);
+  const existing = prepareL0Tracks(job, audio);
+  assert.deepEqual(existing.map(track => track.lane), ['speaker-1', 'speaker-2']);
+});
 
 test('L0 routing uses the hosted default and normalizes custom self-host bases', () => {
   assert.equal(

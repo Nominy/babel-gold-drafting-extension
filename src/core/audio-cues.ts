@@ -34,7 +34,8 @@ const MAX_DISCOVERED_SOURCES = 64;
 
 interface AudioCaptureSession {
   taskId: string;
-  pageUrl: string;
+  pathname: string;
+  queryTaskId: string;
   interceptedAudioByUrl: Map<string, InterceptedAudioTrack>;
   discoveredAudioSourceByUrl: Map<string, DiscoveredAudioSource>;
   activeCaptures: number;
@@ -44,13 +45,28 @@ interface AudioCaptureSession {
 let installedWindow: Window | null = null;
 let audioCaptureSession: AudioCaptureSession | null = null;
 
+// Task query keys can change before the published review action catches up.
+// Ignore panel/hash navigation, but retain explicit task identifiers separately.
+function readQueryTaskId(): string {
+  const query = new URLSearchParams(window.location.search);
+  return JSON.stringify(['jobId', 'transcriptionChunkId', 'annotationId', 'id']
+    .map((key) => query.get(key)?.trim() || ''));
+}
+
+function isCurrentAudioCaptureSession(session: AudioCaptureSession): boolean {
+  return (
+    session.pathname === window.location.pathname &&
+    session.queryTaskId === readQueryTaskId() &&
+    session.taskId === buildCanonicalTaskIdentity(captureTranscriptJob())
+  );
+}
+
 function getAudioCaptureSession(): AudioCaptureSession {
-  const taskId = buildCanonicalTaskIdentity(captureTranscriptJob());
-  const pageUrl = window.location.href;
-  if (!audioCaptureSession || audioCaptureSession.taskId !== taskId || audioCaptureSession.pageUrl !== pageUrl) {
+  if (!audioCaptureSession || !isCurrentAudioCaptureSession(audioCaptureSession)) {
     audioCaptureSession = {
-      taskId,
-      pageUrl,
+      taskId: buildCanonicalTaskIdentity(captureTranscriptJob()),
+      pathname: window.location.pathname,
+      queryTaskId: readQueryTaskId(),
       interceptedAudioByUrl: new Map(),
       discoveredAudioSourceByUrl: new Map(),
       activeCaptures: 0,
@@ -67,7 +83,7 @@ function clearAudioCaptureSession(session: AudioCaptureSession): void {
 }
 
 function assertAudioCaptureTask(session: AudioCaptureSession): void {
-  if (session.pageUrl !== window.location.href || session.taskId !== buildCanonicalTaskIdentity(captureTranscriptJob())) {
+  if (!isCurrentAudioCaptureSession(session)) {
     throw new Error('Audio capture task changed before capture completed.');
   }
 }
@@ -272,19 +288,30 @@ function getCurrentLaneSourceUrls(session: AudioCaptureSession): Set<string> {
   return urls;
 }
 
+/**
+ * Fetches one lane's audio. An unavailable lane (HTTP error, revoked blob URL,
+ * rejected body read, empty body) resolves to `null` so the remaining lanes
+ * still reach the capture guard, but the reason is logged: a silently missing
+ * lane on live is indistinguishable from a lane that never existed.
+ */
 async function fetchAvailableAudio(source: string): Promise<Blob | null> {
+  let reason: string;
   try {
     const response = await fetch(source, {
       credentials: new URL(source, window.location.href).origin === window.location.origin ? 'include' : 'omit'
     });
-    if (!response.ok) return null;
-    const blob = await response.blob();
-    return blob.size ? blob : null;
-  } catch {
-    // Revoked blob URLs and rejected body reads are unavailable lanes too.
-    // Returning the remaining tracks lets the capture guard require a decision.
-    return null;
+    if (!response.ok) {
+      reason = `HTTP ${response.status}`;
+    } else {
+      const blob = await response.blob();
+      if (blob.size) return blob;
+      reason = 'empty body';
+    }
+  } catch (error) {
+    reason = error instanceof Error ? error.message : String(error);
   }
+  console.warn(`[babel-gold-drafting] Audio lane unavailable (${reason}): ${source}`);
+  return null;
 }
 
 async function appendDiscoveredSourceTracks(

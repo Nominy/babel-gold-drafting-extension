@@ -13,6 +13,7 @@ import {
   subscribeL0TimingAvailability,
   type L0TimingAvailability
 } from './l0-timing-availability';
+import { readPublishedPageTaskId } from './page-task-identity';
 import type {
   CapturedAudioTrack,
   DraftRowResult,
@@ -55,6 +56,25 @@ function createDraftSessionId(jobId: string): string {
       ? crypto.randomUUID()
       : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   return `${jobId}:${randomId}`;
+}
+
+export interface DialogTask {
+  pathname: string;
+  reviewActionId: string;
+}
+
+/**
+ * A dialog belongs to the task it was opened on. Search and hash are router
+ * noise on live; only a different pathname or a different, non-empty published
+ * review action ID means the user is now on another task.
+ */
+export function hasDialogTaskChanged(
+  task: DialogTask,
+  location: Pick<Location, 'pathname'>,
+  publishedReviewActionId: string
+): boolean {
+  if (task.pathname !== location.pathname) return true;
+  return Boolean(task.reviewActionId && publishedReviewActionId && publishedReviewActionId !== task.reviewActionId);
 }
 
 function createElement<K extends keyof HTMLElementTagNameMap>(
@@ -533,7 +553,7 @@ export class DraftingOverlayController {
   private button: HTMLButtonElement | null = null;
   private overlay: HTMLDivElement | null = null;
   private dialogEl: HTMLDivElement | null = null;
-  private dialogRoute: string | null = null;
+  private dialogTask: DialogTask | null = null;
   private statusEl: HTMLDivElement | null = null;
   private audioGuardEl: HTMLDivElement | null = null;
   private summaryEl: HTMLDivElement | null = null;
@@ -578,8 +598,8 @@ export class DraftingOverlayController {
 
   ensureMagicButton(): void {
     ensureStyles();
-    if (this.dialogRoute !== null && this.dialogRoute !== window.location.pathname + window.location.search) {
-      this.dialogRoute = null;
+    if (this.dialogTask && hasDialogTaskChanged(this.dialogTask, window.location, readPublishedPageTaskId())) {
+      this.dialogTask = null;
       if (this.overlay) this.overlay.hidden = true;
       this.cancelTimingPanelHide();
       if (this.button) this.button.dataset.timingOpen = 'false';
@@ -597,7 +617,7 @@ export class DraftingOverlayController {
     this.button = null;
     this.overlay = null;
     this.dialogEl = null;
-    this.dialogRoute = null;
+    this.dialogTask = null;
     this.statusEl = null;
     this.audioGuardEl = null;
     this.summaryEl = null;
@@ -1082,7 +1102,7 @@ export class DraftingOverlayController {
   }
 
   private async runMagicDraft(): Promise<void> {
-    this.dialogRoute = window.location.pathname + window.location.search;
+    this.dialogTask = { pathname: window.location.pathname, reviewActionId: readPublishedPageTaskId() };
     this.openDialog();
     this.activeDraftLabel = 'Gold / OpenRouter';
     this.clearAudioGuard();
@@ -1102,14 +1122,15 @@ export class DraftingOverlayController {
       this.setStatus('Capturing transcript...');
 
       let capturedJob = captureTranscriptJob();
-      if (!capturedJob.rows.length) {
+      const settings = await loadSettings();
+      if (!capturedJob.rows.length && !settings.l0ReplacementPreviewEnabled) {
         throw new Error('No transcript rows detected on this page.');
       }
       this.state.capturedJob = capturedJob;
+      if (capturedJob.taskScoped) this.dialogTask = { pathname: window.location.pathname, reviewActionId: capturedJob.jobId };
       this.streamedTotalRows = capturedJob.rows.length;
       this.render();
 
-      const settings = await loadSettings();
       if (settings.l0ReplacementPreviewEnabled) {
         this.activeDraftLabel = settings.l0DontRunLlm
           ? 'L0 replacement / no LLM'
@@ -1166,7 +1187,10 @@ export class DraftingOverlayController {
     settings: ExtensionSettings
   ): Promise<TranscriptJob> {
     this.setStatus('Checking Babel Helper availability...');
-    await requireL0ReplacementConsumer();
+    const helperConfirmed = await requireL0ReplacementConsumer();
+    if (!helperConfirmed) {
+      this.setStatus('Babel Helper did not confirm readiness; continuing with a direct replacement request...');
+    }
     this.requireCurrentTask(capturedJob);
     this.setStatus('Capturing exactly two WAV speaker tracks for L0 replacement...');
     const audioTracks = await captureAudioTracksForDrafting();

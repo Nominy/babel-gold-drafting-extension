@@ -76,46 +76,59 @@ function isReplaceResponse(value: unknown, requestId: string): value is L0Replac
   );
 }
 
-export function requireL0ReplacementConsumer(): Promise<void> {
-  const requestId = crypto.randomUUID();
-  const { promise, resolve, reject } = Promise.withResolvers<void>();
-  const cleanup = (): void => {
-    window.clearTimeout(timeoutId);
-    window.removeEventListener('message', onMessage);
-  };
-  const onMessage = (event: MessageEvent): void => {
-    const data = event.data;
-    if (
-      event.source !== window
-      || !data || typeof data !== 'object'
-      || data.type !== L0_REPLACE_READY_RESPONSE_TYPE
-      || data.version !== L0_REPLACE_PROTOCOL_VERSION
-      || data.requestId !== requestId
-    ) return;
-    cleanup();
-    resolve();
-  };
-  const timeoutId = window.setTimeout(() => {
-    cleanup();
-    reject(new Error('Babel Helper is required for L0 transcript replacement. Enable Babel Helper and reload this task.'));
-  }, L0_REPLACE_READY_TIMEOUT_MS);
-  window.addEventListener('message', onMessage);
-  window.postMessage({
-    type: L0_REPLACE_READY_REQUEST_TYPE,
-    version: L0_REPLACE_PROTOCOL_VERSION,
-    requestId
-  }, '*');
-  return promise;
+function createRequestId(): string {
+  return typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `l0-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+/**
+ * Pings the Helper's L0 replacement listener. Resolves `true` when a Helper
+ * that speaks the ready protocol answers, `false` when nobody answers in time.
+ * A timeout never aborts: Helper builds that predate the ready ping still
+ * serve the replacement request itself, so the caller proceeds on the direct
+ * request path exactly as before the ping existed.
+ */
+export function requireL0ReplacementConsumer(): Promise<boolean> {
+  const requestId = createRequestId();
+  return new Promise((resolve) => {
+    const cleanup = (): void => {
+      window.clearTimeout(timeoutId);
+      window.removeEventListener('message', onMessage);
+    };
+    const onMessage = (event: MessageEvent): void => {
+      const data = event.data;
+      if (
+        (event.source && event.source !== window)
+        || !data || typeof data !== 'object'
+        || data.type !== L0_REPLACE_READY_RESPONSE_TYPE
+        || data.version !== L0_REPLACE_PROTOCOL_VERSION
+        || data.requestId !== requestId
+      ) return;
+      cleanup();
+      resolve(true);
+    };
+    const timeoutId = window.setTimeout(() => {
+      cleanup();
+      console.warn(
+        `[babel-gold-drafting] Babel Helper did not confirm L0 replacement readiness within ${L0_REPLACE_READY_TIMEOUT_MS}ms; sending the replacement request directly.`
+      );
+      resolve(false);
+    }, L0_REPLACE_READY_TIMEOUT_MS);
+    window.addEventListener('message', onMessage);
+    window.postMessage({
+      type: L0_REPLACE_READY_REQUEST_TYPE,
+      version: L0_REPLACE_PROTOCOL_VERSION,
+      requestId
+    }, '*');
+  });
 }
 
 export function replaceTranscriptWithL0Rows(rows: L0DraftRow[]): Promise<L0CreatedRowMapping[]> {
   if (!rows.length) {
     throw new Error('L0 replacement requires at least one returned row.');
   }
-  const requestId =
-    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-      ? crypto.randomUUID()
-      : `l0-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const requestId = createRequestId();
 
   return new Promise((resolve, reject) => {
     const cleanup = (): void => {

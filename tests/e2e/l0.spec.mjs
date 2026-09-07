@@ -30,25 +30,75 @@ async function configure(page, babel, settings = {}, overrides = {}) {
 }
 
 
-// Replacement genuinely requires Helper. Keep Gold-only admission in its own
-// installed-extension configuration, rather than masking it with a consumer.
+// An unanswered ready ping permits older Helpers to handle the direct request.
+// With no Helper installed, that request must eventually fail without mutation.
 test.describe('Gold without a replacement consumer', () => {
   test.use({ extensions: ['gold'] });
-  test('default L0 replacement reports missing Helper promptly and preserves every native row @local-engine', async ({ page, babel }) => {
-    await configure(page, babel);
+  test('unanswered L0 replacement reports Helper timeout and preserves every native row @local-engine', async ({ page, babel }) => {
+    if (babel.ai !== 'placeholder') test.setTimeout(180_000);
+    await configure(page, babel, {}, speechAudio(babel));
     const original = await texts(page);
+    const originalAnnotations = annotationData(await nativeAnnotations(page));
     await page.locator(WAND).click();
-    await expect(page.locator(`${STATUS}[data-error="true"]`)).toContainText(/Helper/i, { timeout: 15_000 });
+    await expect(page.locator(STATUS)).toContainText('Replacing current transcript', {
+      timeout: babel.ai === 'placeholder' ? 30_000 : 150_000,
+    });
+    await expect(page.locator(WAND)).toBeDisabled();
+    expect(annotationData(await nativeAnnotations(page))).toEqual(originalAnnotations);
+
+    // Chromium virtual time reaches the real replacement deadline, including
+    // extension isolated-world timers, without a five-minute wall-clock wait.
+    const clock = await page.context().newCDPSession(page);
+    try {
+      await clock.send('Emulation.setVirtualTimePolicy', { policy: 'advance', budget: 300_001 });
+      await expect(page.locator(`${STATUS}[data-error="true"]`)).toContainText(/Timed out.*Babel Helper/i);
+    } finally {
+      await clock.detach();
+    }
     await expect(page.locator(WAND)).toBeEnabled();
     await expect(page.getByRole('button', { name: 'Apply Draft', exact: true })).toBeDisabled();
     expect(await texts(page)).toEqual(original);
-    expect((await babel.state()).calls.filter((call) => call.path.startsWith('/api/draft/'))).toEqual([]);
-    expect((await babel.state()).calls.filter((call) => call.path === '/v1/draft')).toEqual([]);
+    expect(annotationData(await nativeAnnotations(page))).toEqual(originalAnnotations);
+    const state = await babel.state();
+    expect(state.calls.filter((call) => call.path.startsWith('/api/draft/'))).toEqual([]);
+    expect(state.calls.filter((call) => call.path === '/v1/draft')).toHaveLength(1);
   });
 });
 
 test.describe('Gold and Helper L0 integration', () => {
   test.use({ extensions: ['helper', 'gold'] });
+
+  test('L0 creates and saves native segments from audio with an empty transcript @local-engine', async ({ page, babel }) => {
+    if (babel.ai !== 'placeholder') test.setTimeout(180_000);
+    await configure(page, babel, {}, { ...speechAudio(babel), action: { annotations: [] } });
+    await expect(page.locator(ROW)).toHaveCount(0);
+    await page.locator(WAND).click();
+    await expect(page.locator(STATUS)).toContainText('L0 replacement complete', {
+      timeout: babel.ai === 'placeholder' ? 60_000 : 150_000,
+    });
+    const state = await babel.state();
+    const generated = state.calls.find(call => call.path === '/v1/draft').response.rows;
+    expect(generated.length).toBeGreaterThan(0);
+    await page.getByRole('button', { name: 'Close', exact: true }).click();
+    const annotations = await nativeAnnotations(page);
+    expect(annotations).toHaveLength(generated.length);
+    expect(annotations.map(row => row.content).sort()).toEqual(generated.map(row => row.text).sort());
+    expect(annotations.every(row => row.startTimeInSeconds < row.endTimeInSeconds)).toBe(true);
+    expect(state.calls.filter(call => call.path.startsWith('/api/draft/'))).toEqual([]);
+    await page.getByRole('button', { name: 'Save progress', exact: true }).click();
+    await expect.poll(async () => annotationData((await babel.state()).action.annotations)).toEqual(annotationData(annotations));
+    await page.reload();
+    await expect.poll(async () => (await texts(page)).sort()).toEqual(generated.map(row => row.text).sort());
+  });
+
+  test('ordinary drafting still rejects an empty transcript without sending generation requests', async ({ page, babel }) => {
+    await configure(page, babel, { l0ReplacementPreviewEnabled: false }, { action: { annotations: [] } });
+    await page.locator(WAND).click();
+    await expect(page.locator(`${STATUS}[data-error="true"]`)).toContainText('No transcript rows');
+    await expect(page.locator(WAND)).toBeEnabled();
+    expect((await babel.state()).calls.filter(call => call.path.startsWith('/api/draft/') || call.path === '/v1/draft')).toEqual([]);
+    await expect(page.locator(ROW)).toHaveCount(0);
+  });
 
   test('L0 replaces native rows and timings without running an optional LLM @local-engine', async ({ page, babel }) => {
     if (babel.ai !== 'placeholder') test.setTimeout(180_000);

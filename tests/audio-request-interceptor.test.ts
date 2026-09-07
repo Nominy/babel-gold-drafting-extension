@@ -4,11 +4,21 @@ import { JSDOM } from 'jsdom';
 import {
   AUDIO_ENABLE_CAPTURE_MESSAGE_TYPE,
   AUDIO_FLUSH_REQUEST_MESSAGE_TYPE,
+  AUDIO_RESPONSE_MESSAGE_TYPE,
   AUDIO_SOURCE_MESSAGE_TYPE,
   PAGE_TASK_ID_ATTRIBUTE,
   PAGE_TASK_ID_REQUEST_MESSAGE_TYPE,
   PAGE_TASK_ID_RESPONSE_MESSAGE_TYPE
 } from '../src/core/audio-intercept-protocol';
+
+function installEditor(dom: JSDOM, url: string) {
+  const recordings = [{ processedRecordingId: 'speaker-1', speaker: 1, processedRecordingUrl: url }];
+  const editor = { memoizedProps: { reviewActionId: 'task-a', transcriptionChunkProcessedRecordings: recordings } };
+  const root: any = { child: editor };
+  root.stateNode = { current: root };
+  Object.assign(dom.window.document.querySelector('main')!, { __reactFiber$test: root });
+  return recordings;
+}
 
 test('main-world audio interceptor stays dormant until the extension enables capture', async () => {
   const dom = new JSDOM('<main></main>', { url: 'https://dashboard.babel.audio/transcription/RU-transcription' });
@@ -45,16 +55,7 @@ test('native waveform blob URLs retain their speaker lane mapping', async () => 
   const host = dom.window.document.getElementById('wave')!;
   host.attachShadow({ mode: 'open' }).innerHTML = '<div part="wrapper"></div>';
   const blobUrl = 'blob:https://dashboard.babel.audio/9f3dc4ef-a467-44b5-9551-c5311a49e317';
-  Object.assign(host, {
-    __reactFiber$test: {
-      memoizedProps: { track: { id: 'speaker-1', label: 'Speaker 1' } },
-      memoizedState: {
-        memoizedState: {
-          current: { 'speaker-1': { wavesurfer: { options: { url: blobUrl } } } }
-        }
-      }
-    }
-  });
+  installEditor(dom, blobUrl);
   Object.assign(globalThis, {
     window: dom.window,
     document: dom.window.document,
@@ -87,14 +88,14 @@ test('native waveform blob URLs retain their speaker lane mapping', async () => 
   dom.window.close();
 });
 
-test('native task identity survives deleting every annotation but never retains a previous action', async () => {
+test('native task identity survives deleting every annotation and follows the committed root', async () => {
   const dom = new JSDOM('<main><table><tbody><tr><td><textarea placeholder="What was said"></textarea></td></tr></tbody></table></main>', {
     url: 'https://dashboard.babel.audio/transcription/RU-transcription'
   });
   const body = dom.window.document.querySelector('tbody')!;
   const textarea = dom.window.document.querySelector('textarea')!;
   type NativeFiber = {
-    memoizedProps?: { reviewActionId: string };
+    memoizedProps?: { reviewActionId: string; transcriptionChunkProcessedRecordings: unknown[] };
     return?: NativeFiber;
     child?: NativeFiber;
     alternate?: NativeFiber;
@@ -105,8 +106,8 @@ test('native task identity survives deleting every annotation but never retains 
   const rootState = { current: rootA };
   rootA.stateNode = rootState;
   rootB.stateNode = rootState;
-  const actionA: NativeFiber = { memoizedProps: { reviewActionId: 'task-a' }, return: rootA };
-  const actionB: NativeFiber = { memoizedProps: { reviewActionId: 'task-b' }, return: rootB };
+  const actionA: NativeFiber = { memoizedProps: { reviewActionId: 'task-a', transcriptionChunkProcessedRecordings: [] }, return: rootA };
+  const actionB: NativeFiber = { memoizedProps: { reviewActionId: 'task-b', transcriptionChunkProcessedRecordings: [] }, return: rootB };
   actionA.alternate = actionB;
   actionB.alternate = actionA;
   rootA.child = actionA;
@@ -119,7 +120,7 @@ test('native task identity survives deleting every annotation but never retains 
   actionB.child = bodyB;
   const textareaFiber: NativeFiber = { return: bodyA };
   bodyA.child = textareaFiber;
-  Object.assign(body, { __reactFiber$test: bodyA });
+  Object.assign(dom.window.document.querySelector('main')!, { __reactFiber$test: bodyA });
   Object.assign(textarea, { __reactFiber$test: textareaFiber });
   Object.assign(globalThis, {
     window: dom.window,
@@ -161,9 +162,87 @@ test('native task identity survives deleting every annotation but never retains 
   assert.equal(await readTaskId(), 'task-b');
   assert.equal(dom.window.document.documentElement.getAttribute(PAGE_TASK_ID_ATTRIBUTE), 'task-b');
 
-  // A disconnected native anchor cannot recover an ID from either stale branch.
+  // Missing committed editor state must not resurrect the stale alternate.
   delete rootB.child;
   assert.equal(await readTaskId(), '');
   assert.equal(dom.window.document.documentElement.hasAttribute(PAGE_TASK_ID_ATTRIBUTE), false);
+  dom.window.close();
+});
+
+test('intercepted audio keeps its capture-time lane when the registry URL rotates', async () => {
+  const dom = new JSDOM('<main><div id="wave"></div></main>', {
+    url: 'https://dashboard.babel.audio/transcription/RU-transcription'
+  });
+  const host = dom.window.document.getElementById('wave')!;
+  host.attachShadow({ mode: 'open' }).innerHTML = '<div part="wrapper"></div>';
+  const signedUrl = 'https://audio.example.com/job-42/speaker-1.wav?X-Amz-Signature=first';
+  const recordings = installEditor(dom, signedUrl);
+  dom.window.fetch = (async () =>
+    new Response(new Uint8Array([1, 2, 3, 4]), { headers: { 'content-type': 'audio/wav' } })) as typeof fetch;
+  Object.assign(globalThis, {
+    window: dom.window,
+    document: dom.window.document,
+    HTMLElement: dom.window.HTMLElement,
+    ShadowRoot: dom.window.ShadowRoot,
+    XMLHttpRequest: dom.window.XMLHttpRequest
+  });
+  const moduleUrl = new URL('../src/content/audio-request-interceptor.ts', import.meta.url);
+  moduleUrl.search = '?case=capture-time-lane';
+  await import(moduleUrl.href);
+  const responses: Array<{ url: string; speakerKey?: string; trackLabel?: string }> = [];
+  const captured = new Promise<void>((resolve) => {
+    dom.window.addEventListener('message', (event) => {
+      if (event.data?.type !== AUDIO_RESPONSE_MESSAGE_TYPE) return;
+      responses.push(event.data);
+      resolve();
+    });
+  });
+  const post = (data: Record<string, unknown>) => dom.window.dispatchEvent(new dom.window.MessageEvent('message', {
+    source: dom.window as unknown as MessageEventSource,
+    data
+  }));
+  const flush = async () => {
+    const done = new Promise<void>((resolve) => {
+      const onMessage = (event: MessageEvent) => {
+        if (event.data?.type !== 'test:flush-complete') return;
+        dom.window.removeEventListener('message', onMessage);
+        resolve();
+      };
+      dom.window.addEventListener('message', onMessage);
+    });
+    post({ type: AUDIO_FLUSH_REQUEST_MESSAGE_TYPE });
+    dom.window.postMessage({ type: 'test:flush-complete' }, '*');
+    await done;
+  };
+
+  post({ type: AUDIO_ENABLE_CAPTURE_MESSAGE_TYPE });
+  await dom.window.fetch(signedUrl);
+  // The interceptor reads the cloned body off the fetch promise chain.
+  await captured;
+  assert.deepEqual(responses.map(({ url, speakerKey, trackLabel }) => ({ url, speakerKey, trackLabel })), [
+    { url: signedUrl, speakerKey: 'speaker-1', trackLabel: 'Speaker 1' }
+  ]);
+  responses.length = 0;
+  await flush();
+  assert.deepEqual(responses.map(({ url, speakerKey, trackLabel }) => ({ url, speakerKey, trackLabel })), [
+    { url: signedUrl, speakerKey: 'speaker-1', trackLabel: 'Speaker 1' }
+  ]);
+
+  // The presigned URL rotated: the flush-time lookup misses, the lane stays.
+  recordings[0].processedRecordingUrl = signedUrl.replace('first', 'second');
+  responses.length = 0;
+  await flush();
+  assert.deepEqual(responses.map(({ url, speakerKey, trackLabel }) => ({ url, speakerKey, trackLabel })), [
+    { url: signedUrl, speakerKey: 'speaker-1', trackLabel: 'Speaker 1' }
+  ]);
+
+  // A flush-time hit is authoritative and replaces the capture-time lane.
+  recordings[0].processedRecordingUrl = signedUrl;
+  recordings[0].speaker = 2;
+  responses.length = 0;
+  await flush();
+  assert.deepEqual(responses.map(({ url, speakerKey, trackLabel }) => ({ url, speakerKey, trackLabel })), [
+    { url: signedUrl, speakerKey: 'speaker-1', trackLabel: 'Speaker 2' }
+  ]);
   dom.window.close();
 });

@@ -1,6 +1,6 @@
 import { captureAudioTracksForDrafting } from '../core/audio-cues';
 import { AUDIO_ENABLE_CAPTURE_MESSAGE_TYPE } from '../core/audio-intercept-protocol';
-import { generateL0Timing, type L0TimingQueueStatus, type L0TimingRequestCallbacks } from '../core/l0-timing-client';
+import { generateL0Timing, prepareL0TimingTracks, type L0TimingQueueStatus, type L0TimingRequestCallbacks } from '../core/l0-timing-client';
 import { generateLocalL0Timing } from '../core/local-model-client';
 import { loadSettings } from '../core/settings';
 import { buildCanonicalTaskIdentity, captureTranscriptJob } from '../core/transcript';
@@ -22,6 +22,7 @@ type TimingTaskState = {
   failureCount: number;
   retryNotBefore: number;
   retryScheduled: boolean;
+  audioWaitCount: number;
 };
 export type L0TimingGenerators = {
   remote: typeof generateL0Timing;
@@ -113,7 +114,7 @@ export class L0TimingService {
       return;
     }
     if (state.retryScheduled || this.dependencies.now() < state.retryNotBefore) {
-      publishL0TimingAvailability({ taskId, status: 'retrying' });
+      publishL0TimingAvailability({ taskId, status: state.audioWaitCount ? 'preparing' : 'retrying' });
       return;
     }
 
@@ -132,7 +133,8 @@ export class L0TimingService {
       inFlight: false,
       failureCount: 0,
       retryNotBefore: 0,
-      retryScheduled: false
+      retryScheduled: false,
+      audioWaitCount: 0
     };
     this.taskStates.set(taskId, created);
     return created;
@@ -176,10 +178,30 @@ export class L0TimingService {
   private async runAttempt(job: TranscriptJob, taskId: string, state: TimingTaskState): Promise<void> {
     try {
       const settings = await this.dependencies.getSettings();
-      const audioTracks = await this.dependencies.captureAudio();
+      const audioTracks = (await this.dependencies.captureAudio()).filter((track) => track.blob.size > 0);
       if (!this.isTaskCurrent(taskId)) {
         return;
       }
+      // Transcript rows can mount before WaveSurfer has registered both lanes.
+      // Wait for capture readiness before starting a model or spending an ASR retry.
+      try {
+        prepareL0TimingTracks(job, audioTracks);
+      } catch {
+        state.audioWaitCount += 1;
+        this.dependencies.updateStatus(taskId, { status: 'preparing', requestId: '' });
+        publishL0TimingAvailability({ taskId, status: 'preparing' });
+        state.retryScheduled = true;
+        try {
+          this.dependencies.schedule(() => {
+            state.retryScheduled = false;
+            if (this.isTaskCurrent(taskId)) this.onLifecycleOpportunity();
+          }, Math.min(INITIAL_RETRY_DELAY_MS * state.audioWaitCount, 30_000));
+        } catch {
+          state.retryScheduled = false;
+        }
+        return;
+      }
+      state.audioWaitCount = 0;
       const response = await this.dependencies.requestTiming(settings, job, audioTracks, {
         onQueueStatus: (status: L0TimingQueueStatus) => {
           if (!this.isTaskCurrent(taskId)) return;
@@ -210,6 +232,7 @@ export class L0TimingService {
       publishL0TimingAvailability({ taskId, status: 'available' });
       state.completed = true;
     } catch (error) {
+      if (!this.isTaskCurrent(taskId)) return;
       console.error(
         `[Babel Gold] word timing attempt ${state.failureCount + 1} failed for task ${taskId}.`,
         error
@@ -233,6 +256,7 @@ export class L0TimingService {
     const state = this.getTaskState(taskId);
     if (state.completed || state.inFlight || state.retryScheduled) return false;
     state.failureCount = 0;
+    state.audioWaitCount = 0;
     state.retryNotBefore = 0;
     publishL0TimingAvailability({ taskId, status: 'preparing' });
     this.onLifecycleOpportunity();

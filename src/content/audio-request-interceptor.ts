@@ -1,3 +1,4 @@
+import { readBabelEditorState } from '@nominy/babel-babel-runtime';
 import {
   AUDIO_ENABLE_CAPTURE_MESSAGE_TYPE,
   AUDIO_FLUSH_REQUEST_MESSAGE_TYPE,
@@ -12,7 +13,7 @@ import {
   type AudioResponseMessage,
   type PageTaskIdResponseMessage
 } from '../core/audio-intercept-protocol';
-import { isBlobUrl, isLikelyAudioSource } from '../core/audio-url';
+import { isLikelyAudioSource } from '../core/audio-url';
 
 declare global {
   interface Window {
@@ -27,14 +28,6 @@ type StoredAudioResponse = Omit<AudioResponseMessage, 'type'>;
 type TrackMapping = Pick<AudioResponseMessage, 'trackId' | 'speakerKey' | 'trackLabel' | 'mappingSource'>;
 
 const storedResponses: StoredAudioResponse[] = [];
-
-function safe<T>(read: () => T, fallback: T): T {
-  try {
-    return read();
-  } catch {
-    return fallback;
-  }
-}
 
 function isAudioResponse(url: string, mimeType: string): boolean {
   return isLikelyAudioSource(url, mimeType);
@@ -59,238 +52,29 @@ function getRequestUrl(input: RequestInfo | URL): string {
   return toAbsoluteUrl(String(input));
 }
 
-function getReactInternalValue(element: Element | null, prefix: string): unknown {
-  if (!(element instanceof HTMLElement)) {
-    return null;
-  }
-
-  for (const name of safe(() => Object.getOwnPropertyNames(element), [])) {
-    if (typeof name === 'string' && name.startsWith(prefix)) {
-      return safe(() => (element as unknown as Record<string, unknown>)[name], null);
-    }
-  }
-
-  return null;
-}
-
-function getReactFiber(element: Element | null): Record<string, unknown> | null {
-  const fiber = getReactInternalValue(element, '__reactFiber$');
-  return fiber && typeof fiber === 'object' ? (fiber as Record<string, unknown>) : null;
-}
-
-type ReactFiberNode = {
-  memoizedProps?: unknown;
-  return?: ReactFiberNode;
-  child?: ReactFiberNode;
-  sibling?: ReactFiberNode;
-  alternate?: ReactFiberNode;
-  stateNode?: { current?: ReactFiberNode };
-};
-
-function getCommittedReactPath(element: Element | null): ReactFiberNode[] {
-  let fiber = getReactFiber(element) as ReactFiberNode | null;
-  if (!fiber) return [];
-  const ancestry: ReactFiberNode[] = [];
-  while (fiber.return) {
-    ancestry.push(fiber);
-    fiber = fiber.return;
-  }
-  const root = fiber.stateNode?.current;
-  if (!root) return [];
-  let current: ReactFiberNode = root;
-  const committed: ReactFiberNode[] = [current];
-  // DOM expandos can retain either alternate. Use the same committed-root
-  // descent as Helper's native annotation bindings, not stale return props.
-  for (let index = ancestry.length - 1; index >= 0; index -= 1) {
-    const expected = ancestry[index]!;
-    let child: ReactFiberNode | undefined = current.child;
-    while (child && child !== expected && child !== expected.alternate) {
-      child = child.sibling;
-    }
-    if (!child) return [];
-    committed.push(child);
-    current = child;
-  }
-  return committed;
-}
-
 function readCurrentReviewActionId(): string {
-  const seeds = [
-    document.querySelector('textarea[placeholder^="What was said"]'),
-    ...document.querySelectorAll('tbody, table, main')
-  ];
-  for (const seed of seeds) {
-    const path = getCommittedReactPath(seed);
-    for (let index = path.length - 1; index >= Math.max(0, path.length - 31); index -= 1) {
-      const props = path[index]!.memoizedProps;
-      if (props && typeof props === 'object' && 'reviewActionId' in props) {
-        const reviewActionId = readString((props as Record<string, unknown>).reviewActionId);
-        if (reviewActionId) return reviewActionId;
-      }
-    }
-  }
-  return '';
+  return readBabelEditorState()?.reviewActionId || '';
 }
 
-function getTrackDetailsForHost(host: HTMLElement): Record<string, unknown> | null {
-  let owner = getReactFiber(host) || getReactFiber(host.parentElement);
-  let depth = 0;
-
-  while (owner && depth < 20) {
-    const props = owner.memoizedProps;
-    const track =
-      props && typeof props === 'object' && 'track' in props && props.track && typeof props.track === 'object'
-        ? (props.track as Record<string, unknown>)
-        : null;
-    if (track) {
-      return track;
-    }
-
-    owner = owner.return && typeof owner.return === 'object' ? (owner.return as Record<string, unknown>) : null;
-    depth += 1;
-  }
-
-  return null;
+function publishReviewActionId(reviewActionId: string): void {
+  const root = document.documentElement;
+  if (reviewActionId) root.setAttribute(PAGE_TASK_ID_ATTRIBUTE, reviewActionId);
+  else root.removeAttribute(PAGE_TASK_ID_ATTRIBUTE);
 }
 
-function getWaveformRegistryFromValue(value: unknown): Record<string, unknown> | null {
-  const registry =
-    value && typeof value === 'object' && !Array.isArray(value) && 'current' in value
-      ? (value as { current?: unknown }).current
-      : value;
-
-  if (!registry || typeof registry !== 'object' || Array.isArray(registry)) {
-    return null;
-  }
-
-  const candidate = registry as Record<string, unknown>;
-  const hasWaveEntry = Object.keys(candidate).some((key) => {
-    const entry = candidate[key];
-    return Boolean(entry && typeof entry === 'object' && 'wavesurfer' in entry);
-  });
-
-  return hasWaveEntry ? candidate : null;
-}
-
-function getWaveformRegistryFromHost(host: HTMLElement): Record<string, unknown> | null {
-  let owner = getReactFiber(host) || getReactFiber(host.parentElement);
-  let depth = 0;
-
-  while (owner && depth < 16) {
-    let hook = owner.memoizedState && typeof owner.memoizedState === 'object'
-      ? (owner.memoizedState as Record<string, unknown>)
-      : null;
-    let hookIndex = 0;
-
-    while (hook && hookIndex < 24) {
-      const registry = getWaveformRegistryFromValue(hook.memoizedState);
-      if (registry) {
-        return registry;
-      }
-
-      hook = hook.next && typeof hook.next === 'object' ? (hook.next as Record<string, unknown>) : null;
-      hookIndex += 1;
-    }
-
-    owner = owner.return && typeof owner.return === 'object' ? (owner.return as Record<string, unknown>) : null;
-    depth += 1;
-  }
-
-  return null;
-}
-
-function getWaveformHosts(): HTMLDivElement[] {
-  return Array.from(document.querySelectorAll('div')).filter((node): node is HTMLDivElement => {
-    if (!(node instanceof HTMLElement) || !(node.shadowRoot instanceof ShadowRoot)) {
-      return false;
-    }
-    return Boolean(node.shadowRoot.querySelector('[part="scroll"], [part="wrapper"]'));
-  });
-}
-
-function readString(value: unknown): string {
-  return typeof value === 'string' && value.trim() ? value.trim() : '';
-}
-
-function collectAudioUrls(value: unknown, urls: Set<string> = new Set(), depth = 0): Set<string> {
-  if (!value || (typeof value !== 'object' && typeof value !== 'function') || depth > 2) {
-    return urls;
-  }
-
-  const record = value as Record<string, unknown>;
-  for (const key of [
-    'url',
-    'src',
-    'currentSrc',
-    'href',
-    'audioUrl',
-    'fileUrl',
-    'downloadUrl',
-    'recordingUrl',
-    'signedUrl',
-    'source',
-    'waveformUrl'
-  ]) {
-    const text = readString(record[key]);
-    if (text && (isBlobUrl(text) || isAudioResponse(text, ''))) {
-      urls.add(toAbsoluteUrl(text));
-    }
-  }
-
-  for (const key of ['media', 'options', 'backend', 'track', 'recording', 'processedRecording', 'audio', 'source']) {
-    collectAudioUrls(record[key], urls, depth + 1);
-  }
-
-  if (typeof record.getMediaElement === 'function') {
-    collectAudioUrls(safe(() => (record.getMediaElement as () => unknown)(), null), urls, depth + 1);
-  }
-
-  return urls;
-}
-
-function collectWaveformAudioMappings(): Map<string, TrackMapping> {
+function collectEditorAudioMappings(): Map<string, TrackMapping> {
   const mappings = new Map<string, TrackMapping>();
-
-  for (const host of getWaveformHosts()) {
-    const track = getTrackDetailsForHost(host);
-    const hostTrackId = readString(track?.id);
-    const trackLabel = readString(track?.label) || readString(track?.name);
-    const registry = getWaveformRegistryFromHost(host);
-    if (!registry) {
-      continue;
-    }
-
-    for (const key of Object.keys(registry)) {
-      if (hostTrackId && key !== hostTrackId) {
-        continue;
-      }
-
-      const entry = registry[key];
-      if (!entry || typeof entry !== 'object') {
-        continue;
-      }
-
-      const entryRecord = entry as Record<string, unknown>;
-      const wave = entryRecord.wavesurfer;
-      const trackId = hostTrackId || readString(key);
-      const urls = collectAudioUrls(entry);
-      collectAudioUrls(wave, urls);
-
-      for (const url of urls) {
-        mappings.set(url, {
-          trackId: trackId || undefined,
-          speakerKey: trackId || trackLabel || undefined,
-          trackLabel: trackLabel || undefined,
-          mappingSource: 'wavesurfer-react-registry'
-        });
-      }
-    }
+  for (const track of readBabelEditorState()?.tracks || []) {
+    if (!track.audioUrl) continue;
+    mappings.set(toAbsoluteUrl(track.audioUrl), {
+      trackId: track.id, speakerKey: track.id, trackLabel: track.label,
+      mappingSource: 'react-editor-recordings'
+    });
   }
-
   return mappings;
 }
 
-function postAudioSources(mappings = collectWaveformAudioMappings()): void {
+function postAudioSources(mappings = collectEditorAudioMappings()): void {
   for (const [url, mapping] of mappings.entries()) {
     window.postMessage(
       {
@@ -305,15 +89,13 @@ function postAudioSources(mappings = collectWaveformAudioMappings()): void {
   }
 }
 
-function enrichAudioRecord(record: StoredAudioResponse, mappings = collectWaveformAudioMappings()): StoredAudioResponse {
+// Called once when the bytes are captured and again on every flush, because a
+// lane can be registered after its audio was fetched. Presigned URLs rotate on
+// live, so a URL miss says nothing about the lane: keep the mapping that
+// was recorded at capture time.
+function enrichAudioRecord(record: StoredAudioResponse, mappings = collectEditorAudioMappings()): StoredAudioResponse {
   const mapping = mappings.get(toAbsoluteUrl(record.url));
-  return {
-    ...record,
-    trackId: mapping?.trackId,
-    speakerKey: mapping?.speakerKey,
-    trackLabel: mapping?.trackLabel,
-    mappingSource: mapping?.mappingSource
-  };
+  return mapping ? { ...record, ...mapping } : record;
 }
 
 function rememberAndPost(record: StoredAudioResponse): void {
@@ -448,11 +230,7 @@ function installFlushHandler(): void {
     }
     if (event.data?.type === PAGE_TASK_ID_REQUEST_MESSAGE_TYPE && typeof event.data.requestId === 'string') {
       const reviewActionId = readCurrentReviewActionId();
-      const root = document.documentElement;
-      if (root) {
-        if (reviewActionId) root.setAttribute(PAGE_TASK_ID_ATTRIBUTE, reviewActionId);
-        else root.removeAttribute(PAGE_TASK_ID_ATTRIBUTE);
-      }
+      publishReviewActionId(reviewActionId);
       window.postMessage({
         type: PAGE_TASK_ID_RESPONSE_MESSAGE_TYPE,
         requestId: event.data.requestId,
@@ -463,11 +241,9 @@ function installFlushHandler(): void {
     if (!event.data || typeof event.data !== 'object' || event.data.type !== AUDIO_FLUSH_REQUEST_MESSAGE_TYPE) {
       return;
     }
-    const mappings = collectWaveformAudioMappings();
+    const mappings = collectEditorAudioMappings();
     postAudioSources(mappings);
     for (let index = 0; index < storedResponses.length; index += 1) {
-      // A buffered response only belongs to a lane while its URL is still
-      // present in the current task's native waveform registry.
       const record = enrichAudioRecord(storedResponses[index]!, mappings);
       storedResponses[index] = record;
       window.postMessage(

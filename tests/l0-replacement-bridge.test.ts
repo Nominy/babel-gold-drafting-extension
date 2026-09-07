@@ -2,9 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import {
+  L0_REPLACE_READY_REQUEST_TYPE,
+  L0_REPLACE_READY_RESPONSE_TYPE,
   L0_REPLACE_REQUEST_TYPE,
   L0_REPLACE_RESPONSE_TYPE,
-  replaceTranscriptWithL0Rows
+  replaceTranscriptWithL0Rows,
+  requireL0ReplacementConsumer
 } from '../src/core/l0-replacement-bridge';
 import type { L0DraftRow } from '../src/core/types';
 
@@ -78,6 +81,64 @@ test('replacement bridge surfaces Helper failure without fallback', async () => 
   try {
     await assert.rejects(replaceTranscriptWithL0Rows(rows), /mutation-failed.*Could not create segment/);
   } finally {
+    dom.window.close();
+  }
+});
+
+test('ready ping resolves confirmed when a Helper that speaks the protocol answers', async () => {
+  const dom = installBridgeDom();
+  dom.window.postMessage = ((message: unknown) => {
+    const request = message as Record<string, unknown>;
+    assert.equal(request.type, L0_REPLACE_READY_REQUEST_TYPE);
+    dom.window.dispatchEvent(
+      new dom.window.MessageEvent('message', {
+        data: { type: L0_REPLACE_READY_RESPONSE_TYPE, version: 1, requestId: request.requestId }
+      })
+    );
+  }) as typeof dom.window.postMessage;
+  try {
+    assert.equal(await requireL0ReplacementConsumer(), true);
+  } finally {
+    dom.window.close();
+  }
+});
+
+test('ready ping timeout falls back to the direct request path instead of aborting', async () => {
+  const dom = installBridgeDom();
+  const timers: Array<() => void> = [];
+  dom.window.setTimeout = ((callback: () => void) => {
+    timers.push(callback);
+    return timers.length;
+  }) as typeof dom.window.setTimeout;
+  const warnings: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => warnings.push(args.map(String).join(' '));
+  // An old Helper never answers the ping; it only serves the replacement request.
+  dom.window.postMessage = ((message: unknown) => {
+    const request = message as Record<string, unknown>;
+    if (request.type !== L0_REPLACE_REQUEST_TYPE) return;
+    dom.window.dispatchEvent(
+      new dom.window.MessageEvent('message', {
+        data: {
+          type: L0_REPLACE_RESPONSE_TYPE,
+          version: 1,
+          requestId: request.requestId,
+          ok: true,
+          created: rows.map((row, index) => ({ ...row, annotationId: `ann-${index}` }))
+        }
+      })
+    );
+  }) as typeof dom.window.postMessage;
+  try {
+    const ready = requireL0ReplacementConsumer();
+    assert.equal(timers.length, 1);
+    timers[0]!();
+    assert.equal(await ready, false);
+    assert.match(warnings.join('\n'), /did not confirm L0 replacement readiness/);
+    const created = await replaceTranscriptWithL0Rows(rows);
+    assert.deepEqual(created.map((mapping) => mapping.annotationId), ['ann-0', 'ann-1']);
+  } finally {
+    console.warn = originalWarn;
     dom.window.close();
   }
 });
