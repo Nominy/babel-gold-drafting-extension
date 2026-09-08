@@ -5,7 +5,6 @@ import { buildExtension, defineExtensionBuild } from '@nominy/babel-extension-bu
 
 const watch = process.argv.includes('--watch');
 const rootDir = path.dirname(fileURLToPath(import.meta.url));
-const ortRuntimeSourceDir = path.join(rootDir, 'node_modules/onnxruntime-web/dist');
 const ortRuntimeOutputDir = path.join(rootDir, 'dist/vendor/ort');
 const offscreenPageSourcePath = path.join(rootDir, 'src/offscreen/offscreen.html');
 const offscreenPageOutputPath = path.join(rootDir, 'offscreen.html');
@@ -25,7 +24,7 @@ async function prepareExtensionAssets() {
   await Promise.all([
     copyFile(offscreenPageSourcePath, offscreenPageOutputPath),
     ...ortRuntimeAssetNames.map((assetName) =>
-      copyFile(path.join(ortRuntimeSourceDir, assetName), path.join(ortRuntimeOutputDir, assetName))
+      copyFile(fileURLToPath(import.meta.resolve(`onnxruntime-web/${assetName}`)), path.join(ortRuntimeOutputDir, assetName))
     )
   ]);
 }

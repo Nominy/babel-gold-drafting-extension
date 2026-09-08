@@ -1,6 +1,6 @@
 {
   "name": "babel-gold-drafting-extension",
-  "version": "0.2.33",
+  "version": "0.2.34",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
@@ -17,6 +17,7 @@
   },
   "devDependencies": {
     "@nominy/babel-extension-build": "file:../../shared/babel-extension-platform/packages/babel-extension-build",
+    "@nominy/babel-extension-e2e": "file:../../shared/babel-extension-platform/packages/babel-extension-e2e",
     "@types/chrome": "^0.1.24",
     "@types/jsdom": "^21.1.7",
     "@types/node": "^24.6.0",

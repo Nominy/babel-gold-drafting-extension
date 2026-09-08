@@ -1,13 +1,41 @@
-import {
-  getReactFiber,
-  getTranscriptRowElements,
-  normalizeText,
-  parseTimeValue,
-  ROW_TEXTAREA_SELECTOR,
-  setControlledTextareaValue
-} from './dom';
+import { getReactFiber, normalizeText, setEditableValue } from '@nominy/babel-babel-runtime';
 import { PAGE_TASK_ID_ATTRIBUTE } from './audio-intercept-protocol';
 import type { ApplyDraftResult, DiffPreviewItem, DraftRowResult, TranscriptJob, TranscriptRow } from './types';
+
+const TRANSCRIPT_ROW_SELECTOR = 'tbody tr';
+const ROW_TEXTAREA_SELECTOR = 'textarea[placeholder^="What was said"]';
+
+function parseTimeValue(value: string): number | null {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const match = trimmed.match(/-?\d+(?::\d+)+(?:\.\d+)?/);
+  if (!match) {
+    return null;
+  }
+
+  return match[0].split(':').reduce<number | null>((total, part) => {
+    if (total === null) {
+      return null;
+    }
+
+    const numeric = Number(part);
+    return Number.isFinite(numeric) ? total * 60 + numeric : null;
+  }, 0);
+}
+
+function setControlledTextareaValue(textarea: HTMLTextAreaElement, value: string): void {
+  setEditableValue(textarea, value);
+  textarea.dispatchEvent(new Event('change', { bubbles: true, cancelable: false }));
+}
+
+function getTranscriptRowElements(root: ParentNode = document): HTMLTableRowElement[] {
+  return Array.from(root.querySelectorAll<HTMLTableRowElement>(TRANSCRIPT_ROW_SELECTOR)).filter((row) =>
+    row.querySelector(ROW_TEXTAREA_SELECTOR)
+  );
+}
 
 type RowIdentity = {
   rowId: string | null;

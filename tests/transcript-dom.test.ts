@@ -1,7 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
-import { registerLifecycle } from '../src/core/lifecycle';
 import {
   applyDraftRows,
   buildCanonicalTaskIdentity,
@@ -293,27 +292,4 @@ test('restoreCapturedRows replays original snapshot and diff preview shows chang
   assert.equal(diff.length, 1);
   assert.equal(diff[0].before, 'privet');
   assert.equal(diff[0].after, 'Privet.');
-});
-
-test('drafting lifecycle re-ensures mount target on DOM churn without teardown', async () => {
-  const dom = installDom('<main></main>');
-  let ensureCount = 0;
-  let timingCount = 0;
-
-  registerLifecycle({
-    ensureMagicButton: () => {
-      ensureCount += 1;
-    }
-  }, () => {
-    timingCount += 1;
-  });
-
-  assert.equal(ensureCount, 1);
-  assert.equal(timingCount, 1);
-
-  dom.window.document.querySelector('main')?.appendChild(dom.window.document.createElement('section'));
-  await new Promise((resolve) => dom.window.setTimeout(resolve, 0));
-
-  assert.equal(ensureCount, 2);
-  assert.equal(timingCount, 2);
 });

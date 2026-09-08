@@ -241,7 +241,3 @@ export interface DraftSessionState {
   capturedJob: TranscriptJob | null;
   draftResponse: GenerateDraftResponse | null;
 }
-
-export interface DraftingMountController {
-  ensureMagicButton(): void;
-}

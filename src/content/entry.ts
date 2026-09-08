@@ -1,6 +1,6 @@
 import { DraftingOverlayController } from './overlay';
 import { publishGoldDraftingExtensionId, registerAiBrokerContentHandler } from './ai-broker-content';
-import { registerLifecycle } from '../core/lifecycle';
+import { registerDomLifecycle } from '@nominy/babel-babel-runtime';
 import { enableL0TimingAudioCapture, registerL0TimingService } from './l0-timing-service';
 import { refreshPageTaskIdentity } from './page-task-identity';
 import { maybeShowLocalModelSuggestion } from './local-model-suggestion';
@@ -23,7 +23,8 @@ function boot(): void {
   const controller = new DraftingOverlayController();
   controller.mount();
   void maybeShowLocalModelSuggestion();
-  registerLifecycle(controller, () => {
+  registerDomLifecycle(() => {
+    controller.ensureMagicButton();
     void refreshPageTaskIdentity().then(() => timingService.onLifecycleOpportunity());
   });
 }

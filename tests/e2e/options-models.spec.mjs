@@ -1,4 +1,4 @@
-import { test, expect } from '../../../../shared/babel-extension-platform/packages/babel-extension-e2e/src/test.mjs';
+import { test, expect } from '@nominy/babel-extension-e2e/test'
 
 const MODEL_FILE = '/browser-model/asr/v3_ctc.onnx';
 const CACHE_PREFIX = 'babel-gold-local-models:bundle:';

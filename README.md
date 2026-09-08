@@ -1,74 +1,43 @@
 # Babel Gold Drafting Extension
 
-Standalone MV3 extension for Silver-to-Gold transcript drafting on the Babel transcription page.
+## Install and build
 
-## Build
+Requires Node.js 22.14+ and the shared platform at `../../shared/babel-extension-platform`. Initialize the parent checkout with `git submodule update --init --recursive` first.
 
-1. `npm install`
-2. `npm run build`
-3. Load unpacked from `gold-drafting-extension/` in `chrome://extensions`
+From this directory:
 
-`npm run build` automatically advances the patch version in:
-- [`package.json`](/C:/Users/User/Desktop/dev/babel/drafting/gold-drafting-extension/package.json)
-- [`manifest.json`](/C:/Users/User/Desktop/dev/babel/drafting/gold-drafting-extension/manifest.json)
-- [`package-lock.json`](/C:/Users/User/Desktop/dev/babel/drafting/gold-drafting-extension/package-lock.json)
-
-Use `npm run build:core` when you need to rebuild bundles without changing version files.
-
-## Store Package
-
-Run:
-
-```bash
-npm run build:zip
+```sh
+npm --prefix ../../shared/babel-extension-platform ci
+npm ci
+npm run build
 ```
 
-This will:
-- advance the patch version through `npm run build`
-- build the bundled scripts
-- create a Chrome Web Store ZIP in `.artifacts/`
+Load this directory unpacked in `chrome://extensions`. Bundles and model runtime assets go to `dist/`; the build also writes `offscreen.html`. Reload the extension and refresh the Babel dashboard after rebuilding. Set the backend address and your OpenRouter key in extension settings. For local GPU transcription, install [L0 Draft Engine](../l0-draft-engine/README.md).
 
-The ZIP includes only:
-- `manifest.json`
-- `options.html`
-- `icons/*`
-- `dist/*.js`
+`build` bumps the patch version in `package.json`, `manifest.json`, and `package-lock.json`. Use `npm run build:core` for a no-bump rebuild.
 
-The packaged manifest strips local development host permissions and keeps only:
-- `https://dashboard.babel.audio/*`
-- `https://reviewgen.ovh/*`
+## Checks
 
-## Behavior
+```sh
+npm run typecheck
+npm test
+```
 
-- Captures the current Babel transcription rows as a locked job snapshot
-- Sends the snapshot to the dedicated drafting backend with the user's OpenRouter API key
-- Captures the two Babel audio lanes in the background and sends them to the configured L0 `/v1/transcribe` endpoint for word timing metadata; failures are silent and do not block editing
-- Audio-enhanced drafting is enabled by default and can be disabled in extension settings. When enabled, drafting requests may send audio tracks to the LLM backend for audible-event and vocal-style tags
-- Requires BYOK for drafting; there is no shared backend key fallback for regular generation
-- Lets the user choose a model, OpenRouter service tier, and reasoning effort; `google/gemini-3-flash-preview` with low reasoning is the default
-- Shows rewrite summary and row-level diff preview
-- Applies the generated draft back into existing Babel textareas only
-- Restores the captured original snapshot on demand
+Browser checks use the [shared browser setup](../../shared/babel-extension-platform/README.md#browser-checks).
 
-## Validation
+## Package and publish
 
-- `npm run typecheck`
-- `npm test`
-- `npm run build`
+```sh
+npm run build:zip                     # rebuilds and bumps the version
+npm run build:zip -- --no-build       # packages existing bundles
+```
 
-## Release
+The store ZIP goes to `.artifacts/` and strips local development host permissions.
 
-- GitHub Releases are the canonical home for packaged ZIPs.
-- The version committed in `manifest.json`, `package.json` and `package-lock.json` is the release version. Bump it in the PR (`npm run version:patch`, or implicitly through `npm run build`); CI never bumps or commits versions. It must be greater than what the Chrome Web Store currently holds; the publish script checks the store's published and submitted versions and aborts otherwise.
-- Push to `main` (`.github/workflows/deploy-gold-drafting-extension.yml`, job `prerelease`) validates, builds the ZIP with `build:core` (no bump), uploads it as a workflow artifact, and creates a GitHub *pre-release* tagged `v<version>` at that commit. It never publishes to the Chrome Web Store. If `v<version>` is already a full release the job fails until the version is bumped.
-- Publishing to the Chrome Web Store is manual only: run the same workflow via `workflow_dispatch` (job `publish`) with `version` (must equal `manifest.json` on the selected ref, whose tag `v<version>` must point at that commit and still be a pre-release) and `confirm` set to `PUBLISH <version>`. `publish_type` defaults to `STAGED_PUBLISH`; `replace_pending_submission` cancels a pending review first. The job re-validates, rebuilds, uploads and publishes, then promotes the pre-release to a full release.
-- Required GitHub Actions secrets:
-  - `CWS_CLIENT_ID`
-  - `CWS_CLIENT_SECRET`
-  - `CWS_REFRESH_TOKEN`
-  - `CWS_PUBLISHER_ID`
-  - `CWS_EXTENSION_ID`
-- Optional GitHub Actions secret:
-  - `CWS_ACCESS_TOKEN`
-- For local publishing helpers, keep Chrome Web Store credentials in `.env.cws.local` and start from `.env.cws.example`.
-- To seed the GitHub Actions secrets from the local dotenv file, run `node scripts/setup-github-secrets.mjs OWNER/REPO`.
+Commit the release version before merging; `npm run version:patch` bumps it without building. CI does not bump versions. The version must exceed the store's published and submitted versions.
+
+Push to `main` creates a GitHub prerelease `v<version>`. To publish, manually run `.github/workflows/deploy-gold-drafting-extension.yml` on that commit with `version=<version>` and `confirm=PUBLISH <version>`. The tag must still be a prerelease pointing at the selected commit. `publish_type` defaults to `STAGED_PUBLISH`; `replace_pending_submission` cancels a pending review. A successful publish promotes the prerelease.
+
+Required Actions secrets: `CWS_CLIENT_ID`, `CWS_CLIENT_SECRET`, `CWS_REFRESH_TOKEN`, `CWS_PUBLISHER_ID`, `CWS_EXTENSION_ID`. Optional fallback: `CWS_ACCESS_TOKEN`.
+
+For local publishing, copy `.env.cws.example` to ignored `.env.cws.local` and fill the credentials. Seed repository secrets with `node scripts/setup-github-secrets.mjs OWNER/REPO`; publish locally with `npm run publish:cws`.
