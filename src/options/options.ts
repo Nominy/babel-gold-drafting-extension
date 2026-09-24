@@ -14,6 +14,7 @@ import {
 } from '../core/local-model-bundle';
 import { transcribeLocalAudio } from '../core/local-model-runtime';
 import type { ExtensionSettings } from '../core/types';
+import type { VolunteerStatus } from '../core/volunteer-protocol';
 const MAX_TEST_AUDIO_SECONDS = 15;
 function requireElement<T extends HTMLElement>(selector: string): T {
   const element = document.querySelector(selector);
@@ -78,6 +79,7 @@ export interface OptionsDependencies {
   fetchResource: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   readAudioDuration: (file: File) => Promise<number>;
   transcribeAudio: typeof transcribeLocalAudio;
+  volunteerStatus?: () => Promise<VolunteerStatus>;
 }
 const DEFAULT_OPTIONS_DEPENDENCIES: OptionsDependencies = {
   fetchResource: globalThis.fetch.bind(globalThis),
@@ -106,6 +108,7 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
   const localModelTestButton = requireElement<HTMLButtonElement>('[data-role="local-model-test"]');
   const localModelSuppliedTestButton = requireElement<HTMLButtonElement>('[data-role="local-model-supplied-test"]');
   const localModelStatusElement = requireElement<HTMLElement>('[data-role="local-model-status"]');
+  const volunteerStatusElement = requireElement<HTMLElement>('[data-role="volunteer-status"]');
   const localModelProgress = requireElement<HTMLProgressElement>('[data-role="local-model-progress"]');
   const saveButton = requireElement<HTMLButtonElement>('[data-role="save"]');
   const status = requireElement<HTMLElement>('[data-role="status"]');
@@ -186,6 +189,39 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
     renderL0ReplacementSettings();
   };
   let persistedSettings = await loadSettings();
+  const refreshVolunteerStatus = async (): Promise<void> => {
+    if (localModelsEnabledInput.checked !== persistedSettings.localModelsEnabled) {
+      volunteerStatusElement.textContent = localModelsEnabledInput.checked
+        ? 'Volunteer: Save Settings to start volunteering.'
+        : 'Volunteer: Save Settings to stop new volunteer work.';
+      volunteerStatusElement.setAttribute('role', 'status');
+      return;
+    }
+    let worker: VolunteerStatus;
+    if (!persistedSettings.localModelsEnabled || localModelStatus.state !== 'ready') {
+      worker = { state: 'disabled' };
+    } else {
+      try {
+        worker = dependencies.volunteerStatus
+          ? await dependencies.volunteerStatus()
+          : await chrome.runtime.sendMessage({ type: 'babel-l0-volunteer', target: 'background', action: 'status' });
+        if (!worker || !['disabled', 'connecting', 'connected', 'busy', 'error'].includes(worker.state)) {
+          throw new Error('Worker returned an invalid status.');
+        }
+      } catch (error) {
+        worker = { state: 'error', detail: error instanceof Error ? error.message : String(error) };
+      }
+    }
+    const label: Record<VolunteerStatus['state'], string> = {
+      disabled: 'Not volunteering.',
+      connecting: 'Connecting to the L0 coordinator…',
+      connected: 'Connected and available for volunteer jobs.',
+      busy: 'Busy processing a volunteer job.',
+      error: 'Disconnected from the L0 coordinator.'
+    };
+    volunteerStatusElement.textContent = `Volunteer: ${label[worker.state]}${worker.detail ? ` ${worker.detail}` : ''}`;
+    volunteerStatusElement.setAttribute('role', worker.state === 'error' ? 'alert' : 'status');
+  };
   const settings = persistedSettings;
   writeSettingsToControls(settings);
   await refreshLocalModelStatus();
@@ -195,8 +231,13 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
     localModelsEnabledInput.checked = false;
   }
   renderLocalModelControls();
+  await refreshVolunteerStatus();
+  const volunteerStatusTimer = setInterval(() => { void refreshVolunteerStatus(); }, 3_000);
+  if (typeof volunteerStatusTimer === 'object' && 'unref' in volunteerStatusTimer) volunteerStatusTimer.unref();
+  window.addEventListener('pagehide', () => clearInterval(volunteerStatusTimer), { once: true });
   l0ReplacementPreviewEnabledInput.addEventListener('change', renderL0ReplacementSettings);
   localModelTestAudioInput.addEventListener('change', renderLocalModelControls);
+  localModelsEnabledInput.addEventListener('change', () => { void refreshVolunteerStatus(); });
   localModelDownloadButton.addEventListener('click', () => {
     localModelTestSucceeded = false;
     localModelsEnabledInput.checked = false;
@@ -208,6 +249,7 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
     void saveSettings({ ...persistedSettings, localModelsEnabled: false })
       .then((saved) => {
         persistedSettings = saved;
+        void refreshVolunteerStatus();
         return setupLocalModels(LOCAL_MODEL_BASE_URL, (progress) => {
           localModelStatus = { state: 'downloading', ...progress };
           renderLocalModelControls();
@@ -223,7 +265,7 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
         localModelStatus = { state: 'error', completedBytes: 0, totalBytes: 0, error: message };
         localModelNotice =
           `Download from the Babel model supplier failed: ${message} ` +
-          `Check network access to ${LOCAL_MODEL_BASE_URL} and try again.`;
+          `Verify the model bundle at ${LOCAL_MODEL_BASE_URL} and try again.`;
         localModelNoticeIsError = true;
       })
       .finally(() => {
@@ -249,6 +291,7 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
       .then((saved) => {
         persistedSettings = saved;
         localModelsEnabledInput.checked = false;
+        void refreshVolunteerStatus();
         return removeLocalModels();
       })
       .then(() => {
@@ -381,6 +424,7 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
         persistedSettings = saved;
         writeSettingsToControls(saved);
         renderLocalModelControls();
+        void refreshVolunteerStatus();
         status.textContent = 'Saved. Reload Babel tabs to pick up the new settings.';
         status.setAttribute('role', 'status');
         status.setAttribute('aria-live', 'polite');

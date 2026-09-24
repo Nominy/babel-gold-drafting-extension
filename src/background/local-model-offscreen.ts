@@ -1,3 +1,6 @@
+import { getLocalModelStatus } from '../core/local-model-bundle';
+import { LOCAL_MODEL_BASE_URL, SETTINGS_STORAGE_KEY, loadSettings } from '../core/settings';
+import { isVolunteerMessage, type VolunteerMessage, type VolunteerStatus } from '../core/volunteer-protocol';
 import {
   createLocalModelFailure,
   isLocalModelOffscreenRequest,
@@ -104,6 +107,54 @@ export function createLocalModelOffscreenBridge(dependencies: LocalModelOffscree
 
   return { ensureDocument, forwardRequest, handleRequest };
 }
+export interface VolunteerLifecycleDependencies {
+  loadSettings: typeof loadSettings;
+  ready: () => Promise<boolean>;
+  hasDocument: () => Promise<boolean>;
+  ensureDocument: () => Promise<void>;
+  sendMessage: (message: VolunteerMessage) => Promise<VolunteerStatus>;
+}
+
+export function createVolunteerLifecycle(dependencies: VolunteerLifecycleDependencies) {
+  let state: VolunteerStatus = { state: 'connecting' };
+  let tail: Promise<void> = Promise.resolve();
+  let enabled = false;
+
+  function reconcile(): Promise<void> {
+    const work = tail.then(async () => {
+      try {
+        const settings = await dependencies.loadSettings();
+        enabled = settings.localModelsEnabled;
+        if (!enabled || !(await dependencies.ready())) {
+          state = { state: 'disabled', detail: enabled ? 'Local model bundle is not ready.' : undefined };
+          if (await dependencies.hasDocument()) {
+            await dependencies.sendMessage({ type: 'babel-l0-volunteer', target: 'offscreen', action: 'stop' });
+          }
+          return;
+        }
+        state = { state: 'connecting' };
+        await dependencies.ensureDocument();
+        state = await dependencies.sendMessage({ type: 'babel-l0-volunteer', target: 'offscreen', action: 'start' });
+      } catch (error) {
+        state = { state: 'error', detail: error instanceof Error ? error.message : String(error) };
+      }
+    });
+    tail = work;
+    return work;
+  }
+
+  async function status(): Promise<VolunteerStatus> {
+    if (!enabled || state.state === 'disabled' || state.state === 'error') return state;
+    try {
+      if (!(await dependencies.hasDocument())) return { state: 'error', detail: 'Local model worker document is unavailable.' };
+      return await dependencies.sendMessage({ type: 'babel-l0-volunteer', target: 'offscreen', action: 'status' });
+    } catch (error) {
+      return { state: 'error', detail: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  return { reconcile, status };
+}
 
 function getDefaultDependencies(): LocalModelOffscreenDependencies | null {
   const offscreen = globalThis.chrome?.offscreen;
@@ -133,4 +184,26 @@ if (defaultDependencies) {
     });
     return true;
   });
+  const volunteer = createVolunteerLifecycle({
+    loadSettings,
+    ready: async () => (await getLocalModelStatus(LOCAL_MODEL_BASE_URL)).state === 'ready',
+    hasDocument: defaultDependencies.hasDocument,
+    ensureDocument: bridge.ensureDocument,
+    sendMessage: (message) => chrome.runtime.sendMessage(message)
+  });
+  chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
+    if (!isVolunteerMessage(message, 'background')) return false;
+    void (message.action === 'settings' ? loadSettings() : volunteer.status())
+      .then(sendResponse).catch((error) => {
+        if (message.action === 'settings') sendResponse(null);
+        else sendResponse({ state: 'error', detail: error instanceof Error ? error.message : String(error) });
+      });
+    return true;
+  });
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'local' && SETTINGS_STORAGE_KEY in changes) void volunteer.reconcile();
+  });
+  chrome.runtime.onStartup?.addListener(() => { void volunteer.reconcile(); });
+  chrome.runtime.onInstalled?.addListener(() => { void volunteer.reconcile(); });
+  void volunteer.reconcile();
 }

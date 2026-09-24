@@ -4,6 +4,8 @@ import {
   generateLocalL0SegmentDraft,
   generateLocalL0Timing
 } from '../core/local-model-runtime';
+import { createVolunteer, defaultVolunteerDependencies, loadVolunteerSettings } from './volunteer';
+import { isVolunteerMessage } from '../core/volunteer-protocol';
 import {
   LOCAL_MODEL_AUDIO_TRANSFER_STALE_MS,
   LOCAL_MODEL_MAX_BUFFERED_AUDIO_BYTES,
@@ -60,6 +62,7 @@ export interface LocalModelHostOptions {
 
 export interface LocalModelHost {
   handleRequest: (request: LocalModelOffscreenRequest) => Promise<LocalModelOffscreenResponse>;
+  runExclusive: <T>(action: () => Promise<T>) => Promise<T>;
 }
 
 type PendingAudioTransfer = {
@@ -300,6 +303,15 @@ export function createLocalModelHost(
     }
   }
 
+  function runExclusive<T>(action: () => Promise<T>): Promise<T> {
+    const result = inferenceTail.then(action);
+    inferenceTail = result.then(
+      () => undefined,
+      () => undefined
+    );
+    return result;
+  }
+
   function handleRequest(request: LocalModelOffscreenRequest): Promise<LocalModelOffscreenResponse> {
     if (request.operation === 'upload') {
       try {
@@ -308,21 +320,28 @@ export function createLocalModelHost(
         return Promise.resolve(createLocalModelFailure(request, 'invalid-request', error));
       }
     }
-    const result = inferenceTail.then(() => execute(request));
-    inferenceTail = result.then(
-      () => undefined,
-      () => undefined
-    );
-    return result;
+    return runExclusive(() => execute(request));
   }
 
-  return { handleRequest };
+  return { handleRequest, runExclusive };
 }
 
 const runtimeMessages = globalThis.chrome?.runtime?.onMessage;
 if (runtimeMessages && typeof runtimeMessages.addListener === 'function') {
   const host = createLocalModelHost();
+  const volunteer = createVolunteer({ ...defaultVolunteerDependencies, runExclusive: host.runExclusive });
+  // A recovered document must resume polling even if the service worker did not restart.
+  void loadVolunteerSettings().then((settings) => {
+    if (settings.localModelsEnabled) volunteer.start();
+  }).catch(() => {
+    // The background lifecycle reports setup failures to Options.
+  });
   runtimeMessages.addListener((message: unknown, _sender, sendResponse) => {
+    if (isVolunteerMessage(message, 'offscreen')) {
+      sendResponse(message.action === 'start' ? volunteer.start() :
+        message.action === 'stop' ? volunteer.stop() : volunteer.getStatus());
+      return false;
+    }
     if (!isLocalModelOffscreenRequest(message, 'offscreen')) return false;
     void host.handleRequest(message).then(sendResponse);
     return true;

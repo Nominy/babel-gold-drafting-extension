@@ -1,6 +1,9 @@
 import { BertTokenizer } from '@huggingface/transformers';
 import * as ort from 'onnxruntime-web/webgpu';
 
+import { CHECKPOINT_FRONTEND_BF16 } from './gigaam-frontend-buffers';
+import { denoiseForActivity } from './ffmpeg-audio-denoise';
+import { highpassSource, prepareRawPcm16, resampleToPcm16 } from './ffmpeg-audio-raw';
 import { prepareL0Tracks, type PreparedL0Track } from './l0-client';
 import { getCachedLocalModelFile } from './local-model-bundle';
 import { LOCAL_MODEL_BASE_URL } from './settings';
@@ -43,6 +46,10 @@ const ASR_CHUNK_OVERLAP_SECONDS = 1;
 const ASR_CHUNK_SAMPLES = ASR_CHUNK_SECONDS * SAMPLE_RATE;
 const ASR_CHUNK_OVERLAP_SAMPLES = ASR_CHUNK_OVERLAP_SECONDS * SAMPLE_RATE;
 const ASR_CHUNK_STRIDE_SAMPLES = ASR_CHUNK_SAMPLES - ASR_CHUNK_OVERLAP_SAMPLES;
+const ASR_SILENCE_TARGET_SAMPLES = 22 * SAMPLE_RATE;
+const ASR_SILENCE_MAX_SAMPLES = 24 * SAMPLE_RATE;
+const ASR_SILENCE_SEARCH_SAMPLES = 2 * SAMPLE_RATE;
+const ASR_ENERGY_WINDOW_SAMPLES = Math.round(0.12 * SAMPLE_RATE);
 const ACTIVITY_FRAME_SAMPLES = SAMPLE_RATE / 100;
 const ACTIVITY_BRIDGE_FRAMES = 16;
 const MINIMUM_ACTIVITY_FRAMES = 12;
@@ -55,7 +62,7 @@ const ACTIVITY_THRESHOLD_MAX_DBFS = -36;
 
 
 const ASR_MODEL_PATH = 'asr/v3_ctc.onnx';
-const PUNCTUATION_MODEL_PATH = 'punctuation/model.int8.onnx';
+const PUNCTUATION_MODEL_PATH = 'punctuation/model.fp16.onnx';
 const PUNCTUATION_CONFIG_PATH = 'punctuation/config.json';
 const TOKENIZER_PATH = 'punctuation/tokenizer.json';
 const TOKENIZER_CONFIG_PATH = 'punctuation/tokenizer_config.json';
@@ -283,42 +290,27 @@ function fftBluestein(
   }
 }
 
-function hzToHtkMel(hz: number): number {
-  return 2595 * Math.log10(1 + hz / 700);
-}
-
-function htkMelToHz(mel: number): number {
-  return 700 * (10 ** (mel / 2595) - 1);
-}
-
 function getMelPlan(): MelPlan {
   if (melPlan) return melPlan;
-  const hann = new Float64Array(N_FFT);
-  for (let index = 0; index < N_FFT; index += 1) {
-    hann[index] = 0.5 - 0.5 * Math.cos((2 * Math.PI * index) / N_FFT);
+  const coefficientCount = N_FFT + MEL_BINS * SPECTRUM_BINS;
+  const packed = atob(CHECKPOINT_FRONTEND_BF16);
+  if (packed.length !== coefficientCount * 2) {
+    throw new Error('GigaAM checkpoint frontend buffers have the wrong length.');
   }
-  const melMin = hzToHtkMel(0);
-  const melMax = hzToHtkMel(SAMPLE_RATE / 2);
-  const points = new Float64Array(MEL_BINS + 2);
-  for (let index = 0; index < points.length; index += 1) {
-    points[index] = htkMelToHz(melMin + ((melMax - melMin) * index) / (MEL_BINS + 1));
+  const coefficients = new Float64Array(coefficientCount);
+  for (let index = 0; index < coefficientCount; index += 1) {
+    floatBits[0] = (packed.charCodeAt(index * 2) | (packed.charCodeAt(index * 2 + 1) << 8)) << 16;
+    coefficients[index] = floatScratch[0];
   }
-  const weights = new Float64Array(MEL_BINS * SPECTRUM_BINS);
+  const hann = coefficients.subarray(0, N_FFT);
+  const weights = coefficients.subarray(N_FFT);
   const firstBin = new Uint16Array(MEL_BINS);
   const lastBin = new Uint16Array(MEL_BINS);
   for (let mel = 0; mel < MEL_BINS; mel += 1) {
-    const lower = points[mel];
-    const center = points[mel + 1];
-    const upper = points[mel + 2];
     let first = SPECTRUM_BINS;
     let last = 0;
     for (let bin = 0; bin < SPECTRUM_BINS; bin += 1) {
-      const frequency = (bin * SAMPLE_RATE) / N_FFT;
-      const down = (frequency - lower) / (center - lower);
-      const up = (upper - frequency) / (upper - center);
-      const weight = Math.max(0, Math.min(down, up));
-      weights[mel * SPECTRUM_BINS + bin] = weight;
-      if (weight > 0) {
+      if (weights[mel * SPECTRUM_BINS + bin] > 0) {
         first = Math.min(first, bin);
         last = bin + 1;
       }
@@ -486,6 +478,102 @@ async function decodeAndResampleAudio(blob: Blob, maxDurationSeconds: number | n
   sourceNode.start();
   const rendered = await offline.startRendering();
   return rendered.getChannelData(0).slice();
+}
+
+function decodePcm16Wav(bytes: ArrayBuffer): { samples: Float32Array; sampleRate: number } {
+  const view = new DataView(bytes);
+  if (
+    bytes.byteLength < 44 ||
+    view.getUint32(0, false) !== 0x52494646 ||
+    view.getUint32(8, false) !== 0x57415645
+  ) {
+    throw new Error('Local draft requires a RIFF WAV audio track.');
+  }
+  let channels = 0;
+  let sampleRate = 0;
+  let bitsPerSample = 0;
+  let format = 0;
+  let dataOffset = -1;
+  let dataLength = 0;
+  for (let offset = 12; offset + 8 <= bytes.byteLength;) {
+    const chunkSize = view.getUint32(offset + 4, true);
+    const next = offset + 8 + chunkSize + (chunkSize & 1);
+    if (next > bytes.byteLength + 1) throw new Error('WAV contains a truncated chunk.');
+    const chunk = view.getUint32(offset, false);
+    if (chunk === 0x666d7420) {
+      if (chunkSize < 16) throw new Error('WAV has an invalid format chunk.');
+      format = view.getUint16(offset + 8, true);
+      channels = view.getUint16(offset + 10, true);
+      sampleRate = view.getUint32(offset + 12, true);
+      bitsPerSample = view.getUint16(offset + 22, true);
+    } else if (chunk === 0x64617461) {
+      dataOffset = offset + 8;
+      dataLength = chunkSize;
+    }
+    offset = next;
+  }
+  if (format !== 1 || channels !== 1 || bitsPerSample !== 16 || sampleRate <= 0) {
+    throw new Error('Local draft requires mono 16-bit PCM WAV audio.');
+  }
+  if (dataOffset < 0 || dataLength < 2 || dataLength % 2) {
+    throw new Error('WAV has no complete PCM16 samples.');
+  }
+  const samples = new Float32Array(dataLength / 2);
+  for (let index = 0; index < samples.length; index += 1) {
+    samples[index] = view.getInt16(dataOffset + index * 2, true) / 32_768;
+  }
+  return { samples, sampleRate };
+}
+
+function normalizePcm16(samples: Int16Array): Float32Array {
+  const normalized = new Float32Array(samples.length);
+  for (let index = 0; index < samples.length; index += 1) {
+    normalized[index] = samples[index] / 32_768;
+  }
+  return normalized;
+}
+
+async function prepareDraftAudio(blob: Blob): Promise<{
+  raw: Float32Array;
+  activity: Float32Array;
+  pcmSha256: string;
+}> {
+  const { samples, sampleRate } = decodePcm16Wav(await blob.arrayBuffer());
+  const outputFrames = Math.round(samples.length * SAMPLE_RATE / sampleRate);
+  const highpassed = highpassSource(samples, sampleRate);
+  const rawPcm = prepareRawPcm16(samples, sampleRate, outputFrames);
+  const pcmSha256 = Array.from(
+    new Uint8Array(await crypto.subtle.digest('SHA-256', rawPcm.buffer as ArrayBuffer))
+  ).map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  const raw = normalizePcm16(rawPcm);
+  const activity = normalizePcm16(
+    resampleToPcm16(denoiseForActivity(highpassed, sampleRate), sampleRate, outputFrames)
+  );
+  return { raw, activity, pcmSha256 };
+}
+
+async function draftRowId(
+  taskId: string,
+  lane: string,
+  pcmSha256: string,
+  startSample: number,
+  endSample: number
+): Promise<string> {
+  const namespace = Uint8Array.of(
+    0x54, 0x05, 0x7e, 0x89, 0xdf, 0xb6, 0x5f, 0x31,
+    0x92, 0x5d, 0x61, 0x19, 0xe4, 0x8b, 0xda, 0xc4
+  );
+  const name = new TextEncoder().encode(
+    `${taskId}|${lane}|${pcmSha256}|${startSample}|${endSample}`
+  );
+  const input = new Uint8Array(namespace.length + name.length);
+  input.set(namespace);
+  input.set(name, namespace.length);
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-1', input));
+  digest[6] = (digest[6] & 0x0f) | 0x50;
+  digest[8] = (digest[8] & 0x3f) | 0x80;
+  const hex = Array.from(digest.subarray(0, 16), (byte) => byte.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 function configureOrtRuntime(): void {
@@ -971,6 +1059,66 @@ async function recognizeSamplesInChunks(
   );
   return { durationSeconds: samples.length / SAMPLE_RATE, tokens };
 }
+
+function silenceChunkBoundaries(samples: Float32Array): number[] {
+  const boundaries = [0];
+  let cursor = 0;
+  while (samples.length - cursor > ASR_SILENCE_MAX_SAMPLES) {
+    const target = cursor + ASR_SILENCE_TARGET_SAMPLES;
+    const left = Math.max(cursor + 12 * SAMPLE_RATE, target - ASR_SILENCE_SEARCH_SAMPLES);
+    const right = Math.min(samples.length - ASR_ENERGY_WINDOW_SAMPLES, target + ASR_SILENCE_SEARCH_SAMPLES);
+    let cut = Math.min(samples.length, cursor + ASR_SILENCE_MAX_SAMPLES);
+    if (right > left) {
+      let minimumEnergy = Number.POSITIVE_INFINITY;
+      for (let index = left; index <= right; index += ASR_ENERGY_WINDOW_SAMPLES / 2) {
+        let energy = 0;
+        for (let sample = index; sample < index + ASR_ENERGY_WINDOW_SAMPLES; sample += 1) {
+          energy += samples[sample] ** 2;
+        }
+        if (energy < minimumEnergy) {
+          minimumEnergy = energy;
+          cut = index;
+        }
+      }
+    }
+    boundaries.push(cut);
+    cursor = cut;
+  }
+  boundaries.push(samples.length);
+  return boundaries;
+}
+
+async function recognizeActivitySegments(
+  samples: Float32Array,
+  segments: readonly ActivitySegment[],
+  recognizer: SampleRecognizer = recognizeSampleChunk
+): Promise<SampleRecognition> {
+  const tokens: LocalWord[] = [];
+  for (const segment of segments) {
+    const segmentSamples = samples.subarray(segment.startSample, segment.endSample);
+    const boundaries = silenceChunkBoundaries(segmentSamples);
+    for (let index = 0; index < boundaries.length - 1; index += 1) {
+      const chunkStart = segment.startSample + boundaries[index];
+      const chunkEnd = segment.startSample + boundaries[index + 1];
+      const recognized = await recognizer(samples.subarray(chunkStart, chunkEnd), chunkStart);
+      for (const word of recognized.tokens) {
+        const startSeconds = (chunkStart / SAMPLE_RATE) + word.startSeconds;
+        const endSeconds = (chunkStart / SAMPLE_RATE) + word.endSeconds;
+        if (
+          !word.text ||
+          !Number.isFinite(startSeconds) ||
+          !Number.isFinite(endSeconds) ||
+          startSeconds < segment.startSample / SAMPLE_RATE ||
+          endSeconds <= startSeconds ||
+          endSeconds > segment.endSample / SAMPLE_RATE
+        ) continue;
+        tokens.push({ text: word.text, startSeconds, endSeconds });
+      }
+    }
+  }
+  tokens.sort(compareWordsByMidpoint);
+  return { durationSeconds: samples.length / SAMPLE_RATE, tokens };
+}
 function frameDbfs(samples: Float32Array, startSample: number, endSample: number): number {
   let squaredSum = 0;
   for (let index = startSample; index < endSample; index += 1) {
@@ -1170,16 +1318,6 @@ async function recognizeAndLabelSamples(
   return labelRecognition(recognized, punctuator);
 }
 
-async function recognizeAndLabelDraftSamples(
-  samples: Float32Array
-): Promise<RecognitionWithLabels> {
-  const recognized = await recognizeSamplesInChunks(samples);
-  recognized.tokens.sort(compareWordsByMidpoint);
-  return labelRecognition(recognized, predictPunctuation);
-}
-
-
-
 async function transcribeSamples(
   samples: Float32Array,
   recognizer?: SampleRecognizer,
@@ -1232,7 +1370,7 @@ function modelsSummary(): Record<string, unknown> {
       inputDtype: 'float16'
     },
     l2: {
-      name: 'punctuation-production-spacing-int8',
+      name: 'punctuation-production-spacing-fp16',
       runtime: 'onnxruntime-web',
       executionProviders: ['webgpu', 'wasm'],
       labels: [...PUNCTUATION_LABELS]
@@ -1257,7 +1395,7 @@ export async function generateLocalL0Timing(
     let result: { durationSeconds: number; tokens: LocalWord[] };
     try {
       const samples = await decodeAndResampleAudio(track.audio.blob, null);
-      result = await recognizeSamplesInChunks(samples);
+      result = await recognizeActivitySegments(samples, segmentSamplesByActivity(samples));
     } catch (error) {
       throw actionableError(`timing lane "${track.lane}"`, error);
     }
@@ -1352,6 +1490,28 @@ export async function generateLocalL0SegmentDraft(
 }
 
 
+async function renderActivityGroups(
+  words: readonly LocalWord[],
+  segments: readonly ActivitySegment[]
+): Promise<Array<ActivitySegment & { text: string; wordCount: number }>> {
+  const groups = groupWordsByActivitySegments(words, segments);
+  const rows: Array<ActivitySegment & { text: string; wordCount: number }> = [];
+  let sentenceStart = true;
+  for (const group of groups) {
+    const lexicalWords = words.slice(group.wordStart, group.wordEnd).map((word) => word.text);
+    const labels = await predictPunctuation(lexicalWords);
+    const rendered = renderBoundaryLabels(lexicalWords, labels, sentenceStart);
+    sentenceStart = rendered.sentenceStart;
+    rows.push({
+      startSample: group.startSample,
+      endSample: group.endSample,
+      text: rendered.text,
+      wordCount: group.wordEnd - group.wordStart
+    });
+  }
+  return rows;
+}
+
 export async function generateLocalL0Draft(
   _settings: ExtensionSettings,
   job: TranscriptJob,
@@ -1369,35 +1529,27 @@ export async function generateLocalL0Draft(
   let wordCount = 0;
   for (let laneIndex = 0; laneIndex < prepared.length; laneIndex += 1) {
     const track = prepared[laneIndex];
-    let transcript: RecognitionWithLabels;
+    let transcript: SampleRecognition;
     let segments: ActivitySegment[];
+    let pcmSha256: string;
     try {
-      const samples = await decodeAndResampleAudio(track.audio.blob, null);
-      segments = segmentSamplesByActivity(samples);
-      transcript = await recognizeAndLabelDraftSamples(samples);
+      const preparedAudio = await prepareDraftAudio(track.audio.blob);
+      pcmSha256 = preparedAudio.pcmSha256;
+      segments = segmentSamplesByActivity(preparedAudio.activity);
+      transcript = await recognizeActivitySegments(preparedAudio.raw, segments);
     } catch (error) {
       throw actionableError(`draft lane "${track.lane}"`, error);
     }
-    const groups = groupWordsByActivitySegments(transcript.tokens, segments);
-    let sentenceStart = true;
-    for (let groupIndex = 0; groupIndex < groups.length; groupIndex += 1) {
-      const group = groups[groupIndex];
-      const lexicalWords = transcript.tokens
-        .slice(group.wordStart, group.wordEnd)
-        .map((word) => word.text);
-      const rendered = renderBoundaryLabels(
-        lexicalWords,
-        transcript.labels.slice(group.wordStart, group.wordEnd),
-        sentenceStart
-      );
-      sentenceStart = rendered.sentenceStart;
-      wordCount += group.wordEnd - group.wordStart;
+    const laneRows = await renderActivityGroups(transcript.tokens, segments);
+    for (let groupIndex = 0; groupIndex < laneRows.length; groupIndex += 1) {
+      const row = laneRows[groupIndex];
+      wordCount += row.wordCount;
       rows.push({
-        id: `${job.jobId}:${track.lane}:${String(groupIndex).padStart(6, '0')}`,
+        id: await draftRowId(job.jobId, track.lane, pcmSha256, row.startSample, row.endSample),
         lane: track.lane,
-        startSeconds: Number((group.startSample / SAMPLE_RATE).toFixed(6)),
-        endSeconds: Number((group.endSample / SAMPLE_RATE).toFixed(6)),
-        text: rendered.text
+        startSeconds: Number((row.startSample / SAMPLE_RATE).toFixed(6)),
+        endSeconds: Number((row.endSample / SAMPLE_RATE).toFixed(6)),
+        text: row.text
       });
     }
   }
@@ -1470,6 +1622,8 @@ export const __localModelRuntimeTesting = {
     };
   },
   recognizeSamplesInChunks,
+  recognizeActivitySegments,
+  silenceChunkBoundaries,
   transcribeSampleInterval,
   cropSampleInterval,
   encodePunctuationWords,
@@ -1477,8 +1631,11 @@ export const __localModelRuntimeTesting = {
   renderBoundaryLabels,
   resolveMaxDurationSeconds,
   clippedFrameCount,
+  prepareDraftAudio,
+  draftRowId,
   segmentSamplesByActivity,
   groupWordsByActivitySegments,
+  renderActivityGroups,
   compareWordsByMidpoint,
   float32ToFloat16,
   float16ToFloat32

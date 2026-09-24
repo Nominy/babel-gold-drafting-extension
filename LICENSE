@@ -15,3 +15,8 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
+
+The FFmpeg-derived modules src/core/ffmpeg-audio-raw.ts and
+src/core/ffmpeg-audio-denoise.ts are licensed LGPL-2.1-or-later,
+not Apache-2.0. Their source accompanies the extension distribution;
+see COPYING.LGPLv2.1 for the applicable terms.

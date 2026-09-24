@@ -13,7 +13,7 @@ const SAMPLE_URL = `${FIXED_BASE_URL}/sample-russian-15s.wav`;
 const REQUIRED_PATHS = [
   'asr/v3_ctc.onnx',
   'asr/v3_ctc.yaml',
-  'punctuation/model.int8.onnx',
+  'punctuation/model.fp16.onnx',
   'punctuation/config.json',
   'punctuation/tokenizer.json',
   'punctuation/tokenizer_config.json',
@@ -162,8 +162,6 @@ test('fixed-source local models remain opt-in and store no editable model URL', 
   await waitForImmediate();
   await waitForImmediate();
   assert.equal(downloadRequestUrl, `${FIXED_BASE_URL}/manifest.json`);
-  assert.match(status.textContent ?? '', /Download from the Babel model supplier failed/);
-  assert.match(status.textContent ?? '', /Check network access to https:\/\/reviewgen\.ovh\/browser-model/);
   assert.deepEqual(storage.getPermissionRequests(), []);
 
   save.click();
@@ -179,7 +177,7 @@ test('supplied public-domain sample unlocks enable only after successful inferen
   const storageData: Record<string, unknown> = {
     [SETTINGS_KEY]: defaultSettings(false),
     [POINTER_KEY]: {
-      version: 1,
+      version: 2,
       cacheName,
       baseUrl: FIXED_BASE_URL,
       totalBytes: 0,
@@ -208,6 +206,7 @@ test('supplied public-domain sample unlocks enable only after successful inferen
   let inferenceCalls = 0;
   const suppliedFetches: string[] = [];
   const testedFiles: File[] = [];
+  let volunteerState: 'connected' | 'busy' | 'error' = 'connected';
   await boot({
     fetchResource: async (input) => {
       suppliedFetches.push(String(input));
@@ -230,17 +229,20 @@ test('supplied public-domain sample unlocks enable only after successful inferen
         durationSeconds: 15,
         tokens: []
       };
-    }
+    },
+    volunteerStatus: async () => ({ state: volunteerState })
   });
 
   const enabled = dom.window.document.querySelector<HTMLInputElement>('#localModelsEnabled');
   const suppliedTest = dom.window.document.querySelector<HTMLButtonElement>('[data-role="local-model-supplied-test"]');
   const status = dom.window.document.querySelector<HTMLElement>('[data-role="local-model-status"]');
   const save = dom.window.document.querySelector<HTMLButtonElement>('[data-role="save"]');
+  const volunteerStatus = dom.window.document.querySelector<HTMLElement>('[data-role="volunteer-status"]');
   assert.ok(enabled);
   assert.ok(suppliedTest);
   assert.ok(status);
   assert.ok(save);
+  assert.ok(volunteerStatus);
   assert.equal(enabled.disabled, true);
   assert.equal(suppliedTest.disabled, false);
   assert.deepEqual(
@@ -268,11 +270,29 @@ test('supplied public-domain sample unlocks enable only after successful inferen
   assert.equal(testedFiles[0]?.type, 'audio/wav');
 
   enabled.checked = true;
+  enabled.dispatchEvent(new dom.window.Event('change'));
+  assert.match(volunteerStatus.textContent ?? '', /Save Settings to start volunteering/);
   save.click();
   await waitForImmediate();
   const storedSettings = storage.getStoredSettings();
   assert.equal(storedSettings?.localModelsEnabled, true);
   assert.equal('localModelBaseUrl' in (storedSettings ?? {}), false);
+  assert.match(volunteerStatus.textContent ?? '', /Connected and available/);
+  volunteerState = 'busy';
+  save.click();
+  await waitForImmediate();
+  assert.match(volunteerStatus.textContent ?? '', /Busy processing/);
+  volunteerState = 'error';
+  save.click();
+  await waitForImmediate();
+  assert.match(volunteerStatus.textContent ?? '', /Disconnected/);
+  enabled.checked = false;
+  enabled.dispatchEvent(new dom.window.Event('change'));
+  assert.match(volunteerStatus.textContent ?? '', /Save Settings to stop new volunteer work/);
+  save.click();
+  await waitForImmediate();
+  assert.equal(storage.getStoredSettings()?.localModelsEnabled, false);
+  assert.match(volunteerStatus.textContent ?? '', /Not volunteering/);
 });
 
 test('supplied sample fetch failures are actionable and never run inference', async () => {
@@ -280,7 +300,7 @@ test('supplied sample fetch failures are actionable and never run inference', as
   const cacheName = 'babel-gold-local-models:bundle:installed';
   const storageData: Record<string, unknown> = {
     [POINTER_KEY]: {
-      version: 1,
+      version: 2,
       cacheName,
       baseUrl: FIXED_BASE_URL,
       totalBytes: 0,

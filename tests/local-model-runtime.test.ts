@@ -7,27 +7,27 @@ const FRONTEND_FIXTURE_INDICES = [
   0, 1, 2, 3, 10, 31, 32, 33, 47, 63, 64, 95, 96, 127, 128, 159, 160, 191
 ];
 
-// Calculated with torch 2.9.1 / torchaudio 2.9.1 MelSpectrogram using the exact
-// GigaAM parameters (periodic Hann, n_fft=320, hop=160, center=false, HTK mel).
+// Calculated with the accepted GigaAM checkpoint's restored BF16 window and
+// mel-bank buffers; freshly constructed torchaudio buffers produce different logits.
 const PYTHON_LOG_MEL_FIXTURE = [
-  -10.84756088256836,
-  -10.063607215881348,
-  -10.064454078674316,
-  -9.603693962097168,
-  -8.90012264251709,
-  4.438756465911865,
-  4.438756942749023,
-  5.588564872741699,
-  -3.794724941253662,
-  3.02093505859375,
-  3.1943273544311523,
-  -9.223891258239746,
-  -3.670184850692749,
-  -8.875046730041504,
-  -8.873992919921875,
-  -13.67418098449707,
-  -13.68295955657959,
-  -5.215675354003906
+  -10.334663391113281,
+  -9.317130088806152,
+  -9.445328712463379,
+  -9.088786125183105,
+  -8.891809463500977,
+  4.438273906707764,
+  4.438173294067383,
+  5.587215423583984,
+  -3.8078739643096924,
+  3.0221946239471436,
+  3.1961851119995117,
+  -9.170083045959473,
+  -3.6744611263275146,
+  -8.618334770202637,
+  -8.568355560302734,
+  -9.405864715576172,
+  -10.097670555114746,
+  -5.2834320068359375
 ];
 function activitySamples(...runs: Array<[durationMs: number, amplitude: number]>): Float32Array {
   const sampleRate = 16_000;
@@ -43,7 +43,7 @@ function activitySamples(...runs: Array<[durationMs: number, amplitude: number]>
   return samples;
 }
 
-test('GigaAM frontend has exact dimensions and matches the Python numeric fixture', () => {
+test('GigaAM frontend matches restored checkpoint buffers on the Python numeric fixture', () => {
   const samples = new Float32Array(640);
   for (let index = 0; index < samples.length; index += 1) {
     samples[index] =
@@ -148,6 +148,50 @@ test('full-track recognition chunks more than 200 seconds, offsets timestamps, a
     startSeconds: 203.2,
     endSeconds: 203.4
   });
+});
+
+test('draft recognition isolates speech separated by silence and retains every segment word', async () => {
+  const samples = activitySamples(
+    [1_000, 0], [300, 0.1], [2_000, 0], [300, 0.1], [1_000, 0]
+  );
+  const segments = runtime.segmentSamplesByActivity(samples);
+  const calls: number[] = [];
+  const result = await runtime.recognizeActivitySegments(samples, segments, async (chunk, startSample) => {
+    calls.push(startSample);
+    return {
+      durationSeconds: chunk.length / 16_000,
+      tokens: [{ text: `utterance-${calls.length}`, startSeconds: 0, endSeconds: 0.1 }]
+    };
+  });
+
+  assert.deepEqual(calls, [16_000, 52_800]);
+  assert.deepEqual(result.tokens.map(({ text }) => text), ['utterance-1', 'utterance-2']);
+  assert.deepEqual(result.tokens.map(({ startSeconds }) => startSeconds), [1, 3.3]);
+});
+
+test('long speech splits near lowest energy before the 24-second model limit', async () => {
+  const samples = new Float32Array(31 * 16_000).fill(0.1);
+  samples.fill(0, 21 * 16_000, 21 * 16_000 + 1_920);
+  const calls: Array<[number, number]> = [];
+  const result = await runtime.recognizeActivitySegments(
+    samples,
+    [{ startSample: 0, endSample: samples.length }],
+    async (chunk, startSample) => {
+      calls.push([startSample, chunk.length]);
+      return {
+        durationSeconds: chunk.length / 16_000,
+        tokens: [{ text: `part-${calls.length}`, startSeconds: 0.1, endSeconds: 0.2 }]
+      };
+    }
+  );
+
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0][0], 0);
+  assert.ok(calls[0][1] >= 20 * 16_000 && calls[0][1] <= 22 * 16_000);
+  assert.equal(calls[1][0], calls[0][1]);
+  assert.equal(calls[1][0] + calls[1][1], samples.length);
+  assert.deepEqual(result.tokens.map(({ text }) => text), ['part-1', 'part-2']);
+  assert.equal(result.tokens[1].startSeconds, calls[1][0] / 16_000 + 0.1);
 });
 
 test('segment transcription crops the target interval before recognition and excludes adjacent words', async () => {
@@ -352,5 +396,26 @@ test('S2 grouping has no word-count or transcript-span row cap', () => {
   assert.deepEqual(
     runtime.groupWordsByActivitySegments(words, [{ startSample: 0, endSample: 224_000 }]),
     [{ startSample: 0, endSample: 224_000, wordStart: 0, wordEnd: 33 }]
+  );
+});
+
+test('draft rows retain the service UUID for identical prepared PCM and boundaries', async () => {
+  const rowId = await runtime.draftRowId(
+    'parity-RU-tx-gold-bg-noise',
+    'track-2',
+    'fec29e8d1bb38a0018d20a1633b2840c1fccdd4c415b87ab5ae5bfc914cd6fec',
+    4_000,
+    505_600
+  );
+  assert.equal(rowId, '2263f035-ecb5-5d9e-9df2-280bcb91adbc');
+  assert.notEqual(
+    await runtime.draftRowId(
+      'parity-RU-tx-gold-bg-noise',
+      'track-2',
+      'fec29e8d1bb38a0018d20a1633b2840c1fccdd4c415b87ab5ae5bfc914cd6fec',
+      4_000,
+      505_760
+    ),
+    rowId
   );
 });
