@@ -19,12 +19,12 @@ on:
         type: string
         required: true
       publish_type:
-        description: Chrome Web Store publish mode
+        description: Publish automatically after review or stage for manual publication
         type: choice
         options:
-          - STAGED_PUBLISH
           - DEFAULT_PUBLISH
-        default: STAGED_PUBLISH
+          - STAGED_PUBLISH
+        default: DEFAULT_PUBLISH
       replace_pending_submission:
         description: Cancel the current pending review before uploading this release
         type: boolean
