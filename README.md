@@ -16,6 +16,10 @@ Load this directory unpacked in `chrome://extensions`. Bundles and model runtime
 
 `build` bumps the patch version in `package.json`, `manifest.json`, and `package-lock.json`. Use `npm run build:core` for a no-bump rebuild.
 
+## Local models without swarm participation
+
+In extension Options, download and test the model bundle, then enable **downloaded local browser models**. Uncheck **Volunteer to process other users' L0 audio** and select **Save Settings** to keep local inference for your own tasks without accepting new volunteer jobs. Recheck and save to join the swarm again. Existing installations keep their previous volunteer behavior until you opt out.
+
 ## Checks
 
 ```sh

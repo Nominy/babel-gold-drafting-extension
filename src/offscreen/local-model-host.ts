@@ -332,7 +332,7 @@ if (runtimeMessages && typeof runtimeMessages.addListener === 'function') {
   const volunteer = createVolunteer({ ...defaultVolunteerDependencies, runExclusive: host.runExclusive });
   // A recovered document must resume polling even if the service worker did not restart.
   void loadVolunteerSettings().then((settings) => {
-    if (settings.localModelsEnabled) volunteer.start();
+    if (settings.localModelsEnabled && settings.volunteerInferenceEnabled) volunteer.start();
   }).catch(() => {
     // The background lifecycle reports setup failures to Options.
   });

@@ -234,11 +234,14 @@ test('supplied public-domain sample unlocks enable only after successful inferen
   });
 
   const enabled = dom.window.document.querySelector<HTMLInputElement>('#localModelsEnabled');
+  const volunteerEnabled = dom.window.document.querySelector<HTMLInputElement>('#volunteerInferenceEnabled');
   const suppliedTest = dom.window.document.querySelector<HTMLButtonElement>('[data-role="local-model-supplied-test"]');
   const status = dom.window.document.querySelector<HTMLElement>('[data-role="local-model-status"]');
   const save = dom.window.document.querySelector<HTMLButtonElement>('[data-role="save"]');
   const volunteerStatus = dom.window.document.querySelector<HTMLElement>('[data-role="volunteer-status"]');
   assert.ok(enabled);
+  assert.ok(volunteerEnabled);
+  assert.equal(volunteerEnabled.checked, true);
   assert.ok(suppliedTest);
   assert.ok(status);
   assert.ok(save);
@@ -277,6 +280,22 @@ test('supplied public-domain sample unlocks enable only after successful inferen
   const storedSettings = storage.getStoredSettings();
   assert.equal(storedSettings?.localModelsEnabled, true);
   assert.equal('localModelBaseUrl' in (storedSettings ?? {}), false);
+  assert.match(volunteerStatus.textContent ?? '', /Connected and available/);
+  volunteerEnabled.checked = false;
+  volunteerEnabled.dispatchEvent(new dom.window.Event('change'));
+  assert.match(volunteerStatus.textContent ?? '', /Save Settings to stop new volunteer work/);
+  save.click();
+  await waitForImmediate();
+  assert.equal(storage.getStoredSettings()?.localModelsEnabled, true);
+  assert.equal(storage.getStoredSettings()?.volunteerInferenceEnabled, false);
+  assert.equal(enabled.checked, true);
+  assert.match(volunteerStatus.textContent ?? '', /local models remain available for your own tasks/);
+  volunteerEnabled.checked = true;
+  volunteerEnabled.dispatchEvent(new dom.window.Event('change'));
+  assert.match(volunteerStatus.textContent ?? '', /Save Settings to start volunteering/);
+  save.click();
+  await waitForImmediate();
+  assert.equal(storage.getStoredSettings()?.volunteerInferenceEnabled, true);
   assert.match(volunteerStatus.textContent ?? '', /Connected and available/);
   volunteerState = 'busy';
   save.click();

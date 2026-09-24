@@ -102,6 +102,7 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
   const l0DontRunLlmInput = requireElement<HTMLInputElement>('#l0DontRunLlm');
   const audioInputEnabledInput = requireElement<HTMLInputElement>('#audioInputEnabled');
   const localModelsEnabledInput = requireElement<HTMLInputElement>('#localModelsEnabled');
+  const volunteerInferenceEnabledInput = requireElement<HTMLInputElement>('#volunteerInferenceEnabled');
   const localModelDownloadButton = requireElement<HTMLButtonElement>('[data-role="local-model-download"]');
   const localModelRemoveButton = requireElement<HTMLButtonElement>('[data-role="local-model-remove"]');
   const localModelTestAudioInput = requireElement<HTMLInputElement>('#localModelTestAudio');
@@ -128,6 +129,7 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
     const hasAudioFile = Boolean(localModelTestAudioInput.files?.[0]);
     const localModelCanEnable = localModelStatus.state === 'ready' && localModelTestSucceeded;
     localModelsEnabledInput.disabled = localModelOperationRunning || !localModelCanEnable;
+    volunteerInferenceEnabledInput.disabled = localModelOperationRunning;
     localModelTestAudioInput.disabled = localModelOperationRunning || localModelStatus.state !== 'ready';
     localModelDownloadButton.disabled = localModelOperationRunning;
     localModelRemoveButton.disabled = localModelOperationRunning || localModelStatus.state !== 'ready';
@@ -186,20 +188,30 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
     l0DontRunLlmInput.checked = settings.l0DontRunLlm;
     audioInputEnabledInput.checked = settings.audioInputEnabled;
     localModelsEnabledInput.checked = settings.localModelsEnabled;
+    volunteerInferenceEnabledInput.checked = settings.volunteerInferenceEnabled;
     renderL0ReplacementSettings();
   };
   let persistedSettings = await loadSettings();
   const refreshVolunteerStatus = async (): Promise<void> => {
-    if (localModelsEnabledInput.checked !== persistedSettings.localModelsEnabled) {
-      volunteerStatusElement.textContent = localModelsEnabledInput.checked
+    if (localModelsEnabledInput.checked !== persistedSettings.localModelsEnabled ||
+        volunteerInferenceEnabledInput.checked !== persistedSettings.volunteerInferenceEnabled) {
+      const selected = localModelsEnabledInput.checked && volunteerInferenceEnabledInput.checked;
+      const saved = persistedSettings.localModelsEnabled && persistedSettings.volunteerInferenceEnabled;
+      volunteerStatusElement.textContent = selected && !saved
         ? 'Volunteer: Save Settings to start volunteering.'
-        : 'Volunteer: Save Settings to stop new volunteer work.';
+        : !selected && saved
+          ? 'Volunteer: Save Settings to stop new volunteer work.'
+          : 'Volunteer: Save Settings to apply your participation preference.';
       volunteerStatusElement.setAttribute('role', 'status');
       return;
     }
     let worker: VolunteerStatus;
-    if (!persistedSettings.localModelsEnabled || localModelStatus.state !== 'ready') {
+    if (!persistedSettings.localModelsEnabled) {
       worker = { state: 'disabled' };
+    } else if (!persistedSettings.volunteerInferenceEnabled) {
+      worker = { state: 'disabled', detail: 'Swarm participation is off; local models remain available for your own tasks.' };
+    } else if (localModelStatus.state !== 'ready') {
+      worker = { state: 'disabled', detail: 'The local model bundle is not ready.' };
     } else {
       try {
         worker = dependencies.volunteerStatus
@@ -238,6 +250,7 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
   l0ReplacementPreviewEnabledInput.addEventListener('change', renderL0ReplacementSettings);
   localModelTestAudioInput.addEventListener('change', renderLocalModelControls);
   localModelsEnabledInput.addEventListener('change', () => { void refreshVolunteerStatus(); });
+  volunteerInferenceEnabledInput.addEventListener('change', () => { void refreshVolunteerStatus(); });
   localModelDownloadButton.addEventListener('click', () => {
     localModelTestSucceeded = false;
     localModelsEnabledInput.checked = false;
@@ -417,7 +430,8 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
           l0CustomBaseUrl,
           l0DontRunLlm: l0DontRunLlmInput.checked,
           audioInputEnabled: audioInputEnabledInput.checked,
-          localModelsEnabled: localModelsEnabledInput.checked
+          localModelsEnabled: localModelsEnabledInput.checked,
+          volunteerInferenceEnabled: volunteerInferenceEnabledInput.checked
         })
       )
       .then((saved) => {

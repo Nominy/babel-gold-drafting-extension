@@ -25,6 +25,13 @@ test('local browser models stay explicitly opted out unless the stored value is 
   assert.equal(normalizeSettings({ localModelsEnabled: 1 }).localModelsEnabled, false);
 });
 
+test('existing local-model users still volunteer until they explicitly opt out', () => {
+  assert.equal(normalizeSettings({ localModelsEnabled: true }).volunteerInferenceEnabled, true);
+  const localOnly = normalizeSettings({ localModelsEnabled: true, volunteerInferenceEnabled: false });
+  assert.equal(localOnly.localModelsEnabled, true);
+  assert.equal(localOnly.volunteerInferenceEnabled, false);
+});
+
 test('local browser models use the fixed Babel supplier without persisting a source URL', () => {
   assert.equal(LOCAL_MODEL_BASE_URL, 'https://reviewgen.ovh/browser-model');
   assert.equal(LOCAL_MODEL_SAMPLE_URL, 'https://reviewgen.ovh/browser-model/sample-russian-15s.wav');
@@ -49,6 +56,7 @@ test('local model normalization keeps existing settings fields intact while drop
     l0DontRunLlm: true,
     audioInputEnabled: false,
     localModelsEnabled: true,
+    volunteerInferenceEnabled: false,
     localModelBaseUrl: ' https://models.example.test/v1 '
   });
 
@@ -64,7 +72,8 @@ test('local model normalization keeps existing settings fields intact while drop
     l0CustomBaseUrl: 'https://l0.example.test',
     l0DontRunLlm: true,
     audioInputEnabled: false,
-    localModelsEnabled: true
+    localModelsEnabled: true,
+    volunteerInferenceEnabled: false
   });
 });
 

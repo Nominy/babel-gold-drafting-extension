@@ -83,6 +83,14 @@ test('timing routing keeps the remote generator as the default and uses local on
   calls.length = 0;
   assert.equal(await requestConfiguredL0Timing(localSettings, job, tracks, {}, generators), timingResponse);
   assert.deepEqual(calls, ['local']);
+  calls.length = 0;
+  assert.equal(
+    await requestConfiguredL0Timing(
+      { ...localSettings, volunteerInferenceEnabled: false }, job, tracks, {}, generators
+    ),
+    timingResponse
+  );
+  assert.deepEqual(calls, ['local']);
 });
 
 test('draft routing preserves the remote path by default and surfaces an opted-in local failure without fallback', async () => {

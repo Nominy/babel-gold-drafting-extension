@@ -124,9 +124,11 @@ export function createVolunteerLifecycle(dependencies: VolunteerLifecycleDepende
     const work = tail.then(async () => {
       try {
         const settings = await dependencies.loadSettings();
-        enabled = settings.localModelsEnabled;
+        enabled = settings.localModelsEnabled && settings.volunteerInferenceEnabled;
         if (!enabled || !(await dependencies.ready())) {
-          state = { state: 'disabled', detail: enabled ? 'Local model bundle is not ready.' : undefined };
+          state = { state: 'disabled', detail: settings.localModelsEnabled && !settings.volunteerInferenceEnabled
+            ? 'Swarm participation is off; local models remain available for your own tasks.'
+            : enabled ? 'Local model bundle is not ready.' : undefined };
           if (await dependencies.hasDocument()) {
             await dependencies.sendMessage({ type: 'babel-l0-volunteer', target: 'offscreen', action: 'stop' });
           }

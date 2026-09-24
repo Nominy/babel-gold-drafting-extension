@@ -153,6 +153,18 @@ test('no ready local models means no registration and unleased audio URLs are re
   }), /Invalid volunteer lease/);
 });
 
+test('saved swarm opt-out prevents registration even with ready local models', async () => {
+  const harness = fixture([lease('draft')]);
+  harness.dependencies.settings = async () => ({
+    ...DEFAULT_SETTINGS, localModelsEnabled: true, volunteerInferenceEnabled: false
+  });
+  const worker = createVolunteer(harness.dependencies);
+  worker.start();
+  await until(() => worker.getStatus().state === 'disabled');
+  assert.match(worker.getStatus().detail ?? '', /Swarm participation is off/);
+  assert.deepEqual(harness.requests, []);
+});
+
 test('offscreen volunteer starts from saved settings without access to chrome.storage', async () => {
   const paths = [
     'asr/v3_ctc.onnx', 'asr/v3_ctc.yaml', 'punctuation/model.fp16.onnx',
@@ -256,11 +268,14 @@ test('a busy volunteer does not request a second lease before finishing the firs
 
 test('service worker starts a ready worker and stops on disable or missing bundle', async () => {
   let enabled = true;
+  let volunteerEnabled = true;
   let ready = true;
   let exists = false;
   const sent: string[] = [];
   const lifecycle = createVolunteerLifecycle({
-    loadSettings: async () => ({ ...DEFAULT_SETTINGS, localModelsEnabled: enabled }),
+    loadSettings: async () => ({
+      ...DEFAULT_SETTINGS, localModelsEnabled: enabled, volunteerInferenceEnabled: volunteerEnabled
+    }),
     ready: async () => ready,
     hasDocument: async () => exists,
     ensureDocument: async () => { exists = true; },
@@ -273,9 +288,18 @@ test('service worker starts a ready worker and stops on disable or missing bundl
   await lifecycle.reconcile();
   assert.deepEqual(sent, ['start', 'start']);
   assert.deepEqual(await lifecycle.status(), { state: 'connected' });
-  enabled = false;
+  volunteerEnabled = false;
   await lifecycle.reconcile();
   assert.deepEqual(sent, ['start', 'start', 'status', 'stop']);
+  assert.match((await lifecycle.status()).detail ?? '', /local models remain available for your own tasks/);
+  assert.equal(enabled, true);
+  volunteerEnabled = true;
+  await lifecycle.reconcile();
+  assert.equal(sent.at(-1), 'start');
+  assert.deepEqual(await lifecycle.status(), { state: 'connected' });
+  enabled = false;
+  await lifecycle.reconcile();
+  assert.deepEqual(sent, ['start', 'start', 'status', 'stop', 'start', 'status', 'stop']);
   assert.deepEqual(await lifecycle.status(), { state: 'disabled', detail: undefined });
   enabled = true;
   ready = false;

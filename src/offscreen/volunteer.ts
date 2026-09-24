@@ -193,6 +193,10 @@ export function createVolunteer(dependencies: VolunteerDependencies = defaultVol
           status = { state: 'disabled', detail: 'Saved local model settings are disabled.' };
           return;
         }
+        if (!settings.volunteerInferenceEnabled) {
+          status = { state: 'disabled', detail: 'Swarm participation is off; local models remain available for your own tasks.' };
+          return;
+        }
         if (!(await dependencies.ready())) {
           status = { state: 'disabled', detail: 'The verified model bundle is unavailable in the worker.' };
           return;

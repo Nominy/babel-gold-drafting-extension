@@ -16,6 +16,7 @@ export interface ExtensionSettings {
   l0DontRunLlm: boolean;
   audioInputEnabled: boolean;
   localModelsEnabled: boolean;
+  volunteerInferenceEnabled: boolean;
 }
 
 export interface CapturedAudioTrack {

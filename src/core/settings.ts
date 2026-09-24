@@ -21,6 +21,7 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
   l0DontRunLlm: false,
   audioInputEnabled: true,
   localModelsEnabled: false,
+  volunteerInferenceEnabled: true,
 };
 
 export function normalizeL0CustomBaseUrl(input: unknown): string {
@@ -87,6 +88,7 @@ export function normalizeSettings(input: unknown): ExtensionSettings {
       ? raw.audioInputEnabled
       : DEFAULT_SETTINGS.audioInputEnabled;
   const localModelsEnabled = raw.localModelsEnabled === true;
+  const volunteerInferenceEnabled = raw.volunteerInferenceEnabled !== false;
 
   return {
     backendBaseUrl,
@@ -100,7 +102,8 @@ export function normalizeSettings(input: unknown): ExtensionSettings {
     l0CustomBaseUrl,
     l0DontRunLlm,
     audioInputEnabled,
-    localModelsEnabled
+    localModelsEnabled,
+    volunteerInferenceEnabled
   };
 }
 

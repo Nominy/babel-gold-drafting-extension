@@ -104,7 +104,7 @@
 <section class="local-model-panel bui-card" data-role="local-model-setup" aria-labelledby="local-model-heading">
           <h2 id="local-model-heading" class="bui-title">Local browser models</h2>
           <p class="field-help bui-hint">
-            Remote drafting remains the default. When enabled, models run locally for your own tasks and this browser automatically volunteers for other users' L0 drafting and transcription jobs. Their audio is downloaded from the L0 coordinator into this browser and processed locally; participation uses your device's compute power and network connection. Model files come from the separate model supplier.
+            Remote drafting remains the default. Downloaded models can run locally for your own tasks. By default, an enabled browser also volunteers for other users' L0 drafting and transcription jobs: their audio is downloaded from the L0 coordinator and processed here using your compute power and network connection. You can opt out below without disabling your own local models. Model files come from the separate model supplier.
           </p>
           <p class="field-help bui-hint">
 <strong>1. Download</strong> and verify the Babel model bundle in this browser.</p>
@@ -123,7 +123,14 @@
             <input id="localModelsEnabled" name="localModelsEnabled" type="checkbox" disabled="" class="bui-checkbox">
             <span>
               3. Enable downloaded local browser models
-              <span class="field-help bui-hint">Available only after the current bundle is ready and passes the audio test. Enabling also starts volunteer processing of other users' audio automatically; disabling stops new volunteer work.</span>
+              <span class="field-help bui-hint">Available only after the current bundle is ready and passes the audio test. Local inference for your own tasks works whether or not you volunteer below.</span>
+            </span>
+          </label>
+          <label class="checkbox-row bui-label bui-card bui-setting-toggle" for="volunteerInferenceEnabled">
+            <input id="volunteerInferenceEnabled" name="volunteerInferenceEnabled" type="checkbox" checked="" class="bui-checkbox">
+            <span>
+              Volunteer to process other users' L0 audio
+              <span class="field-help bui-hint">Uncheck to use local models for your own tasks only. Save Settings to stop accepting new volunteer jobs; recheck and save to join again.</span>
             </span>
           </label>
           <button type="button" data-role="local-model-remove" disabled="" class="bui-button">Remove downloaded models</button>
