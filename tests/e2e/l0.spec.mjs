@@ -209,6 +209,8 @@ test.describe('Gold and Helper L0 integration', () => {
       await expect(page.locator(PANEL)).toHaveAttribute('data-status', 'queued', { timeout: 15_000 });
       expect(await page.evaluate(() => window.__goldTimingObservations)).toEqual([]);
       await expect(page.locator(PANEL)).toHaveAttribute('data-status', 'running', { timeout: 15_000 });
+      await expect(page.locator(PANEL).locator('.bgd-timing-activity')).toBeVisible();
+      await expect(page.locator('#babel-gold-l0-timing-status')).toHaveCount(0);
     }
     await expect(page.locator(PANEL)).toHaveAttribute('data-status', 'available', { timeout: babel.ai === 'placeholder' ? 30_000 : 150_000 });
     const updates = await page.evaluate(() => window.__goldTimingObservations);

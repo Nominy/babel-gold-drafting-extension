@@ -5,7 +5,6 @@ import { generateLocalL0Timing } from '../core/local-model-client';
 import { loadSettings } from '../core/settings';
 import { buildCanonicalTaskIdentity, captureTranscriptJob } from '../core/transcript';
 import type { CapturedAudioTrack, ExtensionSettings, L0TimingResponse, TranscriptJob } from '../core/types';
-import { L0TimingStatusPill, type L0TimingDisplayStatus } from './l0-timing-status';
 import {
   publishL0TimingAvailability,
   setL0TimingRetryHandler
@@ -64,9 +63,6 @@ export interface L0TimingServiceDependencies {
     taskId: string;
     tracks: L0TimingResponse['tracks'];
   }) => void;
-  activateStatusTask: (taskId: string) => void;
-  updateStatus: (taskId: string, status: L0TimingDisplayStatus) => void;
-  clearStatus: (taskId: string) => void;
   now: () => number;
   schedule: (callback: () => void, delayMs: number) => void;
 }
@@ -92,7 +88,6 @@ export class L0TimingService {
       if (this.dependencies.currentTaskId() !== taskId) {
         return;
       }
-      this.dependencies.activateStatusTask(taskId);
       if (!isUsableL0TimingJob(job)) {
         publishL0TimingAvailability({ taskId, status: 'unavailable' });
         return;
@@ -152,7 +147,6 @@ export class L0TimingService {
     if (!this.isTaskCurrent(taskId)) {
       return;
     }
-    this.dependencies.updateStatus(taskId, { status: 'retrying' });
     publishL0TimingAvailability({ taskId, status: 'retrying' });
     state.failureCount += 1;
     if (state.failureCount > MAX_AUTOMATIC_RETRIES) {
@@ -188,7 +182,6 @@ export class L0TimingService {
         prepareL0TimingTracks(job, audioTracks);
       } catch {
         state.audioWaitCount += 1;
-        this.dependencies.updateStatus(taskId, { status: 'preparing', requestId: '' });
         publishL0TimingAvailability({ taskId, status: 'preparing' });
         state.retryScheduled = true;
         try {
@@ -205,7 +198,6 @@ export class L0TimingService {
       const response = await this.dependencies.requestTiming(settings, job, audioTracks, {
         onQueueStatus: (status: L0TimingQueueStatus) => {
           if (!this.isTaskCurrent(taskId)) return;
-          this.dependencies.updateStatus(taskId, status);
           if (status.status === 'queued') {
             publishL0TimingAvailability({
               taskId,
@@ -222,7 +214,6 @@ export class L0TimingService {
       if (!this.isTaskCurrent(taskId) || response.taskId !== taskId) {
         return;
       }
-      this.dependencies.clearStatus(taskId);
       this.dependencies.publish({
         type: L0_TIMING_UPDATE_MESSAGE_TYPE,
         version: 1,
@@ -273,7 +264,6 @@ export function enableL0TimingAudioCapture(): void {
 }
 
 export function registerL0TimingService(): L0TimingService {
-  const statusPill = new L0TimingStatusPill();
   const service = new L0TimingService({
     captureTranscript: () => captureTranscriptJob(),
     currentTaskId: () => buildCanonicalTaskIdentity(captureTranscriptJob()),
@@ -281,9 +271,6 @@ export function registerL0TimingService(): L0TimingService {
     getSettings: () => loadSettings(),
     requestTiming: requestConfiguredL0Timing,
     publish: (message) => window.postMessage(message, '*'),
-    activateStatusTask: (taskId) => statusPill.activateTask(taskId),
-    updateStatus: (taskId, status) => statusPill.update(taskId, status),
-    clearStatus: (taskId) => statusPill.clear(taskId),
     now: () => Date.now(),
     schedule: (callback, delayMs) => {
       window.setTimeout(callback, delayMs);

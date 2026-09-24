@@ -53,9 +53,6 @@ function dependencies(overrides: Partial<L0TimingServiceDependencies> = {}): L0T
     getSettings: async () => DEFAULT_SETTINGS,
     requestTiming: async () => response,
     publish: () => undefined,
-    activateStatusTask: () => undefined,
-    updateStatus: () => undefined,
-    clearStatus: () => undefined,
     now: () => 1_000,
     schedule: () => undefined,
     ...overrides
@@ -252,7 +249,6 @@ test('timing lifecycle contains failures and retries only after backoff', async 
   const scheduled: Array<() => void> = [];
   let now = 1_000;
   let requestCount = 0;
-  const statuses: string[] = [];
   const service = new L0TimingService(dependencies({
     now: () => now,
     requestTiming: async () => {
@@ -260,15 +256,13 @@ test('timing lifecycle contains failures and retries only after backoff', async 
       if (requestCount === 1) throw new Error('background ASR unavailable');
       return response;
     },
-    schedule: (callback) => scheduled.push(callback),
-    updateStatus: (_taskId, status) => statuses.push(status.status),
+    schedule: (callback) => scheduled.push(callback)
   }));
 
   assert.doesNotThrow(() => service.onLifecycleOpportunity());
   await flushAsyncWork();
   assert.equal(requestCount, 1);
   assert.equal(scheduled.length, 1);
-  assert.deepEqual(statuses, ['retrying']);
   service.onLifecycleOpportunity();
   await flushAsyncWork();
   assert.equal(requestCount, 1);
