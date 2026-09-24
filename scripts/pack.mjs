@@ -30,7 +30,11 @@ try {
       const files = [
         { full: tempManifestPath, rel: 'manifest.json' },
         { full: join(ROOT, 'options.html'), rel: 'options.html' },
-        { full: join(ROOT, 'offscreen.html'), rel: 'offscreen.html' }
+        { full: join(ROOT, 'offscreen.html'), rel: 'offscreen.html' },
+        { full: join(ROOT, 'LICENSE'), rel: 'LICENSE' },
+        { full: join(ROOT, 'COPYING.LGPLv2.1'), rel: 'COPYING.LGPLv2.1' },
+        { full: join(ROOT, 'src/core/ffmpeg-audio-raw.ts'), rel: 'source/ffmpeg-audio-raw.ts' },
+        { full: join(ROOT, 'src/core/ffmpeg-audio-denoise.ts'), rel: 'source/ffmpeg-audio-denoise.ts' }
       ];
 
       for (const entry of collectFiles(join(ROOT, 'icons'), 'icons')) {

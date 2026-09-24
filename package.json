@@ -1,8 +1,8 @@
 {
   "name": "babel-gold-drafting-extension",
-  "version": "0.2.36",
+  "version": "0.2.37",
   "private": true,
-  "license": "Apache-2.0",
+  "license": "Apache-2.0 AND LGPL-2.1-or-later",
   "type": "module",
   "scripts": {
     "build": "npm run version:patch && npm run build:core",
@@ -13,7 +13,8 @@
     "publish:cws": "node scripts/publish-cws.mjs",
     "setup:github-secrets": "node scripts/setup-github-secrets.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test tests/*.test.ts"
+    "test": "node --import tsx --test tests/*.test.ts",
+    "models:full-bundle": "node scripts/create-full-model-bundle.mjs"
   },
   "devDependencies": {
     "@nominy/babel-extension-build": "file:../../shared/babel-extension-platform/packages/babel-extension-build",

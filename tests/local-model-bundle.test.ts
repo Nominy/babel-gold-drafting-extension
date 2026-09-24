@@ -13,7 +13,7 @@ import {
 const REQUIRED_PATHS = [
   'asr/v3_ctc.onnx',
   'asr/v3_ctc.yaml',
-  'punctuation/model.int8.onnx',
+  'punctuation/model.fp16.onnx',
   'punctuation/config.json',
   'punctuation/tokenizer.json',
   'punctuation/tokenizer_config.json',
@@ -140,9 +140,9 @@ async function createBundle(
     });
   }
   const manifest: Manifest = {
-    schema: 'babel-browser-model-bundle-v1',
+    schema: 'babel-browser-model-bundle-v2',
     generatedAt: '2026-08-30T00:00:00.000Z',
-    targetBytes: 500_000_000,
+    targetBytes: 1_500_000_000,
     totalBytes: files.reduce((total, file) => total + file.bytes, 0),
     pass: true,
     runtimeLibrariesExcluded: true,
@@ -257,6 +257,53 @@ test('installs a fully verified bundle and reads only manifest-listed files from
   assert.equal(harness.cacheStorage.caches.size, 1);
 });
 
+test('large model graphs install from verified byte ranges rather than one long transfer', async () => {
+  const harness = installHarness();
+  const baseUrl = 'https://models.example.test/ranged';
+  const path = 'asr/v3_ctc.onnx';
+  const graph = new Uint8Array(16 * 1024 * 1024 + 37);
+  graph.fill(37);
+  const bundle = await createBundle('ranged', async (manifest, contents) => {
+    contents[path] = graph;
+    const entry = manifest.files.find((file) => file.path === path);
+    assert.ok(entry);
+    entry.bytes = graph.byteLength;
+    entry.sha256 = await sha256(graph);
+  });
+  harness.setBundle(baseUrl, bundle.manifest, bundle.contents);
+
+  const fetchWithoutRanges = globalThis.fetch;
+  const requestedRanges: string[] = [];
+  globalThis.fetch = async (input, init) => {
+    const url = requestKey(input);
+    const range = new Headers(init?.headers).get('range');
+    if (url !== `${baseUrl}/${path}` || !range) {
+      return fetchWithoutRanges(input, init);
+    }
+    requestedRanges.push(range);
+    const match = /^bytes=(\d+)-(\d+)$/.exec(range);
+    assert.ok(match);
+    const start = Number(match[1]);
+    const end = Number(match[2]);
+    return new Response(graph.slice(start, end + 1), {
+      status: 206,
+      headers: { 'content-range': `bytes ${start}-${end}/${graph.byteLength}` }
+    });
+  };
+  const progress: LocalModelProgress[] = [];
+  const status = await setupLocalModels(baseUrl, (update) => progress.push(update));
+
+  assert.equal(status.state, 'ready');
+  assert.deepEqual(requestedRanges, [
+    'bytes=0-16777215',
+    `bytes=16777216-${graph.byteLength - 1}`
+  ]);
+  assert.ok(progress.some((update) => update.currentPath === path && update.completedBytes === 16777216));
+  const cached = await getCachedLocalModelFile(path, baseUrl);
+  assert.ok(cached);
+  assert.equal(await sha256(new Uint8Array(await cached.arrayBuffer())), await sha256(graph));
+});
+
 test('offscreen lookup discovers one complete manifest-backed bundle without chrome.storage', async () => {
   const harness = installHarness();
   const baseUrl = 'https://models.example.test/offscreen-valid';
@@ -280,21 +327,16 @@ test('offscreen lookup discovers one complete manifest-backed bundle without chr
   );
 });
 
-test('offscreen lookup preserves complete bundles installed before manifest markers', async () => {
+test('offscreen lookup rejects bundles without a verified v2 manifest', async () => {
   const harness = installHarness();
-  const baseUrl = 'https://models.example.test/offscreen-legacy';
-  const bundle = await createBundle('offscreen-legacy');
+  const baseUrl = 'https://models.example.test/offscreen-missing-manifest';
+  const bundle = await createBundle('offscreen-missing-manifest');
   harness.setBundle(baseUrl, bundle.manifest, bundle.contents);
   await setupLocalModels(baseUrl);
   installedModelCache(harness).entries.delete(`${baseUrl}/manifest.json`);
   enterOffscreenEnvironment();
 
-  const cached = await getCachedLocalModelFile('asr/v3_ctc.onnx', baseUrl);
-  assert.ok(cached);
-  assert.deepEqual(
-    new Uint8Array(await cached.arrayBuffer()),
-    bundle.contents['asr/v3_ctc.onnx']
-  );
+  assert.equal(await getCachedLocalModelFile('asr/v3_ctc.onnx', baseUrl), null);
 });
 
 test('offscreen lookup rejects ambiguous complete caches for the same bundle URL', async () => {
@@ -362,6 +404,18 @@ test('offscreen lookup rejects a cached manifest with an invalid schema', async 
   enterOffscreenEnvironment();
 
   assert.equal(await getCachedLocalModelFile('asr/v3_ctc.onnx', baseUrl), null);
+});
+
+test('installer refuses the old quantized and distilled model bundle schema', async () => {
+  const harness = installHarness();
+  const baseUrl = 'https://models.example.test/old-bundle';
+  const bundle = await createBundle('old-bundle');
+  bundle.manifest.schema = 'babel-browser-model-bundle-v1';
+  bundle.manifest.targetBytes = 500_000_000;
+  harness.setBundle(baseUrl, bundle.manifest, bundle.contents);
+
+  await assert.rejects(setupLocalModels(baseUrl), /manifest schema must be babel-browser-model-bundle-v2/);
+  assert.deepEqual(await harness.cacheStorage.keys(), []);
 });
 
 test('a present storage area never falls back when its active pointer is missing', async () => {

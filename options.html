@@ -104,8 +104,7 @@
 <section class="local-model-panel bui-card" data-role="local-model-setup" aria-labelledby="local-model-heading">
           <h2 id="local-model-heading" class="bui-title">Local browser models</h2>
           <p class="field-help bui-hint">
-            Optional. Download Babel's compatible speech model bundle into this browser, then explicitly enable it.
-            Remote drafting remains the default.
+            Remote drafting remains the default. When enabled, models run locally for your own tasks and this browser automatically volunteers for other users' L0 drafting and transcription jobs. Their audio is downloaded from the L0 coordinator into this browser and processed locally; participation uses your device's compute power and network connection. Model files come from the separate model supplier.
           </p>
           <p class="field-help bui-hint">
 <strong>1. Download</strong> and verify the Babel model bundle in this browser.</p>
@@ -124,13 +123,14 @@
             <input id="localModelsEnabled" name="localModelsEnabled" type="checkbox" disabled="" class="bui-checkbox">
             <span>
               3. Enable downloaded local browser models
-              <span class="field-help bui-hint">Available only after the current bundle is ready and passes the audio test.</span>
+              <span class="field-help bui-hint">Available only after the current bundle is ready and passes the audio test. Enabling also starts volunteer processing of other users' audio automatically; disabling stops new volunteer work.</span>
             </span>
           </label>
           <button type="button" data-role="local-model-remove" disabled="" class="bui-button">Remove downloaded models</button>
           <progress data-role="local-model-progress" max="1" value="0" aria-label="Local model download progress" hidden="">
 </progress>
           <div data-role="local-model-status" role="status" aria-live="polite" class="bui-status">Checking local model status…</div>
+          <div data-role="volunteer-status" role="status" aria-live="polite" class="bui-status">Volunteer: checking connection…</div>
         </section>
 <div class="bui-row">
 <button data-variant="primary" type="button" data-role="save" class="bui-button">Save Settings</button>

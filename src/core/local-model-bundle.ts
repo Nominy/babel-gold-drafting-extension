@@ -1,15 +1,16 @@
 export const LOCAL_MODEL_CACHE_NAME = 'babel-gold-local-models';
 
-const MANIFEST_SCHEMA = 'babel-browser-model-bundle-v1';
-const MANIFEST_TARGET_BYTES = 500_000_000;
+const MANIFEST_SCHEMA = 'babel-browser-model-bundle-v2';
+const MANIFEST_TARGET_BYTES = 1_500_000_000;
 const POINTER_STORAGE_KEY = 'babel_gold_local_model_bundle_pointer';
 const STATUS_STORAGE_KEY = 'babel_gold_local_model_bundle_status';
-const POINTER_VERSION = 1;
+const POINTER_VERSION = 2;
 const DOWNLOAD_STALE_AFTER_MS = 30 * 60 * 1000;
+const DOWNLOAD_CHUNK_BYTES = 16 * 1024 * 1024;
 const REQUIRED_FILES: Record<string, true> = {
   'asr/v3_ctc.onnx': true,
   'asr/v3_ctc.yaml': true,
-  'punctuation/model.int8.onnx': true,
+  'punctuation/model.fp16.onnx': true,
   'punctuation/config.json': true,
   'punctuation/tokenizer.json': true,
   'punctuation/tokenizer_config.json': true,
@@ -296,23 +297,14 @@ async function findCachedBundleFileWithoutPointer(
 
     const cache = await cacheStorage.open(cacheName);
     const manifestResponse = await cache.match(fileUrl(normalizedBaseUrl, 'manifest.json'));
+    if (!manifestResponse?.ok) continue;
     let listedPaths: string[];
-    if (manifestResponse) {
-      if (!manifestResponse.ok) return null;
-      try {
-        listedPaths = validateManifest(await manifestResponse.json()).files.map((file) => file.path);
-      } catch {
-        return null;
-      }
-    } else {
-      // Bundles installed before the offscreen cache marker was introduced
-      // still contain every verified runtime file. Keep those installations
-      // usable without forcing another ~479 MB download.
-      listedPaths = Object.keys(REQUIRED_FILES);
-    }
-    if (!listedPaths.includes(path)) {
+    try {
+      listedPaths = validateManifest(await manifestResponse.json()).files.map((file) => file.path);
+    } catch {
       continue;
     }
+    if (!listedPaths.includes(path)) continue;
     let complete = true;
     for (const listedPath of listedPaths) {
       if (!(await cache.match(fileUrl(normalizedBaseUrl, listedPath)))) {
@@ -378,6 +370,54 @@ async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
   }
   const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+async function downloadModelFile(
+  url: string,
+  file: ManifestFile,
+  onChunk: (downloadedBytes: number) => Promise<void>
+): Promise<{ bytes: ArrayBuffer; headers: Headers }> {
+  if (file.bytes <= DOWNLOAD_CHUNK_BYTES) {
+    const response = await globalThis.fetch(url, { cache: 'no-store' });
+    if (!response.ok) {
+      throw new Error(`Failed to download local model file ${file.path}: HTTP ${response.status}`);
+    }
+    return { bytes: await response.arrayBuffer(), headers: new Headers(response.headers) };
+  }
+
+  const bytes = new ArrayBuffer(file.bytes);
+  const target = new Uint8Array(bytes);
+  let headers = new Headers();
+  for (let offset = 0; offset < file.bytes; offset += DOWNLOAD_CHUNK_BYTES) {
+    const end = Math.min(offset + DOWNLOAD_CHUNK_BYTES, file.bytes) - 1;
+    const response = await globalThis.fetch(url, {
+      cache: 'no-store',
+      headers: { Range: `bytes=${offset}-${end}` }
+    });
+    if (offset === 0 && response.status === 200) {
+      return { bytes: await response.arrayBuffer(), headers: new Headers(response.headers) };
+    }
+    if (response.status !== 206) {
+      throw new Error(`Failed to download local model file ${file.path}: HTTP ${response.status}`);
+    }
+    if (response.headers.get('content-range') !== `bytes ${offset}-${end}/${file.bytes}`) {
+      throw new Error(`Local model file ${file.path} returned an invalid byte range`);
+    }
+    const chunk = new Uint8Array(await response.arrayBuffer());
+    if (chunk.byteLength !== end - offset + 1) {
+      throw new Error(
+        `Local model file ${file.path} has size ${chunk.byteLength}; expected ${end - offset + 1}`
+      );
+    }
+    target.set(chunk, offset);
+    if (offset === 0) {
+      headers = new Headers(response.headers);
+    }
+    if (end + 1 < file.bytes) {
+      await onChunk(end + 1);
+    }
+  }
+  return { bytes, headers };
 }
 
 export async function getLocalModelStatus(baseUrl: string): Promise<LocalModelStatus> {
@@ -499,13 +539,22 @@ export async function setupLocalModels(
         ...beforeProgress
       });
 
-      const response = await globalThis.fetch(fileUrl(normalizedBaseUrl, file.path), {
-        cache: 'no-store'
-      });
-      if (!response.ok) {
-        throw new Error(`Failed to download local model file ${file.path}: HTTP ${response.status}`);
-      }
-      const bytes = await response.arrayBuffer();
+      const { bytes, headers } = await downloadModelFile(
+        fileUrl(normalizedBaseUrl, file.path),
+        file,
+        async (downloadedBytes) => {
+          const progress = { completedBytes: completedBytes + downloadedBytes, totalBytes, currentPath };
+          onProgress?.(progress);
+          await writeStatus({
+            baseUrl: normalizedBaseUrl,
+            operationId,
+            startedAt,
+            updatedAt: Date.now(),
+            state: 'downloading',
+            ...progress
+          });
+        }
+      );
       if (bytes.byteLength !== file.bytes) {
         throw new Error(
           `Local model file ${file.path} has size ${bytes.byteLength}; expected ${file.bytes}`
@@ -516,8 +565,8 @@ export async function setupLocalModels(
         throw new Error(`Local model file ${file.path} failed SHA-256 verification`);
       }
 
-      const headers = new Headers(response.headers);
       headers.delete('content-range');
+      headers.delete('content-length');
       await stageCache.put(
         fileUrl(normalizedBaseUrl, file.path),
         new Response(bytes, { status: 200, headers })
