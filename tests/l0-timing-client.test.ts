@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { generateL0Timing, getL0QueueEndpoint, getL0TimingEndpoint, parseL0TimingResponse } from '../src/core/l0-timing-client';
+import { generateL0Timing, getL0QueueEndpoint, getL0TimingEndpoint, lookupL0Timing, parseL0TimingResponse } from '../src/core/l0-timing-client';
 import { DEFAULT_SETTINGS } from '../src/core/settings';
 import type { CapturedAudioTrack, TranscriptJob } from '../src/core/types';
 
@@ -31,9 +31,12 @@ const timingResponse = {
   tracks: [
     {
       lane: 'speaker-1',
-      tokens: [{ id: 'word-1', text: 'One', startSeconds: 0, endSeconds: 0.4 }]
+      pcmSha256: 'a'.repeat(64),
+      sampleRate: 16000,
+      tokens: [{ id: 'word-1', text: 'One', startSeconds: 0, endSeconds: 0.4 }],
+      segments: [{ id: 'segment-1', startSeconds: 0, endSeconds: 0.5, startSample: 0, endSample: 8000, sampleRate: 16000 }]
     },
-    { lane: 'speaker-2', tokens: [] }
+    { lane: 'speaker-2', tokens: [], segments: [], pcmSha256: 'b'.repeat(64), sampleRate: 16000 }
   ],
   summary: { tokenCount: 1 },
   models: { asr: 'whisper' }
@@ -64,7 +67,10 @@ test('generateL0Timing derives exactly two WAV lanes when the transcript current
     if (init?.method === 'POST') {
       requestUrl = String(url);
       requestInit = init;
-      return new Response(JSON.stringify(timingResponse), { status: 200 });
+      return new Response(JSON.stringify({
+        ...timingResponse,
+        accessToken: new Headers(init.headers).get('Authorization')?.slice(7)
+      }), { status: 200 });
     }
     return new Response(null, { status: 404 });
   }) as typeof fetch;
@@ -92,6 +98,7 @@ test('generateL0Timing derives exactly two WAV lanes when the transcript current
     });
     assert.ok(form.get('audio:1') instanceof File);
     assert.ok(form.get('audio:2') instanceof File);
+    assert.match(String(new Headers(requestInit.headers).get('Authorization')), /^Bearer [A-Za-z0-9_-]{43}$/);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -105,10 +112,12 @@ test('timing request reports changing queue state and stops polling after POST s
   const runningGate = Promise.withResolvers<void>();
   const pollWaiters: Array<() => void> = [];
   let requestId = '';
+  let postHeaders: HeadersInit | undefined;
   let pollCount = 0;
   globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
     if (init?.method === 'POST') {
       requestId = String(new Headers(init.headers).get('X-Babel-Request-Id'));
+      postHeaders = init.headers;
       return await postGate.promise;
     }
     pollCount += 1;
@@ -155,11 +164,37 @@ test('timing request reports changing queue state and stops polling after POST s
         { status: 'running', position: 0 }
       ]
     );
-    postGate.resolve(new Response(JSON.stringify(timingResponse), { status: 200 }));
+    postGate.resolve(new Response(JSON.stringify({
+      ...timingResponse,
+      accessToken: new Headers(postHeaders).get('Authorization')?.slice(7)
+    }), { status: 200 }));
     await pending;
     const settledPollCount = pollCount;
     await Promise.resolve();
     assert.equal(pollCount, settledPollCount);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('timing lookup reuses the task token and returns cached segmentation', async () => {
+  const originalFetch = globalThis.fetch;
+  const taskId = canonicalTaskId;
+  let uploadToken = '';
+  globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+    if (String(url).endsWith('/v1/transcribe')) {
+      uploadToken = String(new Headers(init?.headers).get('Authorization'));
+      return new Response(JSON.stringify({ ...timingResponse, accessToken: uploadToken.slice(7) }));
+    }
+    if (String(url).includes('/v1/queue/')) return new Response(null, { status: 404 });
+    assert.match(String(url), /\/v1\/timing\/lookup$/);
+    assert.deepEqual(JSON.parse(String(init?.body)), { taskId });
+    assert.equal(new Headers(init?.headers).get('Authorization'), uploadToken);
+    return new Response(JSON.stringify(timingResponse), { status: 200 });
+  }) as typeof fetch;
+  try {
+    await generateL0Timing(DEFAULT_SETTINGS, singleLaneJob, audioTracks);
+    assert.deepEqual(await lookupL0Timing(DEFAULT_SETTINGS, taskId), timingResponse);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -185,7 +220,8 @@ test('timing response parsing accepts silent lanes and rejects invalid or mismat
           tracks: [
             {
               lane: 'speaker-1',
-              tokens: [{ id: 'bad', text: 'bad', startSeconds: -0.1, endSeconds: 0.2 }]
+              tokens: [{ id: 'bad', text: 'bad', startSeconds: -0.1, endSeconds: 0.2 }],
+              segments: timingResponse.tracks[0].segments
             },
             timingResponse.tracks[1]
           ]

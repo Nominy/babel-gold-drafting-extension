@@ -4,7 +4,7 @@ import * as ort from 'onnxruntime-web/webgpu';
 import { CHECKPOINT_FRONTEND_BF16 } from './gigaam-frontend-buffers';
 import { denoiseForActivity } from './ffmpeg-audio-denoise';
 import { highpassSource, prepareRawPcm16, resampleToPcm16 } from './ffmpeg-audio-raw';
-import { prepareL0Tracks, type PreparedL0Track } from './l0-client';
+import type { PreparedL0Track } from './l0-client';
 import { getCachedLocalModelFile } from './local-model-bundle';
 import { LOCAL_MODEL_BASE_URL } from './settings';
 import {
@@ -1382,29 +1382,44 @@ export async function generateLocalL0Timing(
   _settings: ExtensionSettings,
   job: TranscriptJob,
   audioTracks: CapturedAudioTrack[],
-  callbacks?: L0TimingRequestCallbacks
+  callbacks?: L0TimingRequestCallbacks,
+  taskIdOverride?: string
 ): Promise<L0TimingResponse> {
   const startedAt = performance.now();
   const prepared = prepareL0TimingTracks(job, audioTracks);
-  const taskId = buildCanonicalTaskIdentity(job);
+  const taskId = taskIdOverride ?? buildCanonicalTaskIdentity(job);
   const requestId = `browser-local:${taskId}`;
   emitTimingStatus(callbacks, { requestId, status: 'preparing' });
   emitTimingStatus(callbacks, { requestId, status: 'running', position: 0, queuedCount: 0 });
   const tracks: L0TimingResponse['tracks'] = [];
   for (const track of prepared) {
-    let result: { durationSeconds: number; tokens: LocalWord[] };
+    let result: SampleRecognition;
+    let segments: ActivitySegment[];
+    let pcmSha256: string;
     try {
-      const samples = await decodeAndResampleAudio(track.audio.blob, null);
-      result = await recognizeActivitySegments(samples, segmentSamplesByActivity(samples));
+      const preparedAudio = await prepareDraftAudio(track.audio.blob);
+      pcmSha256 = preparedAudio.pcmSha256;
+      segments = segmentSamplesByActivity(preparedAudio.activity);
+      result = await recognizeActivitySegments(preparedAudio.raw, segments);
     } catch (error) {
       throw actionableError(`timing lane "${track.lane}"`, error);
     }
     tracks.push({
       lane: track.lane,
+      pcmSha256,
+      sampleRate: SAMPLE_RATE,
       tokens: result.tokens.map((token, tokenIndex) => ({
         id: `${taskId}:${track.lane}:${tokenIndex}`,
         ...token
-      }))
+      })),
+      segments: await Promise.all(segments.map(async ({ startSample, endSample }) => ({
+        id: await draftRowId(taskId, track.lane, pcmSha256, startSample, endSample),
+        startSeconds: Number((startSample / SAMPLE_RATE).toFixed(6)),
+        endSeconds: Number((endSample / SAMPLE_RATE).toFixed(6)),
+        startSample,
+        endSample,
+        sampleRate: SAMPLE_RATE
+      })))
     });
   }
   const tokenCount = tracks.reduce((total, track) => total + track.tokens.length, 0);
@@ -1512,48 +1527,66 @@ async function renderActivityGroups(
   return rows;
 }
 
-export async function generateLocalL0Draft(
-  _settings: ExtensionSettings,
-  job: TranscriptJob,
-  audioTracks: CapturedAudioTrack[]
+export async function generateLocalL0DraftFromTiming(
+  timing: L0TimingResponse,
+  preserveRows?: TranscriptJob['rows']
 ): Promise<L0DraftResponse> {
   const startedAt = performance.now();
-  const transcriptLanes = new Set(
-    job.rows.map((row) => row.speakerKey.trim().toLocaleLowerCase()).filter(Boolean)
-  );
-  const prepared =
-    transcriptLanes.size === 1
-      ? prepareL0TimingTracks(job, audioTracks)
-      : prepareL0Tracks(job, audioTracks);
-  const rows: Array<{ id: string; lane: string; startSeconds: number; endSeconds: number; text: string }> = [];
-  let wordCount = 0;
-  for (let laneIndex = 0; laneIndex < prepared.length; laneIndex += 1) {
-    const track = prepared[laneIndex];
-    let transcript: SampleRecognition;
-    let segments: ActivitySegment[];
-    let pcmSha256: string;
-    try {
-      const preparedAudio = await prepareDraftAudio(track.audio.blob);
-      pcmSha256 = preparedAudio.pcmSha256;
-      segments = segmentSamplesByActivity(preparedAudio.activity);
-      transcript = await recognizeActivitySegments(preparedAudio.raw, segments);
-    } catch (error) {
-      throw actionableError(`draft lane "${track.lane}"`, error);
-    }
-    const laneRows = await renderActivityGroups(transcript.tokens, segments);
-    for (let groupIndex = 0; groupIndex < laneRows.length; groupIndex += 1) {
-      const row = laneRows[groupIndex];
-      wordCount += row.wordCount;
+  if (preserveRows) {
+    const rows: L0DraftResponse['rows'] = [];
+    for (const row of preserveRows) {
+      const track = timing.tracks.find((candidate) => candidate.lane === row.speakerKey);
+      if (!track || row.startSeconds === null || row.endSeconds === null) {
+        throw new Error(`Preserved row ${row.rowId} is outside the cached timing lanes.`);
+      }
+      const words = track.tokens.filter((token) => {
+        const midpoint = (token.startSeconds + token.endSeconds) / 2;
+        return midpoint >= row.startSeconds! && midpoint < row.endSeconds!;
+      }).map((token) => token.text);
+      if (!words.length) throw new Error(`Preserved row ${row.rowId} has no cached ASR words.`);
+      const labels = await predictPunctuation(words);
       rows.push({
-        id: await draftRowId(job.jobId, track.lane, pcmSha256, row.startSample, row.endSample),
+        id: row.rowId,
+        lane: row.speakerKey,
+        startSeconds: row.startSeconds,
+        endSeconds: row.endSeconds,
+        text: renderBoundaryLabels(words, labels).text
+      });
+    }
+    return {
+      rows,
+      summary: { taskId: timing.taskId, trackCount: timing.tracks.length, rowCount: rows.length, provider: 'browser-local' },
+      models: modelsSummary()
+    };
+  }
+  const rows: L0DraftResponse['rows'] = [];
+  let wordCount = 0;
+  for (const track of timing.tracks) {
+    const groups = groupWordsByActivitySegments(
+      track.tokens,
+      track.segments.map(({ startSample, endSample }) => ({ startSample, endSample }))
+    );
+    let sentenceStart = true;
+    for (const group of groups) {
+      const lexicalWords = track.tokens.slice(group.wordStart, group.wordEnd).map((word) => word.text);
+      const labels = await predictPunctuation(lexicalWords);
+      const rendered = renderBoundaryLabels(lexicalWords, labels, sentenceStart);
+      sentenceStart = rendered.sentenceStart;
+      const segment = track.segments.find(
+        (candidate) => candidate.startSample === group.startSample && candidate.endSample === group.endSample
+      );
+      if (!segment) throw new Error(`Timing segment missing for lane "${track.lane}".`);
+      wordCount += group.wordEnd - group.wordStart;
+      rows.push({
+        id: segment.id,
         lane: track.lane,
-        startSeconds: Number((row.startSample / SAMPLE_RATE).toFixed(6)),
-        endSeconds: Number((row.endSample / SAMPLE_RATE).toFixed(6)),
-        text: row.text
+        startSeconds: segment.startSeconds,
+        endSeconds: segment.endSeconds,
+        text: rendered.text
       });
     }
   }
-  const laneOrder = new Map(prepared.map((track, index) => [track.lane, index]));
+  const laneOrder = new Map(timing.tracks.map((track, index) => [track.lane, index]));
   rows.sort(
     (left, right) =>
       left.startSeconds - right.startSeconds ||
@@ -1566,15 +1599,15 @@ export async function generateLocalL0Draft(
   return {
     rows,
     summary: {
-      taskId: job.jobId,
-      trackCount: prepared.length,
+      taskId: timing.taskId,
+      trackCount: timing.tracks.length,
       rowCount: rows.length,
       wordCount,
       latencyMs: Math.round(performance.now() - startedAt),
       provider: 'browser-local'
     },
     models: modelsSummary()
-  } as L0DraftResponse;
+  };
 }
 
 /** Pure deterministic hooks used by the focused browser-DSP contract tests. */

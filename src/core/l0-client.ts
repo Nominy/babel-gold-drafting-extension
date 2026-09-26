@@ -1,8 +1,9 @@
 import { normalizeL0CustomBaseUrl } from './settings';
+import { timingAuthorization } from './l0-timing-client';
+import { buildCanonicalTaskIdentity } from './transcript';
 import type {
   CapturedAudioTrack,
   ExtensionSettings,
-  L0DraftPayload,
   L0DraftResponse,
   L0DraftRow,
   TranscriptJob
@@ -17,9 +18,6 @@ export type PreparedL0Track = {
   audio: CapturedAudioTrack;
 };
 
-function normalizedLane(value: string | undefined): string {
-  return typeof value === 'string' ? value.trim().toLocaleLowerCase() : '';
-}
 
 function parseErrorMessage(status: number, payload: unknown): string {
   if (payload && typeof payload === 'object') {
@@ -92,49 +90,6 @@ function parseL0DraftResponse(payload: unknown): L0DraftResponse {
   return payload as L0DraftResponse;
 }
 
-export function prepareL0Tracks(job: TranscriptJob, audioTracks: CapturedAudioTrack[]): PreparedL0Track[] {
-  const laneByKey = new Map<string, string>();
-  for (const row of job.rows) {
-    const key = normalizedLane(row.speakerKey);
-    if (key && !laneByKey.has(key)) {
-      laneByKey.set(key, row.speakerKey.trim());
-    }
-  }
-  // A waveform remains a speaker lane even when it has no transcript rows.
-  // Preserve row labels where present, and discover missing lanes from audio.
-  if (laneByKey.size < 2) {
-    for (const track of audioTracks) {
-      // Newly created rows expose the visible label in the isolated world.
-      const identities = [track.trackLabel, track.speakerKey].filter((value): value is string => Boolean(value?.trim()));
-      if (identities.some((value) => laneByKey.has(normalizedLane(value)))) continue;
-      const lane = identities[0]?.trim();
-      if (lane) laneByKey.set(normalizedLane(lane), lane);
-    }
-  }
-  const lanes = Array.from(laneByKey.values());
-  if (lanes.length !== 2) {
-    throw new Error(`L0 drafting requires exactly two transcript speaker lanes; found ${lanes.length}.`);
-  }
-
-  const usedTracks = new Set<CapturedAudioTrack>();
-  return lanes.map((lane, index) => {
-    const key = normalizedLane(lane);
-    const audio = audioTracks.find(
-      (track) =>
-        !usedTracks.has(track) &&
-        (normalizedLane(track.speakerKey) === key || normalizedLane(track.trackLabel) === key)
-    );
-    if (!audio) {
-      throw new Error(`L0 drafting could not capture a distinct audio track for speaker lane "${lane}".`);
-    }
-    usedTracks.add(audio);
-    return {
-      lane,
-      fieldName: index === 0 ? 'audio:1' : 'audio:2',
-      audio
-    };
-  });
-}
 
 export async function assertL0WavAudio(track: PreparedL0Track): Promise<void> {
   if (!track.audio.blob.size) {
@@ -149,53 +104,33 @@ export async function assertL0WavAudio(track: PreparedL0Track): Promise<void> {
     throw new Error(`L0 audio track for "${track.lane}" is not a WAV file.`);
   }
 }
-export function createL0Payload(job: TranscriptJob, tracks: PreparedL0Track[]): L0DraftPayload {
-  return {
-    taskId: job.jobId,
-    tracks: [
-      { lane: tracks[0].lane, fieldName: tracks[0].fieldName },
-      { lane: tracks[1].lane, fieldName: tracks[1].fieldName }
-    ]
-  };
-}
 
 export async function generateL0SegmentDraft(
   settings: ExtensionSettings,
   taskId: string,
-  row: TranscriptJob['rows'][number],
-  tracks: PreparedL0Track[]
+  row: TranscriptJob['rows'][number]
 ): Promise<string> {
-  if (tracks.length !== 2 || !tracks.some((track) => track.lane === row.speakerKey)) {
-    throw new Error('L0 segment drafting requires two audio tracks including the target speaker lane.');
-  }
-  await Promise.all(tracks.map(assertL0WavAudio));
-  const body = new FormData();
-  body.set('payload', JSON.stringify({
-    taskId,
-    tracks: tracks.map((track) => ({ lane: track.lane, fieldName: track.fieldName })),
-    options: {
-      preserveRows: [{
-        rowId: row.rowId,
-        speakerKey: row.speakerKey,
-        startSeconds: row.startSeconds,
-        endSeconds: row.endSeconds,
-        text: '',
-        index: 0
-      }]
-    }
-  }));
-  for (const track of tracks) {
-    body.append(track.fieldName, track.audio.blob, `${track.fieldName.replace(':', '-')}.wav`);
-  }
-
   const endpoint = getL0DraftEndpoint(settings);
   const response = await fetch(endpoint, {
     method: 'POST',
     headers: {
       Accept: 'application/json',
-      'X-Babel-Local-Engine': '1'
+      'Content-Type': 'application/json',
+      ...await timingAuthorization(taskId)
     },
-    body
+    body: JSON.stringify({
+      taskId,
+      options: {
+        preserveRows: [{
+          rowId: row.rowId,
+          speakerKey: row.speakerKey,
+          startSeconds: row.startSeconds,
+          endSeconds: row.endSeconds,
+          text: '',
+          index: 0
+        }]
+      }
+    })
   });
   const responsePayload = await parseResponsePayload(response);
   if (!response.ok) {
@@ -215,27 +150,21 @@ export function getL0DraftEndpoint(settings: ExtensionSettings): string {
 
 export async function generateL0Draft(
   settings: ExtensionSettings,
-  job: TranscriptJob,
-  audioTracks: CapturedAudioTrack[]
+  job: TranscriptJob
 ): Promise<L0DraftResponse> {
-  const tracks = prepareL0Tracks(job, audioTracks);
-  await Promise.all(tracks.map(assertL0WavAudio));
-  const payload = createL0Payload(job, tracks);
-  const body = new FormData();
-  body.set('payload', JSON.stringify(payload));
-  for (const track of tracks) {
-    body.append(track.fieldName, track.audio.blob, `${track.fieldName.replace(':', '-')}.wav`);
-  }
-
-  const headers: Record<string, string> = {
-    Accept: 'application/json',
-    'X-Babel-Local-Engine': '1'
-  };
-
+  const taskId = buildCanonicalTaskIdentity(job);
   const endpoint = getL0DraftEndpoint(settings);
   let response: Response;
   try {
-    response = await fetch(endpoint, { method: 'POST', headers, body });
+    response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        ...await timingAuthorization(taskId)
+      },
+      body: JSON.stringify({ taskId })
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`Could not reach L0 drafting endpoint ${endpoint}: ${message}`);

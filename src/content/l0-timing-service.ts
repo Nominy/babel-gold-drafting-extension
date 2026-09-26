@@ -1,13 +1,15 @@
 import { captureAudioTracksForDrafting } from '../core/audio-cues';
 import { AUDIO_ENABLE_CAPTURE_MESSAGE_TYPE } from '../core/audio-intercept-protocol';
-import { generateL0Timing, prepareL0TimingTracks, type L0TimingQueueStatus, type L0TimingRequestCallbacks } from '../core/l0-timing-client';
+import { generateL0Timing, lookupL0Timing, prepareL0TimingTracks, type L0TimingQueueStatus, type L0TimingRequestCallbacks } from '../core/l0-timing-client';
 import { generateLocalL0Timing } from '../core/local-model-client';
 import { loadSettings } from '../core/settings';
 import { buildCanonicalTaskIdentity, captureTranscriptJob } from '../core/transcript';
 import type { CapturedAudioTrack, ExtensionSettings, L0TimingResponse, TranscriptJob } from '../core/types';
 import {
+  getL0TimingAvailability,
   publishL0TimingAvailability,
-  setL0TimingRetryHandler
+  setL0TimingRetryHandler,
+  subscribeL0TimingAvailability
 } from './l0-timing-availability';
 
 export const L0_TIMING_UPDATE_MESSAGE_TYPE = 'babel-gold-drafting:l0-timing-update';
@@ -51,6 +53,7 @@ export interface L0TimingServiceDependencies {
   currentTaskId: () => string;
   captureAudio: () => Promise<CapturedAudioTrack[]>;
   getSettings: () => Promise<ExtensionSettings>;
+  lookupTiming: (settings: ExtensionSettings, taskId: string) => Promise<L0TimingResponse | null>;
   requestTiming: (
     settings: ExtensionSettings,
     job: TranscriptJob,
@@ -61,16 +64,15 @@ export interface L0TimingServiceDependencies {
     type: typeof L0_TIMING_UPDATE_MESSAGE_TYPE;
     version: 1;
     taskId: string;
-    tracks: L0TimingResponse['tracks'];
+    tracks: Array<Pick<L0TimingResponse['tracks'][number], 'lane' | 'tokens'>>;
   }) => void;
   now: () => number;
   schedule: (callback: () => void, delayMs: number) => void;
 }
 
 export function isUsableL0TimingJob(job: TranscriptJob): boolean {
-  if (!job.jobId.trim() || job.rows.length === 0) {
-    return false;
-  }
+  if (!job.jobId.trim()) return false;
+  if (!job.rows.length) return job.taskScoped === true;
   return job.rows.some((row) => Boolean(row.speakerKey.trim()));
 }
 
@@ -172,6 +174,14 @@ export class L0TimingService {
   private async runAttempt(job: TranscriptJob, taskId: string, state: TimingTaskState): Promise<void> {
     try {
       const settings = await this.dependencies.getSettings();
+      if (!settings.localModelsEnabled) {
+        const cached = await this.dependencies.lookupTiming(settings, taskId);
+        if (cached) {
+          if (this.isTaskCurrent(taskId)) this.publishTiming(taskId, cached, state);
+          return;
+        }
+      }
+      if (!this.isTaskCurrent(taskId)) return;
       const audioTracks = (await this.dependencies.captureAudio()).filter((track) => track.blob.size > 0);
       if (!this.isTaskCurrent(taskId)) {
         return;
@@ -214,14 +224,7 @@ export class L0TimingService {
       if (!this.isTaskCurrent(taskId) || response.taskId !== taskId) {
         return;
       }
-      this.dependencies.publish({
-        type: L0_TIMING_UPDATE_MESSAGE_TYPE,
-        version: 1,
-        taskId,
-        tracks: response.tracks
-      });
-      publishL0TimingAvailability({ taskId, status: 'available' });
-      state.completed = true;
+      this.publishTiming(taskId, response, state);
     } catch (error) {
       if (!this.isTaskCurrent(taskId)) return;
       console.error(
@@ -232,6 +235,17 @@ export class L0TimingService {
     } finally {
       state.inFlight = false;
     }
+  }
+
+  private publishTiming(taskId: string, response: L0TimingResponse, state: TimingTaskState): void {
+    this.dependencies.publish({
+      type: L0_TIMING_UPDATE_MESSAGE_TYPE,
+      version: 1,
+      taskId,
+      tracks: response.tracks.map(({ lane, tokens }) => ({ lane, tokens }))
+    });
+    publishL0TimingAvailability({ taskId, status: 'available' });
+    state.completed = true;
   }
 
   retryCurrentTask(): boolean {
@@ -263,12 +277,42 @@ export function enableL0TimingAudioCapture(): void {
   }
 }
 
+let activeTimingService: L0TimingService | null = null;
+
+export function waitForCurrentL0Timing(job: TranscriptJob, settings: ExtensionSettings): Promise<void> {
+  const service = activeTimingService;
+  if (!service) throw new Error('L0 timing service is not initialized.');
+  const taskId = buildCanonicalTaskIdentity(job);
+  const available = getL0TimingAvailability();
+  if (available?.taskId === taskId && (
+    available.status === 'available' ||
+    (!settings.localModelsEnabled && (available.status === 'queued' || available.status === 'running'))
+  )) return Promise.resolve();
+  if (available?.taskId === taskId && available.status === 'unavailable') {
+    return Promise.reject(new Error(`L0 timing for task ${taskId} is unavailable.`));
+  }
+  return new Promise<void>((resolve, reject) => {
+    const unsubscribe = subscribeL0TimingAvailability((availability) => {
+      if (availability.taskId !== taskId) return;
+      if (availability.status === 'available' ||
+          (!settings.localModelsEnabled && (availability.status === 'queued' || availability.status === 'running')) ||
+          availability.status === 'unavailable') {
+        unsubscribe();
+        if (availability.status !== 'unavailable') resolve();
+        else reject(new Error(`L0 timing for task ${taskId} is unavailable.`));
+      }
+    });
+    service.onLifecycleOpportunity();
+  });
+}
+
 export function registerL0TimingService(): L0TimingService {
   const service = new L0TimingService({
     captureTranscript: () => captureTranscriptJob(),
     currentTaskId: () => buildCanonicalTaskIdentity(captureTranscriptJob()),
     captureAudio: () => captureAudioTracksForDrafting(),
     getSettings: () => loadSettings(),
+    lookupTiming: lookupL0Timing,
     requestTiming: requestConfiguredL0Timing,
     publish: (message) => window.postMessage(message, '*'),
     now: () => Date.now(),
@@ -277,5 +321,6 @@ export function registerL0TimingService(): L0TimingService {
     }
   });
   setL0TimingRetryHandler(() => service.retryCurrentTask());
+  activeTimingService = service;
   return service;
 }

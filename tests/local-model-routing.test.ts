@@ -104,7 +104,7 @@ test('draft routing preserves the remote path by default and surfaces an opted-i
     local: async () => draftResponse
   };
 
-  assert.equal(await generateConfiguredL0Draft(settings, job, tracks, successGenerators), draftResponse);
+  assert.equal(await generateConfiguredL0Draft(settings, job, successGenerators), draftResponse);
   assert.equal(remoteCalls, 1);
 
   const localError = new Error('local inference failed');
@@ -115,20 +115,18 @@ test('draft routing preserves the remote path by default and surfaces an opted-i
     }
   };
   await assert.rejects(
-    generateConfiguredL0Draft(localSettings, job, tracks, failureGenerators),
+    generateConfiguredL0Draft(localSettings, job, failureGenerators),
     (error) => error === localError
   );
   assert.equal(remoteCalls, 1);
 });
 
-test('segment routing keeps the existing prepared-track remote call when disabled', async () => {
+test('remote segment routing does not require captured audio', async () => {
   let localCalls = 0;
   let receivedTaskId = '';
-  let receivedTrackCount = 0;
   const generators: L0SegmentGenerators = {
-    remote: async (_settings, taskId, row, preparedTracks) => {
+    remote: async (_settings, taskId, row) => {
       receivedTaskId = taskId;
-      receivedTrackCount = preparedTracks.length;
       assert.equal(row, targetRow);
       return 'remote text';
     },
@@ -143,7 +141,6 @@ test('segment routing keeps the existing prepared-track remote call when disable
     'remote text'
   );
   assert.equal(receivedTaskId, 'task-1');
-  assert.equal(receivedTrackCount, 2);
   assert.equal(localCalls, 0);
 });
 

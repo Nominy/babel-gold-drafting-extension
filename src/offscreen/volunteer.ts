@@ -3,7 +3,8 @@ import { LOCAL_MODEL_BASE_URL, PUBLIC_L0_BASE_URL, normalizeSettings } from '../
 import { getCachedLocalModelFile } from '../core/local-model-bundle';
 import type { CapturedAudioTrack, ExtensionSettings, L0DraftResponse, L0TimingResponse, TranscriptJob, TranscriptRow } from '../core/types';
 import type { VolunteerStatus } from '../core/volunteer-protocol';
-import { generateLocalL0Draft, generateLocalL0SegmentDraft, generateLocalL0Timing } from '../core/local-model-runtime';
+import { generateLocalL0DraftFromTiming, generateLocalL0Timing } from '../core/local-model-runtime';
+import { parseL0TimingResponse } from '../core/l0-timing-client';
 
 const SCHEMA = 'babel-browser-model-bundle-v2';
 const CONTROL_REQUEST_TIMEOUT_MS = 45_000;
@@ -12,21 +13,25 @@ const IDLE_POLL_MS = 3_000;
 const MAX_BACKOFF_MS = 30_000;
 
 type Credentials = { workerId: string; token: string };
-type Lease = {
-  jobId: string;
-  leaseToken: string;
-  operation: 'draft' | 'transcribe';
-  payload: { taskId: string; tracks: Array<{ lane: string; fieldName: string }>; options?: Record<string, unknown> };
+type LeaseBase = { jobId: string; leaseToken: string };
+type TranscribeLease = LeaseBase & {
+  operation: 'transcribe';
+  payload: { taskId: string; tracks: Array<{ lane: string; fieldName: string }> };
   audio: Array<{ fieldName: string; url: string }>;
 };
+type DraftLease = LeaseBase & {
+  operation: 'draft';
+  payload: { taskId: string; timing: L0TimingResponse; options?: Record<string, unknown> };
+  audio: [];
+};
+type Lease = TranscribeLease | DraftLease;
 
 export interface VolunteerDependencies {
   fetch: (url: string, init: RequestInit) => Promise<Response>;
   settings: () => Promise<ExtensionSettings>;
   ready: () => Promise<boolean>;
   runExclusive: <T>(action: () => Promise<T>) => Promise<T>;
-  draft: typeof generateLocalL0Draft;
-  segment: typeof generateLocalL0SegmentDraft;
+  draft: typeof generateLocalL0DraftFromTiming;
   transcribe: typeof generateLocalL0Timing;
   wait: (ms: number, signal: AbortSignal) => Promise<void>;
 }
@@ -46,8 +51,7 @@ export const defaultVolunteerDependencies: VolunteerDependencies = {
   settings: loadVolunteerSettings,
   ready: async () => Boolean(await getCachedLocalModelFile('asr/v3_ctc.yaml', LOCAL_MODEL_BASE_URL)),
   runExclusive: (action) => action(),
-  draft: generateLocalL0Draft,
-  segment: generateLocalL0SegmentDraft,
+  draft: generateLocalL0DraftFromTiming,
   transcribe: generateLocalL0Timing,
   wait: (ms, signal) => new Promise<void>((resolve) => {
     if (signal.aborted) { resolve(); return; }
@@ -76,8 +80,16 @@ export function parseLease(value: unknown): Lease {
       typeof value.leaseToken !== 'string' || !value.leaseToken ||
       (value.operation !== 'draft' && value.operation !== 'transcribe') ||
       !record(value.payload) || typeof value.payload.taskId !== 'string' || !value.payload.taskId ||
-      !Array.isArray(value.payload.tracks) || value.payload.tracks.length !== 2 ||
-      !Array.isArray(value.audio) || value.audio.length !== 2) throw new Error('Invalid volunteer lease.');
+      !Array.isArray(value.audio)) throw new Error('Invalid volunteer lease.');
+  if (value.operation === 'draft') {
+    if (value.audio.length || (value.payload.options !== undefined && !record(value.payload.options))) {
+      throw new Error('A punctuation lease cannot include audio.');
+    }
+    parseL0TimingResponse(value.payload.timing, value.payload.taskId);
+    return value as DraftLease;
+  }
+  if (!Array.isArray(value.payload.tracks) || value.payload.tracks.length !== 2 ||
+      value.audio.length !== 2 || value.payload.options !== undefined) throw new Error('Invalid transcription lease.');
   const tracks = value.payload.tracks;
   const audio = value.audio;
   if (!tracks.every((track) => record(track) && typeof track.lane === 'string' && !!track.lane &&
@@ -87,22 +99,23 @@ export function parseLease(value: unknown): Lease {
       !audio.every((entry) => record(entry) && typeof entry.fieldName === 'string' &&
         typeof entry.url === 'string' && entry.url === `/v1/jobs/${encodeURIComponent(value.jobId as string)}/audio/${encodeURIComponent(entry.fieldName as string)}`) ||
       new Set(audio.map((entry) => entry.fieldName)).size !== 2 ||
-      !tracks.every((track) => audio.some((entry) => entry.fieldName === track.fieldName)) ||
-      (value.payload.options !== undefined && !record(value.payload.options))) throw new Error('Invalid volunteer lease tracks or audio URLs.');
-  return value as Lease;
+      !tracks.every((track) => audio.some((entry) => entry.fieldName === track.fieldName))) {
+    throw new Error('Invalid transcription lease tracks or audio URLs.');
+  }
+  return value as TranscribeLease;
 }
 
-function preserveRows(lease: Lease): TranscriptRow[] | null {
+function preserveRows(lease: DraftLease): TranscriptRow[] | undefined {
   const options = lease.payload.options;
-  if (options === undefined) return null;
+  if (options === undefined) return undefined;
   if (Object.keys(options).some((key) => key !== 'preserveRows' && key !== 'preprocessing') ||
       (options.preprocessing !== undefined && options.preprocessing !== 'raw')) {
     throw new Error('Unsupported draft options for browser inference.');
   }
-  if (options.preserveRows === undefined) return null;
+  if (options.preserveRows === undefined) return undefined;
   if (!Array.isArray(options.preserveRows) || !options.preserveRows.length ||
       !options.preserveRows.every((row) => record(row) && typeof row.rowId === 'string' && !!row.rowId &&
-        typeof row.speakerKey === 'string' && lease.payload.tracks.some((track) => track.lane === row.speakerKey) &&
+        typeof row.speakerKey === 'string' && lease.payload.timing.tracks.some((track) => track.lane === row.speakerKey) &&
         typeof row.startSeconds === 'number' && Number.isFinite(row.startSeconds) && row.startSeconds >= 0 &&
         typeof row.endSeconds === 'number' && Number.isFinite(row.endSeconds) && row.endSeconds > row.startSeconds &&
         typeof row.text === 'string' && Number.isSafeInteger(row.index) && (row.index as number) >= 0)) {
@@ -110,7 +123,6 @@ function preserveRows(lease: Lease): TranscriptRow[] | null {
   }
   return options.preserveRows as TranscriptRow[];
 }
-
 async function request(dependencies: VolunteerDependencies, path: string, init: RequestInit, signal: AbortSignal): Promise<Response> {
   return dependencies.fetch(`${PUBLIC_L0_BASE_URL}${path}`, {
     ...init,
@@ -123,6 +135,12 @@ async function request(dependencies: VolunteerDependencies, path: string, init: 
 }
 
 async function executeLease(lease: Lease, settings: ExtensionSettings, dependencies: VolunteerDependencies, signal: AbortSignal): Promise<L0DraftResponse | L0TimingResponse> {
+  if (lease.operation === 'draft') {
+    return dependencies.runExclusive(async () => {
+      if (signal.aborted) throw new Error('Volunteer participation stopped.');
+      return dependencies.draft(lease.payload.timing, preserveRows(lease));
+    });
+  }
   const prepared = await Promise.all(lease.payload.tracks.map(async (track): Promise<PreparedL0Track> => {
     const entry = lease.audio.find((audio) => audio.fieldName === track.fieldName)!;
     const response = await request(dependencies, entry.url, { headers: { Authorization: `Bearer ${lease.leaseToken}` } }, signal);
@@ -147,32 +165,7 @@ async function executeLease(lease: Lease, settings: ExtensionSettings, dependenc
         startSeconds: null, endSeconds: null, text: '', index
       }))
     };
-    if (lease.operation === 'transcribe') {
-      if (lease.payload.options !== undefined) throw new Error('Unsupported transcription options for browser inference.');
-      const timing = await dependencies.transcribe(settings, job, prepared.map((track) => track.audio));
-      return {
-        ...timing, taskId: lease.payload.taskId,
-        tracks: timing.tracks.map((track) => ({
-          ...track, tokens: track.tokens.map((token, index) => ({
-            ...token, id: `${lease.payload.taskId}:${track.lane}:${index}`
-          }))
-        })),
-        summary: { ...timing.summary, taskId: lease.payload.taskId }
-      };
-    }
-    const rows = preserveRows(lease);
-    if (!rows) return dependencies.draft(settings, job, prepared.map((track) => track.audio));
-    const output: L0DraftResponse['rows'] = [];
-    for (const row of rows) {
-      const text = (await dependencies.segment(settings, lease.payload.taskId, row, prepared)).trim();
-      if (!text) throw new Error(`Local segment returned no text for preserved row ${row.rowId}.`);
-      output.push({ id: row.rowId, lane: row.speakerKey, startSeconds: row.startSeconds!, endSeconds: row.endSeconds!, text });
-    }
-    return {
-      rows: output,
-      summary: { taskId: lease.payload.taskId, trackCount: 2, rowCount: output.length, provider: 'browser-local' },
-      models: { provider: 'browser-local' }
-    };
+    return dependencies.transcribe(settings, job, prepared.map((track) => track.audio), undefined, lease.payload.taskId);
   });
 }
 
@@ -205,7 +198,7 @@ export function createVolunteer(dependencies: VolunteerDependencies = defaultVol
           status = { state: 'connecting' };
           const response = await request(dependencies, '/v1/workers/register', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ modelBundleSchema: SCHEMA })
+            body: JSON.stringify({ modelBundleSchema: SCHEMA, protocolVersion: 2 })
           }, signal);
           if (!response.ok) throw new Error(`Worker registration failed: HTTP ${response.status}`);
           credentials = parseCredentials(await response.json());

@@ -68,7 +68,7 @@ test.describe('Gold without a replacement consumer', () => {
 test.describe('Gold and Helper L0 integration', () => {
   test.use({ extensions: ['helper', 'gold'] });
 
-  test('L0 creates and saves native segments from audio with an empty transcript @local-engine', async ({ page, babel }) => {
+  test('L0 creates and saves native segments from shared timing with an empty transcript @local-engine', async ({ page, babel }) => {
     if (babel.ai !== 'placeholder') test.setTimeout(180_000);
     await configure(page, babel, {}, { ...speechAudio(babel), action: { annotations: [] } });
     await expect(page.locator(ROW)).toHaveCount(0);
@@ -120,7 +120,8 @@ test.describe('Gold and Helper L0 integration', () => {
     const state = await babel.state();
     const replacement = state.calls.find((call) => call.path === '/v1/draft');
     expect(replacement).toBeDefined();
-    expect(replacement.files).toHaveLength(2);
+    expect(replacement.files).toHaveLength(0);
+    expect(replacement.body.taskId).toBeTruthy();
     expect(state.calls.filter((call) => call.path.startsWith('/api/draft/'))).toEqual([]);
     if (babel.ai === 'placeholder') await expect.poll(() => texts(page)).not.toEqual(original);
     await page.getByRole('button', { name: 'Close', exact: true }).click();
@@ -184,10 +185,16 @@ test.describe('Gold and Helper L0 integration', () => {
     await page.getByRole('button', { name: 'Save progress', exact: true }).click();
     await expect.poll(async () => annotationData((await babel.state()).action.annotations))
       .toEqual(annotationData(applied));
+    const transcriptionsBeforeReload = state.calls.filter((call) => call.path === '/v1/transcribe').length;
+    const lookupsBeforeReload = state.calls.filter((call) => call.path === '/v1/timing/lookup').length;
+    expect(transcriptionsBeforeReload).toBe(1);
     await page.reload();
     await expect.poll(() => page.evaluate(() => window.__BABEL_E2E__?.snapshot().ready === true)).toBe(true);
     await expect.poll(async () => annotationData(await nativeAnnotations(page))).toEqual(annotationData(applied));
     await expect.poll(async () => (await texts(page)).sort()).toEqual(applied.map((row) => row.content).sort());
+    await expect.poll(async () => (await babel.state()).calls.filter((call) => call.path === '/v1/timing/lookup').length)
+      .toBeGreaterThan(lookupsBeforeReload);
+    expect((await babel.state()).calls.filter((call) => call.path === '/v1/transcribe')).toHaveLength(transcriptionsBeforeReload);
   });
 
   test('queue progression publishes current per-lane timestamps only after real timing completion @local-engine', async ({ page, babel }) => {

@@ -7,7 +7,7 @@ import type {
 } from './types';
 
 export const LOCAL_MODEL_OFFSCREEN_MESSAGE_TYPE = 'babel-gold-drafting:local-model-offscreen';
-export const LOCAL_MODEL_OFFSCREEN_VERSION = 3 as const;
+export const LOCAL_MODEL_OFFSCREEN_VERSION = 4 as const;
 export const LOCAL_MODEL_AUDIO_CHUNK_BYTES = 512 * 1024;
 export const LOCAL_MODEL_MAX_BUFFERED_AUDIO_BYTES = 512 * 1024 * 1024;
 export const LOCAL_MODEL_AUDIO_TRANSFER_STALE_MS = 10 * 60 * 1000;
@@ -111,8 +111,7 @@ export interface LocalModelTimingRequest extends LocalModelRequestBase {
 export interface LocalModelDraftRequest extends LocalModelRequestBase {
   operation: 'draft';
   settings: ExtensionSettings;
-  job: TranscriptJob;
-  audioTracks: WireCapturedAudioTrack[];
+  taskId: string;
 }
 
 export interface LocalModelSegmentRequest extends LocalModelRequestBase {
@@ -301,6 +300,9 @@ export function isLocalModelOffscreenRequest(
       value.tracks.every(isWirePreparedTrack)
     );
   }
+  if (value.operation === 'draft') {
+    return typeof value.taskId === 'string' && value.taskId.length > 0 && !('audioTracks' in value);
+  }
   return (
     isTranscriptJob(value.job) &&
     Array.isArray(value.audioTracks) &&
@@ -322,6 +324,11 @@ function isTimingResult(value: unknown): value is L0TimingResponse {
     (track) =>
       isRecord(track) &&
       typeof track.lane === 'string' &&
+      typeof track.pcmSha256 === 'string' &&
+      /^[0-9a-f]{64}$/.test(track.pcmSha256) &&
+      typeof track.sampleRate === 'number' &&
+      Number.isSafeInteger(track.sampleRate) &&
+      track.sampleRate > 0 &&
       Array.isArray(track.tokens) &&
       track.tokens.every(
         (token) =>
@@ -332,6 +339,17 @@ function isTimingResult(value: unknown): value is L0TimingResponse {
           Number.isFinite(token.startSeconds) &&
           typeof token.endSeconds === 'number' &&
           Number.isFinite(token.endSeconds)
+      ) &&
+      Array.isArray(track.segments) &&
+      track.segments.every(
+        (segment) =>
+          isRecord(segment) &&
+          typeof segment.id === 'string' &&
+          typeof segment.startSeconds === 'number' &&
+          typeof segment.endSeconds === 'number' &&
+          Number.isSafeInteger(segment.startSample) &&
+          Number.isSafeInteger(segment.endSample) &&
+          Number.isSafeInteger(segment.sampleRate)
       )
   );
 }

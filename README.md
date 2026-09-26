@@ -20,6 +20,8 @@ Load this directory unpacked in `chrome://extensions`. Bundles and model runtime
 
 In extension Options, download and test the model bundle, then enable **downloaded local browser models**. Uncheck **Volunteer to process other users' L0 audio** and select **Save Settings** to keep local inference for your own tasks without accepting new volunteer jobs. Recheck and save to join the swarm again. Existing installations keep their previous volunteer behavior until you opt out.
 
+Word timing runs first: the extension looks up cached timing for the canonical task before capturing WAV audio, uploads the two speaker lanes only on a cache miss, and publishes only lane/word tokens to Babel Helper. The replacement wand waits for that same timing and sends a JSON punctuation request without audio; a reload reuses cached timing using the task's access token saved in extension storage. Downloaded browser models keep timing in the offscreen runtime so your own replacement draft does not repeat ASR. Volunteer workers receive audio for transcription leases only; punctuation leases contain cached timing and no audio.
+
 ## Checks
 
 ```sh

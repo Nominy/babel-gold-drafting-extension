@@ -26,8 +26,8 @@ const tracks: CapturedAudioTrack[] = [
 const response: L0TimingResponse = {
   taskId,
   tracks: [
-    { lane: 'Speaker 1', tokens: [{ id: 'token-1', text: 'one', startSeconds: 0, endSeconds: 0.5 }] },
-    { lane: 'Speaker 2', tokens: [] }
+    { lane: 'Speaker 1', tokens: [{ id: 'token-1', text: 'one', startSeconds: 0, endSeconds: 0.5 }], segments: [{ id: 'segment-1', startSeconds: 0, endSeconds: 1, startSample: 0, endSample: 16000, sampleRate: 16000 }], pcmSha256: 'a'.repeat(64), sampleRate: 16000 },
+    { lane: 'Speaker 2', tokens: [], segments: [], pcmSha256: 'b'.repeat(64), sampleRate: 16000 }
   ],
   summary: {},
   models: {}
@@ -51,6 +51,7 @@ function dependencies(overrides: Partial<L0TimingServiceDependencies> = {}): L0T
     currentTaskId: () => taskId,
     captureAudio: async () => tracks,
     getSettings: async () => DEFAULT_SETTINGS,
+    lookupTiming: async () => null,
     requestTiming: async () => response,
     publish: () => undefined,
     now: () => 1_000,
@@ -62,6 +63,7 @@ function dependencies(overrides: Partial<L0TimingServiceDependencies> = {}): L0T
 test('usable timing jobs accept transcripts with one or more speaker lanes', () => {
   assert.equal(isUsableL0TimingJob(job), true);
   assert.equal(isUsableL0TimingJob({ jobId: 'task-42', rows: [] }), false);
+  assert.equal(isUsableL0TimingJob({ jobId: 'task-42', taskScoped: true, rows: [] }), true);
   assert.equal(isUsableL0TimingJob({ ...job, rows: [job.rows[0]] }), true);
 });
 
@@ -95,6 +97,26 @@ test('timing waits for both nonempty speaker tracks without starting a model or 
   await flushAsyncWork();
   assert.equal(requested, 1);
   assert.deepEqual(getL0TimingAvailability(), { taskId, status: 'available' });
+});
+
+test('cached remote timing publishes tokens without capturing any audio', async () => {
+  const published: unknown[] = [];
+  const service = new L0TimingService(dependencies({
+    captureAudio: async () => { throw new Error('cache hit must not capture audio'); },
+    lookupTiming: async (_settings, lookedUpTaskId) => {
+      assert.equal(lookedUpTaskId, taskId);
+      return response;
+    },
+    publish: (message) => published.push(message)
+  }));
+  service.onLifecycleOpportunity();
+  await flushAsyncWork();
+  assert.deepEqual(published, [{
+    type: L0_TIMING_UPDATE_MESSAGE_TYPE,
+    version: 1,
+    taskId,
+    tracks: response.tracks.map(({ lane, tokens }) => ({ lane, tokens }))
+  }]);
 });
 
 test('an audio readiness timer cannot start timing after navigation', async () => {
@@ -136,7 +158,7 @@ test('timing lifecycle deduplicates in-flight and successful tasks and publishes
     type: L0_TIMING_UPDATE_MESSAGE_TYPE,
     version: 1,
     taskId,
-    tracks: response.tracks
+    tracks: response.tracks.map(({ lane, tokens }) => ({ lane, tokens }))
   }]);
   service.onLifecycleOpportunity();
   await flushAsyncWork();

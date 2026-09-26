@@ -8,6 +8,7 @@ import { assessAudioCaptureForDrafting, type AudioCaptureIssue } from '../core/a
 import { captureAudioTracksForDrafting } from '../core/audio-cues';
 import { loadSettings } from '../core/settings';
 import { applyDraftRows, buildCanonicalTaskIdentity, buildDiffPreviewItems, captureTranscriptJob, restoreCapturedRows } from '../core/transcript';
+import { waitForCurrentL0Timing } from './l0-timing-service';
 import {
   getL0TimingAvailability,
   requestL0TimingRegeneration,
@@ -42,12 +43,11 @@ const DEFAULT_L0_DRAFT_GENERATORS: L0DraftGenerators = {
 export function generateConfiguredL0Draft(
   settings: ExtensionSettings,
   job: TranscriptJob,
-  tracks: CapturedAudioTrack[],
   generators: L0DraftGenerators = DEFAULT_L0_DRAFT_GENERATORS
 ) {
   return settings.localModelsEnabled
-    ? generators.local(settings, job, tracks)
-    : generators.remote(settings, job, tracks);
+    ? generators.local(settings, job)
+    : generators.remote(settings, job);
 }
 
 
@@ -781,16 +781,15 @@ export class DraftingOverlayController {
       this.setStatus('Babel Helper did not confirm readiness; continuing with a direct replacement request...');
     }
     this.requireCurrentTask(capturedJob);
-    this.setStatus('Capturing exactly two WAV speaker tracks for L0 replacement...');
-    const audioTracks = await captureAudioTracksForDrafting();
-    this.logCapturedAudioTracks(audioTracks);
+    this.setStatus('Waiting for shared L0 word timing...');
+    await waitForCurrentL0Timing(capturedJob, settings);
     this.requireCurrentTask(capturedJob);
     this.setStatus(
       settings.localModelsEnabled
-        ? 'Generating replacement segments with local browser models...'
-        : 'Generating replacement segments with the self-hosted L0 endpoint...'
+        ? 'Punctuating cached segments with local browser models...'
+        : 'Punctuating cached segments with the self-hosted L0 endpoint...'
     );
-    const response = await generateConfiguredL0Draft(settings, capturedJob, audioTracks);
+    const response = await generateConfiguredL0Draft(settings, capturedJob);
     this.requireCurrentTask(capturedJob);
 
     this.setStatus(`Replacing current transcript with ${response.rows.length} L0 segment(s) through Babel Helper...`);

@@ -18,6 +18,7 @@ import {
   type WireCapturedAudioTrack
 } from '../src/core/local-model-offscreen-protocol';
 import { DEFAULT_SETTINGS } from '../src/core/settings';
+import { buildCanonicalTaskIdentity } from '../src/core/transcript';
 import type { PreparedL0Track } from '../src/core/l0-client';
 import type {
   CapturedAudioTrack,
@@ -52,11 +53,14 @@ const preparedTracks: PreparedL0Track[] = [
   { lane: 'Speaker 1', fieldName: 'audio:1', audio: audioTracks[0] }
 ];
 const timingResult: L0TimingResponse = {
-  taskId: 'task-1',
+  taskId: buildCanonicalTaskIdentity(job),
   tracks: [
     {
       lane: 'Speaker 1',
-      tokens: [{ id: 'token-1', text: 'hello', startSeconds: 1, endSeconds: 2 }]
+      pcmSha256: 'a'.repeat(64),
+      sampleRate: 16000,
+      tokens: [{ id: 'token-1', text: 'hello', startSeconds: 1, endSeconds: 2 }],
+      segments: [{ id: 'segment-1', startSeconds: 1, endSeconds: 2, startSample: 16000, endSample: 32000, sampleRate: 16000 }]
     }
   ],
   summary: {},
@@ -244,14 +248,13 @@ test('offscreen host serializes heavyweight inference and turns runtime failures
       calls.push('timing:end');
       return timingResult;
     },
-    generateLocalL0Draft: async () => {
+    generateLocalL0DraftFromTiming: async () => {
       calls.push('draft');
       throw new Error('ONNX model file is missing');
     },
     generateLocalL0SegmentDraft: async () => 'segment'
   }));
   const timingTrack = await uploadBlob(host, 'host-timing-audio', audioTracks[0].blob);
-  const draftTrack = await uploadBlob(host, 'host-draft-audio', audioTracks[0].blob);
 
   const timing = host.handleRequest({
     ...timingRequest('host-timing', timingTrack.audioTransferId),
@@ -264,8 +267,7 @@ test('offscreen host serializes heavyweight inference and turns runtime failures
     requestId: 'host-draft',
     operation: 'draft',
     settings: DEFAULT_SETTINGS,
-    job,
-    audioTracks: [draftTrack]
+    taskId: timingResult.taskId
   });
   await timingStarted.promise;
   assert.deepEqual(calls, ['timing:start']);
@@ -283,15 +285,15 @@ test('offscreen host serializes heavyweight inference and turns runtime failures
 test('all operations JSON-roundtrip bounded chunks and restore exact Blob bytes, MIME, and track metadata', async () => {
   const received: LocalModelOffscreenRequest[] = [];
   const runtimeTimingTracks: CapturedAudioTrack[][] = [];
-  const runtimeDraftTracks: CapturedAudioTrack[][] = [];
+  const runtimeDraftTimings: L0TimingResponse[] = [];
   const runtimeSegmentTracks: PreparedL0Track[][] = [];
   const host = createLocalModelHost(async () => ({
     generateLocalL0Timing: async (_settings, _job, tracks) => {
       runtimeTimingTracks.push(tracks);
       return timingResult;
     },
-    generateLocalL0Draft: async (_settings, _job, tracks) => {
-      runtimeDraftTracks.push(tracks);
+    generateLocalL0DraftFromTiming: async (timing) => {
+      runtimeDraftTimings.push(timing);
       return draftResult;
     },
     generateLocalL0SegmentDraft: async (_settings, _taskId, _row, tracks) => {
@@ -325,7 +327,7 @@ test('all operations JSON-roundtrip bounded chunks and restore exact Blob bytes,
     }),
     timingResult
   );
-  assert.equal(await client.generateLocalL0Draft(DEFAULT_SETTINGS, job, audioTracks), draftResult);
+  assert.equal(await client.generateLocalL0Draft(DEFAULT_SETTINGS, job), draftResult);
   assert.equal(
     await client.generateLocalL0SegmentDraft(DEFAULT_SETTINGS, 'task-1', row, preparedTracks),
     'Exact cropped text.'
@@ -335,8 +337,6 @@ test('all operations JSON-roundtrip bounded chunks and restore exact Blob bytes,
     'upload',
     'upload',
     'timing',
-    'upload',
-    'upload',
     'draft',
     'upload',
     'upload',
@@ -347,7 +347,7 @@ test('all operations JSON-roundtrip bounded chunks and restore exact Blob bytes,
   const uploads = received.filter(
     (request): request is LocalModelUploadRequest => request.operation === 'upload'
   );
-  assert.equal(uploads.length, 6);
+  assert.equal(uploads.length, 4);
   assert.ok(uploads.every((request) => decodeAudioChunk(request.dataBase64).byteLength <= LOCAL_MODEL_AUDIO_CHUNK_BYTES));
   assert.ok(uploads.every((request) => decodeAudioChunk(request.dataBase64).byteLength < audioTracks[0].blob.size));
   assert.ok(
@@ -356,28 +356,27 @@ test('all operations JSON-roundtrip bounded chunks and restore exact Blob bytes,
       .every((request) => !('dataBase64' in request))
   );
 
-  for (const tracks of [runtimeTimingTracks[0], runtimeDraftTracks[0]]) {
-    const audio = tracks[0];
-    assert.ok(audio.blob instanceof Blob);
-    assert.equal(audio.blob.type, 'audio/x-babel');
-    assert.deepEqual(new Uint8Array(await audio.blob.arrayBuffer()), audioBytes);
-    assert.deepEqual(
-      {
-        trackId: audio.trackId,
-        speakerKey: audio.speakerKey,
-        trackLabel: audio.trackLabel,
-        source: audio.source,
-        mimeType: audio.mimeType
-      },
-      {
-        trackId: 'track-1',
-        speakerKey: 'Speaker 1',
-        trackLabel: 'Left microphone',
-        source: 'captured.wav',
-        mimeType: 'audio/wav'
-      }
-    );
-  }
+  assert.deepEqual(runtimeDraftTimings, [timingResult]);
+  const audio = runtimeTimingTracks[0][0];
+  assert.ok(audio.blob instanceof Blob);
+  assert.equal(audio.blob.type, 'audio/x-babel');
+  assert.deepEqual(new Uint8Array(await audio.blob.arrayBuffer()), audioBytes);
+  assert.deepEqual(
+    {
+      trackId: audio.trackId,
+      speakerKey: audio.speakerKey,
+      trackLabel: audio.trackLabel,
+      source: audio.source,
+      mimeType: audio.mimeType
+    },
+    {
+      trackId: 'track-1',
+      speakerKey: 'Speaker 1',
+      trackLabel: 'Left microphone',
+      source: 'captured.wav',
+      mimeType: 'audio/wav'
+    }
+  );
   assert.equal(runtimeSegmentTracks[0][0].lane, 'Speaker 1');
   assert.equal(runtimeSegmentTracks[0][0].fieldName, 'audio:1');
   assert.equal(runtimeSegmentTracks[0][0].audio.blob.type, 'audio/x-babel');
@@ -390,8 +389,8 @@ test('all operations JSON-roundtrip bounded chunks and restore exact Blob bytes,
   );
   assert.ok(consumedTiming);
   const reused = await host.handleRequest({ ...consumedTiming, target: 'offscreen', requestId: 'reuse' });
-  assert.equal(reused.ok, false);
-  if (!reused.ok) assert.equal(reused.error.code, 'invalid-request');
+  assert.equal(reused.ok, true);
+  assert.equal(runtimeTimingTracks.length, 1, 'a second timing request reuses the offscreen ASR result');
 });
 
 test('uploads do not initialize runtime and reject duplicates, gaps, buffer overflow, and missing transfers', async () => {
@@ -402,7 +401,7 @@ test('uploads do not initialize runtime and reject duplicates, gaps, buffer over
       runtimeLoads += 1;
       return {
         generateLocalL0Timing: async () => timingResult,
-        generateLocalL0Draft: async () => draftResult,
+        generateLocalL0DraftFromTiming: async () => draftResult,
         generateLocalL0SegmentDraft: async () => 'segment'
       };
     },
@@ -484,7 +483,7 @@ test('client rejects mismatched responses and propagates host errors through the
     requestId: 'different-request'
   }));
   await assert.rejects(
-    invalidClient.generateLocalL0Draft(DEFAULT_SETTINGS, job, audioTracks),
+    invalidClient.generateLocalL0Draft(DEFAULT_SETTINGS, job),
     (error: unknown) =>
       error instanceof LocalModelBridgeError &&
       error.operation === 'draft' &&

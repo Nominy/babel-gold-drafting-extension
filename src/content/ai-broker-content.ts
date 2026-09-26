@@ -13,6 +13,7 @@ import { redistributeTextWithBroker, transcribeSegmentWithBroker } from '../core
 import { generateL0SegmentDraft } from '../core/l0-client';
 import { generateLocalL0SegmentDraft } from '../core/local-model-client';
 import { prepareL0TimingTracks } from '../core/l0-timing-client';
+import { waitForCurrentL0Timing } from './l0-timing-service';
 import { loadSettings } from '../core/settings';
 import { buildCanonicalTaskIdentity, captureTranscriptJob } from '../core/transcript';
 import type { CapturedAudioTrack, ExtensionSettings, TranscriptRow } from '../core/types';
@@ -153,11 +154,12 @@ export async function generateConfiguredL0SegmentText(
   audioTracks: CapturedAudioTrack[],
   generators: L0SegmentGenerators = DEFAULT_L0_SEGMENT_GENERATORS
 ): Promise<string> {
+  if (!settings.localModelsEnabled) {
+    return generators.remote(settings, taskId, targetRow);
+  }
   const segmentJob = { jobId: taskId, rows: [targetRow] };
   const tracks = prepareL0TimingTracks(segmentJob, audioTracks);
-  return settings.localModelsEnabled
-    ? generators.local(settings, taskId, targetRow, tracks)
-    : generators.remote(settings, taskId, targetRow, tracks);
+  return generators.local(settings, taskId, targetRow, tracks);
 }
 
 async function handleBrokerRequest(
@@ -175,10 +177,10 @@ async function handleBrokerRequest(
     ) {
       return brokerError('stale-task', 'The requested transcript task is no longer current.', false);
     }
-    if (emit) {
+    if (emit && settings.localModelsEnabled) {
       emit({ type: 'event', event: 'capturing-audio', operation: message.operation, message: 'Capturing Babel segment audio.' });
     }
-    const audioTracks = await captureAudioTracksForDrafting();
+    const audioTracks = settings.localModelsEnabled ? await captureAudioTracksForDrafting() : [];
     if (captureCurrentCanonicalTaskId() !== message.taskId) {
       return brokerError('stale-task', 'The transcript task changed while audio was being captured.', false);
     }
@@ -189,6 +191,9 @@ async function handleBrokerRequest(
       text: '',
       index: 0
     };
+    if (!settings.localModelsEnabled) {
+      await waitForCurrentL0Timing(captureTranscriptJob(), settings);
+    }
     if (emit) {
       emit({
         type: 'event',

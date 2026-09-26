@@ -1,6 +1,7 @@
 import type { PreparedL0Track } from '../core/l0-client';
+import { buildCanonicalTaskIdentity } from '../core/transcript';
 import {
-  generateLocalL0Draft,
+  generateLocalL0DraftFromTiming,
   generateLocalL0SegmentDraft,
   generateLocalL0Timing
 } from '../core/local-model-runtime';
@@ -39,11 +40,7 @@ type LocalModelRuntime = {
     job: TranscriptJob,
     audioTracks: CapturedAudioTrack[]
   ) => Promise<L0TimingResponse>;
-  generateLocalL0Draft: (
-    settings: ExtensionSettings,
-    job: TranscriptJob,
-    audioTracks: CapturedAudioTrack[]
-  ) => Promise<L0DraftResponse>;
+  generateLocalL0DraftFromTiming: (timing: L0TimingResponse) => Promise<L0DraftResponse>;
   generateLocalL0SegmentDraft: (
     settings: ExtensionSettings,
     taskId: string,
@@ -93,7 +90,7 @@ class InvalidAudioTransferError extends Error {
 }
 
 async function loadLocalModelRuntime(): Promise<LocalModelRuntime> {
-  return { generateLocalL0Timing, generateLocalL0Draft, generateLocalL0SegmentDraft };
+  return { generateLocalL0Timing, generateLocalL0DraftFromTiming, generateLocalL0SegmentDraft };
 }
 
 export function createLocalModelHost(
@@ -104,6 +101,7 @@ export function createLocalModelHost(
   const maxBufferedBytes = options.maxBufferedBytes ?? LOCAL_MODEL_MAX_BUFFERED_AUDIO_BYTES;
   const staleTransferMs = options.staleTransferMs ?? LOCAL_MODEL_AUDIO_TRANSFER_STALE_MS;
   const transfers = new Map<string, AudioTransfer>();
+  const timings = new Map<string, L0TimingResponse>();
   let bufferedBytes = 0;
   let inferenceTail: Promise<void> = Promise.resolve();
 
@@ -250,9 +248,14 @@ export function createLocalModelHost(
     cleanStaleTransfers(now());
     try {
       if (request.operation === 'timing') {
-        const tracks = resolveCapturedAudioTracks(request.audioTracks);
-        const runtime = await loadRuntime();
-        const result = await runtime.generateLocalL0Timing(request.settings, request.job, tracks);
+        let result = timings.get(buildCanonicalTaskIdentity(request.job));
+        if (!result) {
+          const tracks = resolveCapturedAudioTracks(request.audioTracks);
+          const runtime = await loadRuntime();
+          result = await runtime.generateLocalL0Timing(request.settings, request.job, tracks);
+          timings.set(result.taskId, result);
+          if (timings.size > 2) timings.delete(timings.keys().next().value!);
+        }
         consumeTransfers(request.audioTracks.map((track) => track.audioTransferId));
         const response: LocalModelTimingSuccessResponse = {
           type: LOCAL_MODEL_OFFSCREEN_MESSAGE_TYPE,
@@ -265,10 +268,10 @@ export function createLocalModelHost(
         return response;
       }
       if (request.operation === 'draft') {
-        const tracks = resolveCapturedAudioTracks(request.audioTracks);
+        const timing = timings.get(request.taskId);
+        if (!timing) throw new Error(`Timing for task ${request.taskId} is not available in the offscreen runtime.`);
         const runtime = await loadRuntime();
-        const result = await runtime.generateLocalL0Draft(request.settings, request.job, tracks);
-        consumeTransfers(request.audioTracks.map((track) => track.audioTransferId));
+        const result = await runtime.generateLocalL0DraftFromTiming(timing);
         const response: LocalModelDraftSuccessResponse = {
           type: LOCAL_MODEL_OFFSCREEN_MESSAGE_TYPE,
           version: LOCAL_MODEL_OFFSCREEN_VERSION,

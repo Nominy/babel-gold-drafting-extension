@@ -44,16 +44,6 @@ export interface TranscriptJob {
   rows: TranscriptRow[];
 }
 
-export interface L0DraftTrackSpec {
-  lane: string;
-  fieldName: string;
-}
-
-
-export interface L0DraftPayload {
-  taskId: string;
-  tracks: [L0DraftTrackSpec, L0DraftTrackSpec];
-}
 
 export interface L0DraftRow {
   id: string;
@@ -76,9 +66,21 @@ export interface L0TimingToken {
   endSeconds: number;
 }
 
+export interface L0TimingSegment {
+  id: string;
+  startSeconds: number;
+  endSeconds: number;
+  startSample: number;
+  endSample: number;
+  sampleRate: number;
+}
+
 export interface L0TimingTrack {
   lane: string;
   tokens: L0TimingToken[];
+  segments: L0TimingSegment[];
+  pcmSha256: string;
+  sampleRate: number;
 }
 
 export interface L0TimingResponse {

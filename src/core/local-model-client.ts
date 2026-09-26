@@ -1,5 +1,6 @@
 import type { PreparedL0Track } from './l0-client';
 import type { L0TimingRequestCallbacks, L0TimingQueueStatus } from './l0-timing-client';
+import { buildCanonicalTaskIdentity } from './transcript';
 import {
   LOCAL_MODEL_AUDIO_CHUNK_BYTES,
   LOCAL_MODEL_OFFSCREEN_MESSAGE_TYPE,
@@ -196,8 +197,7 @@ export function createLocalModelClient(sendMessage: LocalModelMessageSender = de
 
     async generateLocalL0Draft(
       settings: ExtensionSettings,
-      job: TranscriptJob,
-      audioTracks: CapturedAudioTrack[]
+      job: TranscriptJob
     ): Promise<L0DraftResponse> {
       const message: LocalModelDraftRequest = {
         type: LOCAL_MODEL_OFFSCREEN_MESSAGE_TYPE,
@@ -206,8 +206,7 @@ export function createLocalModelClient(sendMessage: LocalModelMessageSender = de
         requestId: nextRequestId('draft'),
         operation: 'draft',
         settings,
-        job,
-        audioTracks: await uploadCapturedAudioTracks(audioTracks, 'draft')
+        taskId: buildCanonicalTaskIdentity(job)
       };
       return request<L0DraftResponse>(message);
     },
