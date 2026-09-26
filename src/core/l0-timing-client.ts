@@ -1,6 +1,12 @@
 import { normalizeL0CustomBaseUrl } from './settings';
 import { assertL0WavAudio, type PreparedL0Track } from './l0-client';
 import { buildCanonicalTaskIdentity } from './transcript';
+import {
+  L0_TIMING_TOKEN_MESSAGE_TYPE,
+  L0_TIMING_TOKEN_VERSION,
+  isL0TimingTokenResponse,
+  type L0TimingTokenRequest
+} from './l0-timing-token-protocol';
 import type {
   CapturedAudioTrack,
   ExtensionSettings,
@@ -13,43 +19,24 @@ const L0_TIMING_PATH = '/v1/transcribe';
 const L0_TIMING_LOOKUP_PATH = '/v1/timing/lookup';
 const L0_QUEUE_PATH = '/v1/queue';
 const DEFAULT_QUEUE_POLL_INTERVAL_MS = 500;
-const accessTokens = new Map<string, string>();
-
-function tokenStorageKey(taskId: string): string {
-  return `babel-gold-drafting:l0-timing-token:${taskId}`;
-}
-
-async function getAccessToken(taskId: string): Promise<string | undefined> {
-  const cached = accessTokens.get(taskId);
-  if (cached) return cached;
-  if (typeof chrome === 'undefined' || !chrome.storage?.local) return undefined;
-  const stored = await chrome.storage.local.get(tokenStorageKey(taskId));
-  const token = stored[tokenStorageKey(taskId)];
-  if (typeof token !== 'string' || !token) return undefined;
-  accessTokens.set(taskId, token);
-  return token;
-}
-
-async function saveAccessToken(taskId: string, token: string): Promise<void> {
-  if (!token) throw new Error('L0 transcription did not provide a timing access token.');
-  if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-    await chrome.storage.local.set({ [tokenStorageKey(taskId)]: token });
-  }
-  accessTokens.set(taskId, token);
-}
 async function ensureTimingAccessToken(taskId: string): Promise<string> {
-  const existing = await getAccessToken(taskId);
-  if (existing) return existing;
-  const bytes = crypto.getRandomValues(new Uint8Array(32));
-  const token = btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-  await saveAccessToken(taskId, token);
-  return token;
+  const request: L0TimingTokenRequest = {
+    type: L0_TIMING_TOKEN_MESSAGE_TYPE,
+    version: L0_TIMING_TOKEN_VERSION,
+    taskId
+  };
+  const response: unknown = await chrome.runtime.sendMessage(request);
+  if (!isL0TimingTokenResponse(response, request)) {
+    throw new Error('The background returned an invalid timing credential response.');
+  }
+  if (!response.ok) throw new Error(`Could not allocate L0 timing access: ${response.error}`);
+  return response.token;
 }
 
 
 export async function timingAuthorization(taskId: string): Promise<Record<string, string>> {
-  const token = await getAccessToken(taskId);
-  return token ? { Authorization: `Bearer ${token}` } : {};
+  const token = await ensureTimingAccessToken(taskId);
+  return { Authorization: `Bearer ${token}` };
 }
 
 export async function lookupL0Timing(settings: ExtensionSettings, taskId: string): Promise<L0TimingResponse | null> {

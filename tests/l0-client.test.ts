@@ -1,9 +1,21 @@
-import test from 'node:test';
+import test, { afterEach, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateL0Draft, generateL0SegmentDraft, getL0DraftEndpoint } from '../src/core/l0-client';
 import { DEFAULT_SETTINGS } from '../src/core/settings';
 import { buildCanonicalTaskIdentity } from '../src/core/transcript';
 import type { TranscriptJob } from '../src/core/types';
+import type { L0TimingTokenRequest } from '../src/core/l0-timing-token-protocol';
+
+let previousChrome: typeof chrome;
+beforeEach(() => {
+  previousChrome = globalThis.chrome;
+  Object.assign(globalThis, { chrome: {
+    runtime: {
+      sendMessage: async (request: L0TimingTokenRequest) => ({ ...request, ok: true, token: 'a'.repeat(43) })
+    }
+  } });
+});
+afterEach(() => Object.assign(globalThis, { chrome: previousChrome }));
 
 const job: TranscriptJob = {
   jobId: 'task-42',
@@ -59,6 +71,7 @@ test('generateL0Draft requests punctuation using canonical task identity without
     assert.equal(requestInit?.method, 'POST');
     assert.deepEqual(JSON.parse(String(requestInit?.body)), { taskId: buildCanonicalTaskIdentity(job) });
     assert.equal(new Headers(requestInit?.headers).get('Content-Type'), 'application/json');
+    assert.equal(new Headers(requestInit?.headers).get('Authorization'), `Bearer ${'a'.repeat(43)}`);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -99,6 +112,7 @@ test('free L0 segment drafting sends one empty preserved row through the draft e
     );
 
     assert.equal(text, 'Пунктуированный текст.');
+    assert.equal(new Headers(requestInit?.headers).get('Authorization'), `Bearer ${'a'.repeat(43)}`);
     assert.deepEqual(JSON.parse(String(requestInit?.body)), {
       taskId: 'canonical-task',
       options: {

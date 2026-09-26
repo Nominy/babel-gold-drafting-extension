@@ -269,6 +269,47 @@ test.describe('Gold and Helper L0 integration', () => {
     await expect(page.getByRole('button', { name: 'Regenerate timestamp data', exact: true })).toBeHidden();
   });
 
+  test('navigation while timing is preparing releases the wand for the next task @local-engine', async ({ page, babel, request }) => {
+    if (babel.ai !== 'placeholder') test.setTimeout(180_000);
+    const initial = await configure(page, babel, {}, { audio: { laneCount: 0 } });
+    await page.locator(WAND).click();
+    await expect(page.locator(STATUS)).toContainText('Waiting for shared L0 word timing');
+    await expect(page.locator(WAND)).toBeDisabled();
+    expect((await babel.state()).calls.filter((call) => call.path === '/v1/transcribe' || call.path === '/v1/draft')).toEqual([]);
+
+    await page.getByRole('button', { name: 'Submit Review', exact: true }).focus();
+    await page.keyboard.press('Enter');
+    const submission = page.getByRole('dialog', { name: 'Confirm Submission' });
+    await expect(submission).toBeVisible();
+    await submission.getByRole('button', { name: 'Submit', exact: true }).focus();
+    await page.keyboard.press('Enter');
+    await expect(page).toHaveURL(/\/projects$/);
+    await expect(page.locator(STATUS)).toContainText('task changed');
+    await expect(page.locator('#babel-gold-drafting-overlay')).toBeHidden();
+
+    const nextId = '66666666-6666-4666-8666-666666666666';
+    const nextRows = initial.action.annotations.map((row, index) => ({
+      ...row, id: `preparing-next-${index}`, reviewActionId: nextId, content: `Следующая задача ${index + 1}.`
+    }));
+    const reset = await request.post(`${babel.apiURL}/__e2e__/reset`, {
+      data: { scenario: 'baseline', overrides: {
+        ...speechAudio(babel), action: { actionId: nextId, reviewActionId: nextId, annotations: nextRows }
+      } },
+    });
+    expect(reset.ok()).toBeTruthy();
+    await page.getByRole('link', { name: /RU-tx-gold/ }).click();
+    await expect(page.locator('html')).toHaveAttribute('data-babel-review-action-id', nextId);
+    await expect(page.locator(WAND)).toBeEnabled();
+    await expect.poll(async () => (await texts(page)).sort()).toEqual(nextRows.map((row) => row.content).sort());
+    await page.locator(WAND).click();
+    await expect(page.locator(STATUS)).toContainText('L0 replacement complete', {
+      timeout: babel.ai === 'placeholder' ? 60_000 : 150_000
+    });
+    await expect(page.locator(WAND)).toBeEnabled();
+    const replacement = (await babel.state()).calls.find((call) => call.path === '/v1/draft');
+    expect(JSON.parse(replacement.body.taskId).baseTaskId).toBe(nextId);
+  });
+
   test('pending L0 work cannot populate a newly navigated task @local-engine', async ({ page, babel, request }) => {
     if (babel.ai !== 'placeholder') test.setTimeout(180_000);
     const hold = 'stale-l0-draft';

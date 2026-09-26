@@ -269,7 +269,10 @@ export function createLocalModelHost(
       }
       if (request.operation === 'draft') {
         const timing = timings.get(request.taskId);
-        if (!timing) throw new Error(`Timing for task ${request.taskId} is not available in the offscreen runtime.`);
+        if (!timing) {
+          return createLocalModelFailure(request, 'timing-unavailable',
+            new Error(`Timing for task ${request.taskId} is not available in the offscreen runtime.`));
+        }
         const runtime = await loadRuntime();
         const result = await runtime.generateLocalL0DraftFromTiming(timing);
         const response: LocalModelDraftSuccessResponse = {

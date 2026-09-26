@@ -1,4 +1,5 @@
 import './local-model-offscreen';
+import './l0-timing-token';
 import {
   AI_BROKER_EXTERNAL_MESSAGE_TYPE,
   AI_BROKER_INTERNAL_MESSAGE_TYPE,

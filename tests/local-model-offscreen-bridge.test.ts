@@ -27,6 +27,8 @@ import type {
   TranscriptJob
 } from '../src/core/types';
 import { createLocalModelHost, type LocalModelHost } from '../src/offscreen/local-model-host';
+import { L0TimingService } from '../src/content/l0-timing-service';
+import { getL0TimingAvailability } from '../src/content/l0-timing-availability';
 
 const row = {
   rowId: 'row-1',
@@ -503,3 +505,62 @@ test('client rejects mismatched responses and propagates host errors through the
       /WASM backend initialization failed/.test(error.message)
   );
 });
+
+for (const loss of ['eviction', 'restart'] as const) {
+  test(`local drafting recaptures completed timing after offscreen ${loss} without growing the two-task cache`, async () => {
+    const settings = { ...DEFAULT_SETTINGS, localModelsEnabled: true };
+    const captured = ['Speaker 1', 'Speaker 2'].map((speakerKey, index) => ({
+      ...audioTracks[0], speakerKey, trackId: `small-${index}`, blob: new Blob([new Uint8Array([index + 1])])
+    }));
+    const generatedTaskIds: string[] = [];
+    const loadRuntime = async () => ({
+      generateLocalL0Timing: async (_settings: unknown, requestedJob: TranscriptJob) => {
+        const taskId = buildCanonicalTaskIdentity(requestedJob);
+        generatedTaskIds.push(taskId);
+        return { ...timingResult, taskId };
+      },
+      generateLocalL0DraftFromTiming: async (timing: L0TimingResponse) => ({
+        ...draftResult,
+        rows: draftResult.rows.map((row) => ({ ...row, text: timing.taskId }))
+      }),
+      generateLocalL0SegmentDraft: async () => 'segment'
+    });
+    let host = createLocalModelHost(loadRuntime);
+    const client = createLocalModelClient((message) =>
+      host.handleRequest(JSON.parse(JSON.stringify({ ...message, target: 'offscreen' }))));
+    let currentJob = job;
+    let captures = 0;
+    const service = new L0TimingService({
+      captureTranscript: () => currentJob,
+      currentTaskId: () => buildCanonicalTaskIdentity(currentJob),
+      currentPathname: () => '/tasks/current',
+      captureAudio: async () => { captures += 1; return captured; },
+      getSettings: async () => settings,
+      lookupTiming: async () => { throw new Error('Local timing must not use the remote cache'); },
+      requestTiming: client.generateLocalL0Timing,
+      requestLocalDraft: client.generateLocalL0Draft,
+      publish: () => undefined,
+      now: () => 0,
+      schedule: () => { assert.fail('Recovery must not require retry timers'); }
+    });
+    const jobs = loss === 'eviction' ? [job, { ...job, jobId: 'task-2' }, { ...job, jobId: 'task-3' }] : [job];
+    for (const nextJob of jobs) {
+      currentJob = nextJob;
+      service.onLifecycleOpportunity();
+      await service.waitForTiming(currentJob, settings);
+    }
+    if (loss === 'restart') host = createLocalModelHost(loadRuntime);
+    currentJob = job;
+    service.onLifecycleOpportunity();
+    assert.equal(captures, jobs.length, 'the content-side completed flag still predates the cache loss');
+    await assert.rejects(client.generateLocalL0Draft(settings, job),
+      (error: unknown) => error instanceof LocalModelBridgeError && error.code === 'timing-unavailable');
+    const recovered = await service.generateLocalDraft(settings, job);
+    assert.equal(recovered.rows[0].text, buildCanonicalTaskIdentity(job));
+    assert.equal(captures, jobs.length + 1);
+    assert.deepEqual(generatedTaskIds, [...jobs, job].map(buildCanonicalTaskIdentity));
+    assert.deepEqual(getL0TimingAvailability(), { taskId: buildCanonicalTaskIdentity(job), status: 'available' });
+    assert.deepEqual(await service.generateLocalDraft(settings, job), recovered);
+    assert.equal(captures, jobs.length + 1, 'a cache hit must not capture or run ASR again');
+  });
+}

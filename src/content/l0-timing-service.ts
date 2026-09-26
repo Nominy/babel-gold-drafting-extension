@@ -1,15 +1,15 @@
 import { captureAudioTracksForDrafting } from '../core/audio-cues';
 import { AUDIO_ENABLE_CAPTURE_MESSAGE_TYPE } from '../core/audio-intercept-protocol';
 import { generateL0Timing, lookupL0Timing, prepareL0TimingTracks, type L0TimingQueueStatus, type L0TimingRequestCallbacks } from '../core/l0-timing-client';
-import { generateLocalL0Timing } from '../core/local-model-client';
+import { generateLocalL0Draft, generateLocalL0Timing, LocalModelBridgeError } from '../core/local-model-client';
 import { loadSettings } from '../core/settings';
 import { buildCanonicalTaskIdentity, captureTranscriptJob } from '../core/transcript';
 import type { CapturedAudioTrack, ExtensionSettings, L0TimingResponse, TranscriptJob } from '../core/types';
 import {
-  getL0TimingAvailability,
   publishL0TimingAvailability,
   setL0TimingRetryHandler,
-  subscribeL0TimingAvailability
+  subscribeL0TimingAvailability,
+  type L0TimingAvailability
 } from './l0-timing-availability';
 
 export const L0_TIMING_UPDATE_MESSAGE_TYPE = 'babel-gold-drafting:l0-timing-update';
@@ -51,9 +51,11 @@ export function requestConfiguredL0Timing(
 export interface L0TimingServiceDependencies {
   captureTranscript: () => TranscriptJob;
   currentTaskId: () => string;
+  currentPathname: () => string;
   captureAudio: () => Promise<CapturedAudioTrack[]>;
   getSettings: () => Promise<ExtensionSettings>;
   lookupTiming: (settings: ExtensionSettings, taskId: string) => Promise<L0TimingResponse | null>;
+  requestLocalDraft: typeof generateLocalL0Draft;
   requestTiming: (
     settings: ExtensionSettings,
     job: TranscriptJob,
@@ -78,10 +80,12 @@ export function isUsableL0TimingJob(job: TranscriptJob): boolean {
 
 export class L0TimingService {
   private readonly taskStates = new Map<string, TimingTaskState>();
+  private readonly taskChecks = new Set<() => void>();
 
   constructor(private readonly dependencies: L0TimingServiceDependencies) {}
 
   onLifecycleOpportunity(): void {
+    for (const check of this.taskChecks) check();
     let job: TranscriptJob;
     let taskId: string;
     try {
@@ -248,6 +252,72 @@ export class L0TimingService {
     state.completed = true;
   }
 
+  waitForTiming(job: TranscriptJob, settings: ExtensionSettings): Promise<void> {
+    const taskId = buildCanonicalTaskIdentity(job);
+    const pathname = this.dependencies.currentPathname();
+    const isCurrent = () => this.dependencies.currentPathname() === pathname && this.isTaskCurrent(taskId);
+    const changedError = () => new Error('The task changed while waiting for L0 timing.');
+    if (!isCurrent()) return Promise.reject(changedError());
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      let subscribing = true;
+      let unsubscribe: (() => void) | undefined;
+      const finish = (error?: Error) => {
+        if (settled) return;
+        settled = true;
+        unsubscribe?.();
+        this.taskChecks.delete(checkTask);
+        if (error) reject(error);
+        else resolve();
+      };
+      const checkTask = () => {
+        if (!isCurrent()) finish(changedError());
+      };
+      const onAvailability = (availability: L0TimingAvailability) => {
+        if (availability.taskId !== taskId) {
+          // The subscription replays the last task before this one has had a lifecycle opportunity.
+          if (!subscribing) finish(changedError());
+          return;
+        }
+        if (!isCurrent()) {
+          finish(changedError());
+        } else if (availability.status === 'unavailable') {
+          finish(new Error(`L0 timing for task ${taskId} is unavailable.`));
+        } else if (availability.status === 'available' ||
+            (!settings.localModelsEnabled && (availability.status === 'queued' || availability.status === 'running'))) {
+          finish();
+        }
+      };
+      this.taskChecks.add(checkTask);
+      unsubscribe = subscribeL0TimingAvailability(onAvailability);
+      subscribing = false;
+      if (settled) unsubscribe();
+      else this.onLifecycleOpportunity();
+    });
+  }
+
+  async generateLocalDraft(settings: ExtensionSettings, job: TranscriptJob) {
+    const taskId = buildCanonicalTaskIdentity(job);
+    if (!this.isTaskCurrent(taskId)) throw new Error('The task changed while drafting.');
+    try {
+      return await this.dependencies.requestLocalDraft(settings, job);
+    } catch (error) {
+      if (!(error instanceof LocalModelBridgeError) || error.code !== 'timing-unavailable') throw error;
+      if (!this.isTaskCurrent(taskId)) throw new Error('The task changed while drafting.');
+      // Offscreen timing is bounded and is lost on document restart. Reuse the normal
+      // capture/timing lifecycle instead of treating the content-side completed flag as durable.
+      const state = this.getTaskState(taskId);
+      state.completed = false;
+      state.failureCount = 0;
+      state.audioWaitCount = 0;
+      state.retryNotBefore = 0;
+      publishL0TimingAvailability({ taskId, status: 'preparing' });
+      await this.waitForTiming(job, settings);
+      if (!this.isTaskCurrent(taskId)) throw new Error('The task changed while drafting.');
+      return this.dependencies.requestLocalDraft(settings, job);
+    }
+  }
+
   retryCurrentTask(): boolean {
     let job: TranscriptJob;
     let taskId: string;
@@ -280,39 +350,24 @@ export function enableL0TimingAudioCapture(): void {
 let activeTimingService: L0TimingService | null = null;
 
 export function waitForCurrentL0Timing(job: TranscriptJob, settings: ExtensionSettings): Promise<void> {
-  const service = activeTimingService;
-  if (!service) throw new Error('L0 timing service is not initialized.');
-  const taskId = buildCanonicalTaskIdentity(job);
-  const available = getL0TimingAvailability();
-  if (available?.taskId === taskId && (
-    available.status === 'available' ||
-    (!settings.localModelsEnabled && (available.status === 'queued' || available.status === 'running'))
-  )) return Promise.resolve();
-  if (available?.taskId === taskId && available.status === 'unavailable') {
-    return Promise.reject(new Error(`L0 timing for task ${taskId} is unavailable.`));
-  }
-  return new Promise<void>((resolve, reject) => {
-    const unsubscribe = subscribeL0TimingAvailability((availability) => {
-      if (availability.taskId !== taskId) return;
-      if (availability.status === 'available' ||
-          (!settings.localModelsEnabled && (availability.status === 'queued' || availability.status === 'running')) ||
-          availability.status === 'unavailable') {
-        unsubscribe();
-        if (availability.status !== 'unavailable') resolve();
-        else reject(new Error(`L0 timing for task ${taskId} is unavailable.`));
-      }
-    });
-    service.onLifecycleOpportunity();
-  });
+  if (!activeTimingService) throw new Error('L0 timing service is not initialized.');
+  return activeTimingService.waitForTiming(job, settings);
+}
+
+export function generateCurrentLocalL0Draft(settings: ExtensionSettings, job: TranscriptJob) {
+  if (!activeTimingService) throw new Error('L0 timing service is not initialized.');
+  return activeTimingService.generateLocalDraft(settings, job);
 }
 
 export function registerL0TimingService(): L0TimingService {
   const service = new L0TimingService({
     captureTranscript: () => captureTranscriptJob(),
     currentTaskId: () => buildCanonicalTaskIdentity(captureTranscriptJob()),
+    currentPathname: () => window.location.pathname,
     captureAudio: () => captureAudioTracksForDrafting(),
     getSettings: () => loadSettings(),
     lookupTiming: lookupL0Timing,
+    requestLocalDraft: generateLocalL0Draft,
     requestTiming: requestConfiguredL0Timing,
     publish: (message) => window.postMessage(message, '*'),
     now: () => Date.now(),

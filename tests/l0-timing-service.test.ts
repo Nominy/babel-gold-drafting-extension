@@ -6,7 +6,7 @@ import {
   L0TimingService,
   type L0TimingServiceDependencies
 } from '../src/content/l0-timing-service';
-import { getL0TimingAvailability } from '../src/content/l0-timing-availability';
+import { getL0TimingAvailability, publishL0TimingAvailability } from '../src/content/l0-timing-availability';
 import { DEFAULT_SETTINGS } from '../src/core/settings';
 import { buildCanonicalTaskIdentity } from '../src/core/transcript';
 import type { CapturedAudioTrack, L0TimingResponse, TranscriptJob } from '../src/core/types';
@@ -49,9 +49,11 @@ function dependencies(overrides: Partial<L0TimingServiceDependencies> = {}): L0T
   return {
     captureTranscript: () => job,
     currentTaskId: () => taskId,
+    currentPathname: () => '/tasks/current',
     captureAudio: async () => tracks,
     getSettings: async () => DEFAULT_SETTINGS,
     lookupTiming: async () => null,
+    requestLocalDraft: async () => ({ rows: [], summary: {}, models: {} }),
     requestTiming: async () => response,
     publish: () => undefined,
     now: () => 1_000,
@@ -335,4 +337,66 @@ test('timing lifecycle silently ignores transcript capture failures', () => {
     }
   }));
   assert.doesNotThrow(() => service.onLifecycleOpportunity());
+});
+
+for (const mode of ['new-task-event', 'unmounted-route', 'stale-task-identity'] as const) {
+  test(`timing wait rejects on ${mode} and allows cleanup before the old request settles`, async () => {
+    const pending = deferred<L0TimingResponse>();
+    let current = taskId;
+    let unmounted = false;
+    let pathname = '/tasks/current';
+    let busy = true;
+    let currentChecks = 0;
+    const service = new L0TimingService(dependencies({
+      currentPathname: () => pathname,
+      captureTranscript: () => {
+        if (unmounted) throw new Error('No transcript on this route');
+        return job;
+      },
+      currentTaskId: () => {
+        currentChecks += 1;
+        if (unmounted) throw new Error('No current task');
+        return current;
+      },
+      requestTiming: async () => pending.promise
+    }));
+    publishL0TimingAvailability({ taskId, status: 'preparing' });
+    const wait = service.waitForTiming(job, { ...DEFAULT_SETTINGS, localModelsEnabled: true })
+      .finally(() => { busy = false; });
+    const rejected = assert.rejects(wait, /task changed/);
+    await flushAsyncWork();
+    current = mode === 'stale-task-identity' ? taskId : 'next-task';
+    if (mode === 'new-task-event') {
+      publishL0TimingAvailability({ taskId: current, status: 'preparing' });
+    } else {
+      unmounted = mode === 'unmounted-route';
+      pathname = '/projects';
+      service.onLifecycleOpportunity();
+    }
+    await rejected;
+    assert.equal(busy, false);
+    const checksAfterRejection = currentChecks;
+    publishL0TimingAvailability({ taskId, status: 'available' });
+    assert.equal(currentChecks, checksAfterRejection, 'settled waits must unsubscribe');
+    pending.resolve(response);
+    await flushAsyncWork();
+    assert.equal(busy, false);
+  });
+}
+
+test('timing wait cleans up an immediately replayed success and a terminal failure', async () => {
+  let currentChecks = 0;
+  const service = new L0TimingService(dependencies({
+    currentTaskId: () => { currentChecks += 1; return taskId; }
+  }));
+  publishL0TimingAvailability({ taskId, status: 'available' });
+  await service.waitForTiming(job, DEFAULT_SETTINGS);
+  const afterSuccess = currentChecks;
+  publishL0TimingAvailability({ taskId, status: 'running' });
+  assert.equal(currentChecks, afterSuccess);
+  publishL0TimingAvailability({ taskId, status: 'unavailable' });
+  await assert.rejects(service.waitForTiming(job, DEFAULT_SETTINGS), /unavailable/);
+  const afterFailure = currentChecks;
+  publishL0TimingAvailability({ taskId, status: 'available' });
+  assert.equal(currentChecks, afterFailure);
 });

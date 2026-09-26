@@ -171,7 +171,7 @@ export type LocalModelSuccessResponse =
   | LocalModelDraftSuccessResponse
   | LocalModelSegmentSuccessResponse;
 
-export type LocalModelErrorCode = 'invalid-request' | 'offscreen-unavailable' | 'inference-failed';
+export type LocalModelErrorCode = 'invalid-request' | 'offscreen-unavailable' | 'inference-failed' | 'timing-unavailable';
 
 export interface LocalModelFailureResponse extends LocalModelResponseBase {
   ok: false;
@@ -395,6 +395,7 @@ export function isLocalModelOffscreenResponse(
       isRecord(value.error) &&
       (value.error.code === 'invalid-request' ||
         value.error.code === 'offscreen-unavailable' ||
+        value.error.code === 'timing-unavailable' ||
         value.error.code === 'inference-failed') &&
       typeof value.error.name === 'string' &&
       typeof value.error.message === 'string' &&

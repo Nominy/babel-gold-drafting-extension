@@ -1,8 +1,20 @@
-import test from 'node:test';
+import test, { afterEach, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateL0Timing, getL0QueueEndpoint, getL0TimingEndpoint, lookupL0Timing, parseL0TimingResponse } from '../src/core/l0-timing-client';
 import { DEFAULT_SETTINGS } from '../src/core/settings';
 import type { CapturedAudioTrack, TranscriptJob } from '../src/core/types';
+import type { L0TimingTokenRequest } from '../src/core/l0-timing-token-protocol';
+
+let previousChrome: typeof chrome;
+beforeEach(() => {
+  previousChrome = globalThis.chrome;
+  Object.assign(globalThis, { chrome: {
+    runtime: {
+      sendMessage: async (request: L0TimingTokenRequest) => ({ ...request, ok: true, token: 'a'.repeat(43) })
+    }
+  } });
+});
+afterEach(() => Object.assign(globalThis, { chrome: previousChrome }));
 
 const job: TranscriptJob = {
   jobId: 'task-42',
@@ -231,4 +243,21 @@ test('timing response parsing accepts silent lanes and rejects invalid or mismat
     /invalid timing response/
   );
   assert.throws(() => parseL0TimingResponse(timingResponse, 'new-task'), /invalid timing response/);
+});
+
+test('timing requests reject mismatched background credentials before sending audio', async (t) => {
+  t.mock.method(globalThis, 'fetch', async () => {
+    assert.fail('No audio or cache request may use an unvalidated credential');
+  });
+  for (const override of [{ taskId: 'another-task' }, { token: 'invalid' }, { version: 2 }]) {
+    Object.assign(chrome.runtime, {
+      sendMessage: async (request: L0TimingTokenRequest) => ({
+        ...request, ok: true, token: 'a'.repeat(43), ...override
+      })
+    });
+    await assert.rejects(generateL0Timing(DEFAULT_SETTINGS, singleLaneJob, audioTracks),
+      /invalid timing credential response/);
+    await assert.rejects(lookupL0Timing(DEFAULT_SETTINGS, canonicalTaskId),
+      /invalid timing credential response/);
+  }
 });

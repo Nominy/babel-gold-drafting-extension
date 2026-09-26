@@ -1,14 +1,13 @@
 import { ensureUiStyles, themeRoot, applyComponent } from '@nominy/babel-extension-frontend';
 import { generateDraftStream } from '../core/backend-client';
 import { generateL0Draft } from '../core/l0-client';
-import { generateLocalL0Draft } from '../core/local-model-client';
 import { replaceTranscriptWithL0Rows, requireL0ReplacementConsumer } from '../core/l0-replacement-bridge';
 import { matchL0CreatedRows } from '../core/l0-created-row-matcher';
 import { assessAudioCaptureForDrafting, type AudioCaptureIssue } from '../core/audio-capture-guard';
 import { captureAudioTracksForDrafting } from '../core/audio-cues';
 import { loadSettings } from '../core/settings';
 import { applyDraftRows, buildCanonicalTaskIdentity, buildDiffPreviewItems, captureTranscriptJob, restoreCapturedRows } from '../core/transcript';
-import { waitForCurrentL0Timing } from './l0-timing-service';
+import { generateCurrentLocalL0Draft, waitForCurrentL0Timing } from './l0-timing-service';
 import {
   getL0TimingAvailability,
   requestL0TimingRegeneration,
@@ -32,12 +31,12 @@ const OVERLAY_ID = 'babel-gold-drafting-overlay';
 const TOOLBAR_BUTTON_SELECTOR = 'button[aria-label="Play all tracks"]';
 export type L0DraftGenerators = {
   remote: typeof generateL0Draft;
-  local: typeof generateLocalL0Draft;
+  local: typeof generateCurrentLocalL0Draft;
 };
 
 const DEFAULT_L0_DRAFT_GENERATORS: L0DraftGenerators = {
   remote: generateL0Draft,
-  local: generateLocalL0Draft
+  local: generateCurrentLocalL0Draft
 };
 
 export function generateConfiguredL0Draft(

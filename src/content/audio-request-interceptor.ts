@@ -5,6 +5,7 @@ import {
   AUDIO_RESPONSE_MESSAGE_TYPE,
   AUDIO_SOURCE_MESSAGE_TYPE,
   PAGE_TASK_ID_ATTRIBUTE,
+  PAGE_RECORDING_LANES_ATTRIBUTE,
   PAGE_TASK_ID_REQUEST_MESSAGE_TYPE,
   PAGE_TASK_ID_RESPONSE_MESSAGE_TYPE,
   type AudioEnableCaptureMessage,
@@ -52,14 +53,21 @@ function getRequestUrl(input: RequestInfo | URL): string {
   return toAbsoluteUrl(String(input));
 }
 
-function readCurrentReviewActionId(): string {
-  return readBabelEditorState()?.reviewActionId || '';
-}
-
-function publishReviewActionId(reviewActionId: string): void {
+function publishCurrentPageIdentity(): string {
+  const state = readBabelEditorState();
+  const reviewActionId = state?.reviewActionId || '';
   const root = document.documentElement;
-  if (reviewActionId) root.setAttribute(PAGE_TASK_ID_ATTRIBUTE, reviewActionId);
-  else root.removeAttribute(PAGE_TASK_ID_ATTRIBUTE);
+  if (reviewActionId) {
+    root.setAttribute(PAGE_TASK_ID_ATTRIBUTE, reviewActionId);
+    root.setAttribute(PAGE_RECORDING_LANES_ATTRIBUTE, JSON.stringify({
+      reviewActionId,
+      tracks: state!.tracks.map(({ id, label }) => ({ id, label }))
+    }));
+  } else {
+    root.removeAttribute(PAGE_TASK_ID_ATTRIBUTE);
+    root.removeAttribute(PAGE_RECORDING_LANES_ATTRIBUTE);
+  }
+  return reviewActionId;
 }
 
 function collectEditorAudioMappings(): Map<string, TrackMapping> {
@@ -229,8 +237,7 @@ function installFlushHandler(): void {
       return;
     }
     if (event.data?.type === PAGE_TASK_ID_REQUEST_MESSAGE_TYPE && typeof event.data.requestId === 'string') {
-      const reviewActionId = readCurrentReviewActionId();
-      publishReviewActionId(reviewActionId);
+      const reviewActionId = publishCurrentPageIdentity();
       window.postMessage({
         type: PAGE_TASK_ID_RESPONSE_MESSAGE_TYPE,
         requestId: event.data.requestId,
