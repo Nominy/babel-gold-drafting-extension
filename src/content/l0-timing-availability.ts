@@ -1,6 +1,6 @@
 export type L0TimingAvailability =
   | { taskId: string; status: 'available' }
-  | { taskId: string; status: 'unavailable' }
+  | { taskId: string; status: 'unavailable'; error?: string }
   | { taskId: string; status: 'preparing' }
   | { taskId: string; status: 'queued'; position: number }
   | { taskId: string; status: 'running' }
@@ -18,6 +18,7 @@ export function publishL0TimingAvailability(availability: L0TimingAvailability):
   if (
     currentAvailability?.taskId === availability.taskId
     && currentAvailability.status === availability.status
+    && (availability.status !== 'unavailable' || (currentAvailability.status === 'unavailable' && currentAvailability.error === availability.error))
     && (
       availability.status !== 'queued'
       || (currentAvailability.status === 'queued' && currentAvailability.position === availability.position)

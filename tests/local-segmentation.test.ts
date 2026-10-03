@@ -4,6 +4,7 @@ import { buildActivityRows, segmentSamplesByActivity } from '../src/core/local-a
 import { buildSegmentWindows } from '../src/core/c-denoise-runtime';
 import { shouldRunGoldLlmAfterL0 } from '../src/content/overlay';
 import { DEFAULT_SETTINGS } from '../src/core/settings';
+import { __localModelRuntimeTesting as runtime } from '../src/core/local-model-runtime';
 
 const rate = 16_000;
 function waveform(seconds: number, active: Array<[number, number]>): Float32Array {
@@ -21,16 +22,36 @@ test('audio rows retain a long thought across word-count, duration and short-pau
   assert.deepEqual([rows[0].wordStart, rows[0].wordEnd], [0, 80]);
 });
 
-test('a real audio pause separates rows and retains even quiet words exactly once', () => {
+test('a real audio pause separates rows with the original activity boundaries', () => {
   const words = [
     { text: 'один', startSeconds: 0.5, endSeconds: 1 },
-    { text: 'тихо', startSeconds: 2, endSeconds: 2.2 },
+    { text: 'тихо', startSeconds: 1.1, endSeconds: 1.2 },
     { text: 'два', startSeconds: 4, endSeconds: 4.5 }
   ];
   const rows = buildActivityRows(words, waveform(6, [[0.4, 1.4], [3.8, 5]]));
   assert.deepEqual(rows.map(row => [row.wordStart, row.wordEnd]), [[0, 2], [2, 3]]);
   assert.ok(rows[0].endSample <= rows[1].startSample);
-  assert.deepEqual(buildActivityRows(words, new Float32Array(6 * rate)).map(row => [row.wordStart, row.wordEnd]), [[0, 3]]);
+  assert.deepEqual(rows.map(row => [row.startSample / rate, row.endSample / rate]), [[0.4, 1.4], [3.8, 5]]);
+  assert.throws(() => buildActivityRows(words, new Float32Array(6 * rate)), /outside audio activity/);
+});
+
+test('words spanning silence cannot extend or join detected speech regions', () => {
+  assert.throws(() => buildActivityRows([
+    { text: 'один', startSeconds: 0.5, endSeconds: 1 },
+    { text: 'да', startSeconds: 3, endSeconds: 8.5 }
+  ], waveform(10, [[0.4, 1.4], [8, 9]])), /inside their audio activity/);
+});
+
+test('ASR runs inside speech regions and keeps a long silence outside both rows', async () => {
+  const audio = waveform(10, [[0.4, 1.4], [8, 9]]), calls: Array<[number, number]> = [];
+  const result = await runtime.recognizeActivitySegments(audio, segmentSamplesByActivity(audio), async (chunk, start) => {
+    calls.push([start / rate, chunk.length / rate]);
+    return { durationSeconds: chunk.length / rate, tokens: [{ text: 'да', startSeconds: 0.1, endSeconds: 0.5 }] };
+  });
+  assert.deepEqual(calls, [[0.4, 1], [8, 1]]);
+  assert.deepEqual(result.ranges.map(row => [row.startSample / rate, row.endSample / rate]), [[0.4, 1.4], [8, 9]]);
+  assert.deepEqual(result.tokens.map(word => word.text), ['да', 'да']);
+  assert.equal(result.tokens[1].startSeconds, 8.1);
 });
 
 test('punctuation owns a complete fitting segment in a single joint pass', () => {

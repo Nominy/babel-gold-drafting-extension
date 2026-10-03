@@ -156,30 +156,23 @@ export function segmentSamplesByActivity(samples: Float32Array): ActivitySegment
 }
 
 
-/** Audio pauses own display boundaries; every recognized word is retained exactly once. */
+/** Audio activity owns fixed display boundaries; ASR cannot stretch rows into silence. */
 export function buildActivityRows(words: readonly AcousticWord[], samples: Float32Array): Array<WordRange & ActivitySegment> {
   if (!words.length) return [];
   const activity = segmentSamplesByActivity(samples);
-  const cuts = activity.slice(1).map((segment, index) => (activity[index].endSample + segment.startSample) / (2 * SAMPLE_RATE));
   const rows: Array<WordRange & ActivitySegment> = [];
-  let start = 0;
-  for (const cut of cuts) {
-    let end = start;
-    while (end < words.length && (words[end].startSeconds + words[end].endSeconds) / 2 < cut) end++;
-    if (end > start) { rows.push(makeRow(start, end)); start = end; }
+  let owned = 0;
+  for (const segment of activity) {
+    const wordStart = owned;
+    while (owned < words.length && (words[owned].startSeconds + words[owned].endSeconds) / 2 < segment.endSample / SAMPLE_RATE) {
+      const word = words[owned];
+      if (word.startSeconds < segment.startSample / SAMPLE_RATE - 1e-7 || word.endSeconds > segment.endSample / SAMPLE_RATE + 1e-7) {
+        throw new Error('ASR words must be recognized inside their audio activity segment; silence cannot extend a row.');
+      }
+      owned++;
+    }
+    if (owned > wordStart) rows.push({ ...segment, wordStart, wordEnd: owned });
   }
-  if (start < words.length) rows.push(makeRow(start, words.length));
+  if (owned !== words.length) throw new Error('ASR words fall outside audio activity segments.');
   return rows;
-  function makeRow(wordStart: number, wordEnd: number): WordRange & ActivitySegment {
-    // Include only activity that belongs to this row's midpoint interval. Quiet ASR
-    // words still survive, without extending a preceding row into the next utterance.
-    const lower = wordStart ? (words[wordStart - 1].endSeconds + words[wordStart].startSeconds) / 2 : 0;
-    const upper = wordEnd < words.length ? (words[wordEnd - 1].endSeconds + words[wordEnd].startSeconds) / 2 : samples.length / SAMPLE_RATE;
-    const ownedActivity = activity.filter(segment => segment.endSample / SAMPLE_RATE > lower && segment.startSample / SAMPLE_RATE < upper);
-    return { wordStart, wordEnd,
-      startSample: Math.min(Math.floor(words[wordStart].startSeconds * SAMPLE_RATE),
-        ownedActivity.length ? Math.max(Math.floor(lower * SAMPLE_RATE), ownedActivity[0].startSample) : samples.length),
-      endSample: Math.max(Math.ceil(words[wordEnd - 1].endSeconds * SAMPLE_RATE),
-        ownedActivity.length ? Math.min(Math.ceil(upper * SAMPLE_RATE), ownedActivity[ownedActivity.length - 1].endSample) : 0) };
-  }
 }

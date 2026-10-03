@@ -38,7 +38,7 @@ Remove-Item Env:\BABEL_DEV_C_DENOISE_MODEL_URL
 
 Reload the unpacked extension, open Options, select Local, and download/test this bundle. Existing pre-lowering caches must be updated. An ordinary build without that environment variable uses the hosted supplier; it does not publish these model files. The local graph bundle and matching runtime must ship together.
 
-Gold 0.2.41 uses the immutable release contract in `model-release.json`. The [release cutover guide](deploy/inference-release/README.md) covers staging the model, the shared WebGPU backend, protocol 3 workers, and mandatory client upgrades. `npm run prepare:inference-release -- --bundle DIR --sample-dir DIR --out EMPTY_DIR --evidence BACKEND_SMOKE_JSON --coordinator-evidence COORDINATOR_SMOKE_JSON` verifies the tested model and packages the production store ZIP, model files, backend dependency locks, deployment examples, and SHA-256 inventory. It requires successful real GPU/restart reports and keeps private corpus token sequences out of public metadata.
+Gold 0.2.42 uses the immutable release contract in `model-release.json`. The [release cutover guide](deploy/inference-release/README.md) covers staging the model, the shared WebGPU backend, protocol 3 workers, and mandatory client upgrades. `npm run prepare:inference-release -- --bundle DIR --sample-dir DIR --out EMPTY_DIR --evidence BACKEND_SMOKE_JSON --coordinator-evidence COORDINATOR_SMOKE_JSON` verifies the tested model and packages the production store ZIP, model files, backend dependency locks, deployment examples, and SHA-256 inventory. It requires successful real GPU/restart reports and keeps private corpus token sequences out of public metadata.
 
 ## Cloud (Simple) and Advanced modes
 

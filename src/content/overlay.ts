@@ -316,7 +316,9 @@ export class DraftingOverlayController {
     const status = availability?.status ?? 'unavailable';
     const copyByStatus: Record<L0TimingAvailability['status'], string> = {
       available: 'Timestamp data available',
-      unavailable: 'Timestamp data not available',
+      unavailable: availability?.status === 'unavailable' && availability.error
+        ? `Timestamp data not available: ${availability.error}`
+        : 'Timestamp data not available',
       preparing: 'Generating timestamp data…',
       queued:
         availability?.status === 'queued'

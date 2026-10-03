@@ -148,7 +148,7 @@ export class L0TimingService {
       return;
     }
     if (state.failureCount > MAX_AUTOMATIC_RETRIES) {
-      publishL0TimingAvailability({ taskId, status: 'unavailable' });
+      publishL0TimingAvailability({ taskId, status: 'unavailable', ...(state.error ? { error: state.error.message } : {}) });
       return;
     }
     if (state.retryScheduled || this.dependencies.now() < state.retryNotBefore) {
@@ -194,7 +194,7 @@ export class L0TimingService {
     state.failureCount += 1;
     if (state.failureCount > MAX_AUTOMATIC_RETRIES) {
       state.retryNotBefore = Number.POSITIVE_INFINITY;
-      publishL0TimingAvailability({ taskId, status: 'unavailable' });
+      publishL0TimingAvailability({ taskId, status: 'unavailable', ...(state.error ? { error: state.error.message } : {}) });
       return;
     }
     const delayMs = Math.min(INITIAL_RETRY_DELAY_MS * 2 ** (state.failureCount - 1), MAX_RETRY_DELAY_MS);
@@ -289,10 +289,10 @@ export class L0TimingService {
       if (!(await this.verifyOwner(taskId, state))) return;
       state.error = error instanceof Error ? error : new Error(String(error));
       if (settings.mode === 'simple') {
-        publishL0TimingAvailability({ taskId, status: 'unavailable' });
+        publishL0TimingAvailability({ taskId, status: 'unavailable', error: state.error.message });
       } else if (settings.mode === 'local') {
         state.failureCount = MAX_AUTOMATIC_RETRIES + 1;
-        publishL0TimingAvailability({ taskId, status: 'unavailable' });
+        publishL0TimingAvailability({ taskId, status: 'unavailable', error: state.error.message });
       } else {
         console.error(`[Babel Gold] word timing attempt ${state.failureCount + 1} failed for task ${taskId}.`, error);
         this.scheduleRetry(taskId, state);
@@ -364,7 +364,7 @@ export class L0TimingService {
       const checkTask = () => { if (!isCurrent()) finish(changedError()); };
       const onAvailability = (availability: L0TimingAvailability) => {
         if (!isCurrent() || availability.taskId !== taskId) return checkTask();
-        if (availability.status === 'unavailable') finish(new Error(`L0 timing for task ${taskId} is unavailable.`));
+        if (availability.status === 'unavailable') finish(state.error ?? new Error(`L0 timing for task ${taskId} is unavailable.`));
         else if (availability.status === 'available' ||
           (!isBrowserLocalMode(settings) && (availability.status === 'queued' || availability.status === 'running'))) finish();
       };
