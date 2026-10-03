@@ -1,9 +1,12 @@
 import type { PreparedL0Track } from '../core/l0-client';
+import { IS_DEV_C_DENOISE, isBrowserLocalMode } from '../core/settings';
 import { buildCanonicalTaskIdentity } from '../core/transcript';
 import {
   generateLocalL0DraftFromTiming,
   generateLocalL0SegmentDraft,
-  generateLocalL0Timing
+  generateLocalL0Timing,
+  isLocalTimingCurrent,
+  LocalTimingUnavailableError
 } from '../core/local-model-runtime';
 import { createVolunteer, defaultVolunteerDependencies, loadVolunteerSettings } from './volunteer';
 import { isVolunteerMessage } from '../core/volunteer-protocol';
@@ -35,6 +38,7 @@ import type {
 } from '../core/types';
 
 type LocalModelRuntime = {
+  isLocalTimingCurrent: (timing: L0TimingResponse) => Promise<boolean>;
   generateLocalL0Timing: (
     settings: ExtensionSettings,
     job: TranscriptJob,
@@ -90,7 +94,7 @@ class InvalidAudioTransferError extends Error {
 }
 
 async function loadLocalModelRuntime(): Promise<LocalModelRuntime> {
-  return { generateLocalL0Timing, generateLocalL0DraftFromTiming, generateLocalL0SegmentDraft };
+  return { generateLocalL0Timing, generateLocalL0DraftFromTiming, generateLocalL0SegmentDraft, isLocalTimingCurrent };
 }
 
 export function createLocalModelHost(
@@ -249,6 +253,10 @@ export function createLocalModelHost(
     try {
       if (request.operation === 'timing') {
         let result = timings.get(buildCanonicalTaskIdentity(request.job));
+        if (result && !(await (await loadRuntime()).isLocalTimingCurrent(result))) {
+          timings.delete(result.taskId);
+          result = undefined;
+        }
         if (!result) {
           const tracks = resolveCapturedAudioTracks(request.audioTracks);
           const runtime = await loadRuntime();
@@ -256,7 +264,6 @@ export function createLocalModelHost(
           timings.set(result.taskId, result);
           if (timings.size > 2) timings.delete(timings.keys().next().value!);
         }
-        consumeTransfers(request.audioTracks.map((track) => track.audioTransferId));
         const response: LocalModelTimingSuccessResponse = {
           type: LOCAL_MODEL_OFFSCREEN_MESSAGE_TYPE,
           version: LOCAL_MODEL_OFFSCREEN_VERSION,
@@ -269,11 +276,11 @@ export function createLocalModelHost(
       }
       if (request.operation === 'draft') {
         const timing = timings.get(request.taskId);
-        if (!timing) {
-          return createLocalModelFailure(request, 'timing-unavailable',
-            new Error(`Timing for task ${request.taskId} is not available in the offscreen runtime.`));
+        const runtime = timing ? await loadRuntime() : null;
+        if (!timing || !runtime || !(await runtime.isLocalTimingCurrent(timing))) {
+          timings.delete(request.taskId);
+          return createLocalModelFailure(request, 'timing-unavailable', new LocalTimingUnavailableError(request.taskId));
         }
-        const runtime = await loadRuntime();
         const result = await runtime.generateLocalL0DraftFromTiming(timing);
         const response: LocalModelDraftSuccessResponse = {
           type: LOCAL_MODEL_OFFSCREEN_MESSAGE_TYPE,
@@ -293,7 +300,6 @@ export function createLocalModelHost(
         request.row,
         tracks
       );
-      consumeTransfers(request.tracks.map((track) => track.audio.audioTransferId));
       const response: LocalModelSegmentSuccessResponse = {
         type: LOCAL_MODEL_OFFSCREEN_MESSAGE_TYPE,
         version: LOCAL_MODEL_OFFSCREEN_VERSION,
@@ -304,8 +310,12 @@ export function createLocalModelHost(
       };
       return response;
     } catch (error) {
-      const code = error instanceof InvalidAudioTransferError ? 'invalid-request' : 'inference-failed';
+      const code = error instanceof InvalidAudioTransferError ? 'invalid-request' :
+        error instanceof LocalTimingUnavailableError ? 'timing-unavailable' : 'inference-failed';
       return createLocalModelFailure(request, code, error);
+    } finally {
+      if (request.operation === 'timing') consumeTransfers(request.audioTracks.map((track) => track.audioTransferId));
+      if (request.operation === 'segment') consumeTransfers(request.tracks.map((track) => track.audio.audioTransferId));
     }
   }
 
@@ -338,7 +348,7 @@ if (runtimeMessages && typeof runtimeMessages.addListener === 'function') {
   const volunteer = createVolunteer({ ...defaultVolunteerDependencies, runExclusive: host.runExclusive });
   // A recovered document must resume polling even if the service worker did not restart.
   void loadVolunteerSettings().then((settings) => {
-    if (settings.localModelsEnabled && settings.volunteerInferenceEnabled) volunteer.start();
+    if (!IS_DEV_C_DENOISE && isBrowserLocalMode(settings) && settings.volunteerInferenceEnabled) volunteer.start();
   }).catch(() => {
     // The background lifecycle reports setup failures to Options.
   });

@@ -1,3 +1,4 @@
+import { INFERENCE_HEADERS } from './inference-release';
 import { normalizeL0CustomBaseUrl } from './settings';
 import { assertL0WavAudio, type PreparedL0Track } from './l0-client';
 import { buildCanonicalTaskIdentity } from './transcript';
@@ -43,6 +44,7 @@ export async function lookupL0Timing(settings: ExtensionSettings, taskId: string
   const response = await fetch(`${normalizeL0CustomBaseUrl(settings.l0CustomBaseUrl)}${L0_TIMING_LOOKUP_PATH}`, {
     method: 'POST',
     headers: {
+      ...INFERENCE_HEADERS,
       Accept: 'application/json',
       'Content-Type': 'application/json',
       ...await timingAuthorization(taskId)
@@ -317,7 +319,7 @@ async function pollQueueStatus(
     try {
       const response = await fetch(endpoint, {
         method: 'GET',
-        headers: { Accept: 'application/json' },
+        headers: { ...INFERENCE_HEADERS, Accept: 'application/json' },
         signal
       });
       if (signal.aborted) {
@@ -369,6 +371,7 @@ export async function generateL0Timing(
   const responsePromise = fetch(endpoint, {
     method: 'POST',
     headers: {
+      ...INFERENCE_HEADERS,
       Accept: 'application/json',
       'X-Babel-Local-Engine': '1',
       'X-Babel-Request-Id': requestId,

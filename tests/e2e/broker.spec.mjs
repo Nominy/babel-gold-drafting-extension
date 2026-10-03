@@ -53,15 +53,16 @@ async function stream(world, extensionId, payload) {
     port.postMessage(${JSON.stringify(payload)});
   })`);
 }
-async function configure(page, babel, inference = false) {
+async function configure(page, babel, inference = false, settings = {}) {
   const useSpeech = inference && babel.ai !== 'placeholder';
   if (useSpeech && !babel.hasSpeechFixtures) {
     throw new Error('Real broker transcription requires --speech-fixtures=DIR with authorized two-speaker WAVs and aligned annotations.');
   }
   await babel.setExtensionSettings('gold', {
+    mode: 'advanced',
     backendBaseUrl: babel.apiURL, l0CustomBaseUrl: babel.apiURL,
     openRouterApiKey: 'e2e-non-secret-admission-key', aiBrokerProvider: 'remote-openrouter',
-    l0ReplacementPreviewEnabled: false, localModelsEnabled: false,
+    l0ReplacementPreviewEnabled: false, localModelsEnabled: false, ...settings,
   });
   const state = await babel.reset('baseline',
     useSpeech ? { audio: { fixture: 'speech' } } : {});
@@ -232,5 +233,76 @@ test.describe('Gold runtime allowlist with all three products', () => {
     expect(result.error).toMatch(/connect|receiving|access|allowed/i);
     expect((await babel.state()).calls.filter((call) => call.path.startsWith('/api/broker/'))).toEqual([]);
     await reviewOptions.close();
+  });
+});
+
+test.describe('Simple Helper actions use native cached MAI results', () => {
+  test.use({ extensions: ['helper', 'gold'] });
+
+  test('both segment shortcuts share source timing and only explicit redistribution calls a text model', async ({ page, context, babel }) => {
+    const calls = [];
+    let sourceRange = { startSeconds: 0.5, endSeconds: 2.5 };
+    await context.route('https://openrouter.ai/**', async (route) => {
+      const path = new URL(route.request().url()).pathname;
+      calls.push(path);
+      if (path.endsWith('/audio/transcriptions')) {
+        const start = sourceRange.startSeconds + 0.05;
+        const duration = (sourceRange.endSeconds - sourceRange.startSeconds) / 5;
+        await route.fulfill({
+          status: 200, contentType: 'application/json',
+          body: JSON.stringify({ text: 'Ну, я… да!', words: [
+            { word: 'Ну', start, end: start + duration },
+            { word: 'я', start: start + duration, end: start + duration * 2 },
+            { word: 'да', start: start + duration * 2, end: start + duration * 3 },
+          ] }),
+        });
+      } else if (path.endsWith('/chat/completions')) {
+        await route.fulfill({
+          status: 200, contentType: 'application/json',
+          body: JSON.stringify({ choices: [{ message: { content: JSON.stringify({
+            acceptDraft: false, moves: [{ fromIndex: 1, toIndex: 2, sentenceCount: 1 }],
+          }) } }] }),
+        });
+      } else {
+        await route.fulfill({ status: 500, body: 'Unexpected Simple provider request' });
+      }
+    });
+    const segment = await configure(page, babel, false, {
+      mode: 'simple', backendBaseUrl: 'https://not-configured.invalid',
+      l0CustomBaseUrl: 'https://not-configured.invalid', localModelsEnabled: true,
+      aiBrokerProvider: 'local-gemini-nano', l0DontRunLlm: false,
+    });
+    sourceRange = segment;
+    await page.locator('#babel-gold-drafting-magic-button').hover();
+    await expect(page.locator('.bgd-timing-hover-panel')).toHaveAttribute('data-status', 'unavailable');
+    const taskId = await page.locator('.bgd-timing-hover-panel').getAttribute('data-task-id');
+    expect(calls).toEqual([]);
+    const world = await helperWorld(context, page, babel.extensionIds.helper);
+    try {
+      const legacy = await send(world, babel.extensionIds.gold, request('transcribeSegment', { segment }));
+      expect(legacy).toMatchObject({ ok: true, provider: 'remote-openrouter', text: 'Ну, я… да!' });
+      const l0 = await stream(world, babel.extensionIds.gold, request('transcribeSegmentL0', {
+        taskId, row: { ...segment, text: 'This existing text must not be rewritten by chat.', index: 0 },
+      }));
+      expect(l0.at(-1).response).toMatchObject({ ok: true, provider: 'remote-openrouter', result: { text: 'Ну, я… да!' } });
+      expect(calls).toEqual(['/api/v1/audio/transcriptions', '/api/v1/audio/transcriptions']);
+      const group = {
+        groupId: 'native-review', speakerKey: segment.speakerKey, fullText: 'Ну, я… да!',
+        segments: [
+          { id: 'one', index: 1, speakerKey: segment.speakerKey, startSeconds: 0, endSeconds: 1, text: 'Ну, я… да!' },
+          { id: 'two', index: 2, speakerKey: segment.speakerKey, startSeconds: 1, endSeconds: 2, text: '' },
+        ],
+        draftAllocations: [{ segmentId: 'one', text: 'Ну, я… да!' }, { segmentId: 'two', text: '' }],
+      };
+      const redistributed = await send(world, babel.extensionIds.gold, request('redistributeText', { groups: [group] }));
+      expect(redistributed).toMatchObject({
+        ok: true, provider: 'remote-openrouter', results: [{
+          groupId: 'native-review', ok: true,
+          review: { acceptDraft: false, moves: [{ fromIndex: 1, toIndex: 2, sentenceCount: 1 }] },
+        }],
+      });
+      expect(calls.filter((path) => path.endsWith('/chat/completions'))).toHaveLength(1);
+      expect((await babel.state()).calls.filter((call) => call.path.startsWith('/api/broker/') || call.path.startsWith('/v1/') || call.path.startsWith('/api/draft/'))).toEqual([]);
+    } finally { await world.close(); }
   });
 });

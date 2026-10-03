@@ -9,6 +9,7 @@ const sample = (page) => page.locator('[data-role="local-model-supplied-test"]')
 
 async function openOptions(babel) {
   await babel.setExtensionSettings('gold', {
+    mode: 'advanced',
     backendBaseUrl: babel.apiURL, l0CustomBaseUrl: babel.apiURL,
     l0ReplacementPreviewEnabled: false, localModelsEnabled: false,
   });
@@ -83,7 +84,7 @@ test.describe('Gold actual options, cache, and offscreen controls', () => {
   });
   });
 
-  test('download progress disables unsafe controls and an integrity failure removes staged data', { tag: '@browser-models' }, async ({ page, babel }) => {
+  test('download progress disables unsafe controls and an integrity failure cannot activate staged data', { tag: '@browser-models' }, async ({ page, babel }) => {
     const options = await openOptions(babel);
     await expect(options.locator('#localModelsEnabled')).toBeDisabled();
     await expect(sample(options)).toBeDisabled();
@@ -96,14 +97,14 @@ test.describe('Gold actual options, cache, and offscreen controls', () => {
     await expect(options.locator(STATUS)).toHaveAttribute('role', 'alert');
     await expect(options.locator('#localModelsEnabled')).toBeDisabled();
     await expect(sample(options)).toBeDisabled();
-    expect(await cachesIn(options)).toEqual([]);
+    await expect(options.locator('#localModelsEnabled')).not.toBeChecked();
     await babel.control({ routes: {} });
     await install(options);
     expect(await cachesIn(options)).toHaveLength(1);
     await options.close();
   });
 
-  test('verified bundle survives reload, a failed update preserves it, and Remove deletes it', { tag: '@browser-models' }, async ({ page, babel }) => {
+  test('verified bundle survives reload, a failed update preserves data without readiness, and Remove deletes it', { tag: '@browser-models' }, async ({ page, babel }) => {
     const options = await openOptions(babel);
     // Placeholder mode serves explicitly marked synthetic bytes. This verifies
     // the real manifest/hash/cache install contract, not successful ONNX execution.
@@ -114,12 +115,13 @@ test.describe('Gold actual options, cache, and offscreen controls', () => {
     await expect(options.locator(STATUS)).toContainText('verified and cached');
     await expect(sample(options)).toBeEnabled();
     await expect(options.locator('#localModelsEnabled')).toBeDisabled();
-    await babel.control({ routes: { [MODEL_FILE]: { error: { status: 503, message: 'E2E model supplier unavailable' }, times: 1 } } });
+    await babel.control({ routes: { '/browser-model/manifest.json': { error: { status: 503, message: 'E2E model supplier unavailable' }, times: 1 } } });
     await download(options).click();
     await expect(options.locator(STATUS)).toContainText('HTTP 503');
     expect(await cachesIn(options)).toEqual(initialCache);
     await options.reload();
-    await expect(options.locator(STATUS)).toContainText('verified and cached');
+    await expect(options.locator(STATUS)).toContainText('HTTP 503');
+    await expect(sample(options)).toBeDisabled();
     await remove(options).click();
     await options.getByRole('dialog', { name: 'Remove local models?' }).getByRole('button', { name: 'Cancel', exact: true }).click();
     await expect(remove(options)).toBeEnabled();

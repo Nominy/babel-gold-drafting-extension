@@ -12,11 +12,44 @@
 <header class="bui-header">
 <div>
 <h1 class="bui-title">Babel Gold Drafting settings</h1>
-<p class="bui-hint">Configure drafting, audio, and local models.</p>
+<p class="bui-hint">Use Local WebGPU transcription, or explicitly select a cloud or Advanced workflow.</p>
 </div>
 </header>
 <div class="bui-body">
 <div class="bui-stack">
+<div class="bui-card">
+<label for="mode" class="bui-label">Mode</label>
+<select id="mode" name="mode" class="bui-select">
+  <option value="local">Local — C-denoise on WebGPU</option>
+  <option value="simple">Cloud (Simple) — MAI transcription</option>
+  <option value="advanced">Advanced</option>
+</select>
+</div>
+<div data-role="cloud-key-settings" class="bui-card" hidden>
+<label for="openRouterApiKey" class="bui-label">OpenRouter API Key</label>
+<input id="openRouterApiKey" name="openRouterApiKey" type="password" autocomplete="off" placeholder="sk-or-..." class="bui-input">
+</div>
+<section data-role="local-settings" class="bui-card" aria-labelledby="local-heading">
+<h2 id="local-heading" class="bui-title">Local C-denoise transcription</h2>
+<p class="bui-hint">The accepted speech checkpoint and learned C-denoise punctuation run on this browser's WebGPU. No OpenRouter key or inference backend is needed for transcription. An optional Gold LLM pass can refine the resulting segments. Install and verify the model bundle, then pass a short audio test before using it. Downloads and tests run only when you request them.</p>
+<p class="bui-hint">Your task audio is not uploaded for local inference. There is no CPU/WASM neural inference or automatic cloud fallback. If WebGPU or the verified bundle is unavailable, Local stops with an actionable error. Cloud transcription is available only by explicitly changing Mode.</p>
+</section>
+<section data-role="simple-settings" class="bui-card" aria-labelledby="simple-heading">
+<h2 id="simple-heading" class="bui-title">Cloud (Simple) transcription</h2>
+<p class="bui-hint">With Babel Helper installed for editor integration, only an OpenRouter key is needed. Microsoft MAI Transcribe 2 (<code class="bui-code">microsoft/mai-transcribe-2</code>) produces verbatim text with native punctuation and word timestamps in the same editor. There is no hidden Gold rewriting pass.</p>
+<p class="bui-hint">Task audio is sent to OpenRouter and its cloud transcription provider. The estimated price is about $0.10 per audio hour; both audio lanes are billed, so two one-hour lanes cost about $0.20. Provider pricing can change.</p>
+<p class="bui-hint">Paid transcription runs only when you explicitly use the transcription wand, Helper transcription, or retry action, never when a task page opens. No backend setup or local-model download is required.</p>
+<p class="bui-hint">Helper text redistribution is a separate, explicitly requested paid text-model action using the same key. MAI transcription does not add Babel-specific vocal-event tags or guarantee Gold rule-pack compliance; review the draft before saving.</p>
+</section>
+<div data-role="gold-llm-settings" class="bui-card">
+          <label class="checkbox-row bui-label bui-card bui-setting-toggle" for="l0DontRunLlm">
+            <input id="l0DontRunLlm" name="l0DontRunLlm" type="checkbox" class="bui-checkbox">
+            <span>Don't run the LLM</span>
+          </label>
+<p class="bui-hint">After Local transcription, Gold drafting runs when an OpenRouter key is configured and this box is unchecked. This paid pass sends the draft and, when enabled in Advanced settings, audio to the backend.</p>
+</div>
+<fieldset data-role="advanced-settings" class="bui-stack bui-card" hidden disabled>
+<legend class="bui-label">Advanced workflow</legend>
 <div class="bui-card">
 <label for="backendBaseUrl" class="bui-label">Backend Base URL</label>
 <input id="backendBaseUrl" name="backendBaseUrl" placeholder="https://reviewgen.ovh" class="bui-input">
@@ -36,20 +69,13 @@
 </div>
 
 
-          <label class="checkbox-row bui-label bui-card bui-setting-toggle" for="l0DontRunLlm">
-            <input id="l0DontRunLlm" name="l0DontRunLlm" type="checkbox" class="bui-checkbox">
-            <span>Don't run the LLM</span>
-          </label>
+
         </div>
 <div class="bui-card">
 <label for="projectPreset" class="bui-label">Project Preset</label>
 <select id="projectPreset" name="projectPreset" class="bui-select">
           <option value="ru-gold-2sp-v1">Russian Gold 2-speaker v1</option>
         </select>
-</div>
-<div class="bui-card">
-<label for="openRouterApiKey" class="bui-label">OpenRouter API Key</label>
-<input id="openRouterApiKey" name="openRouterApiKey" type="password" autocomplete="off" placeholder="sk-or-..." class="bui-input">
 </div>
 <div class="bui-card">
 <label for="model" class="bui-label">Model</label>
@@ -101,10 +127,11 @@
             </span>
           </span>
         </label>
+</fieldset>
 <section class="local-model-panel bui-card" data-role="local-model-setup" aria-labelledby="local-model-heading">
-          <h2 id="local-model-heading" class="bui-title">Local browser models</h2>
+          <h2 id="local-model-heading" class="bui-title">C-denoise browser bundle v3</h2>
           <p class="field-help bui-hint">
-            Remote drafting remains the default. Downloaded models can run locally for your own tasks. By default, an enabled browser also volunteers for other users' L0 drafting and transcription jobs: their audio is downloaded from the L0 coordinator and processed here using your compute power and network connection. You can opt out below without disabling your own local models. Model files come from the separate model supplier.
+            Install the accepted GigaAM speech checkpoint plus the learned C-denoise context and denoising graphs. All inference uses WebGPU. The supplier serves only model files and the optional public-domain test sample, not an inference or audio-upload API. Other users' audio is processed here only if you explicitly opt in below.
           </p>
           <p class="field-help bui-hint">
 <strong>1. Download</strong> and verify the Babel model bundle in this browser.</p>
@@ -122,15 +149,15 @@
           <label class="checkbox-row bui-label bui-card bui-setting-toggle" for="localModelsEnabled">
             <input id="localModelsEnabled" name="localModelsEnabled" type="checkbox" disabled="" class="bui-checkbox">
             <span>
-              3. Enable downloaded local browser models
-              <span class="field-help bui-hint">Available only after the current bundle is ready and passes the audio test. Local inference for your own tasks works whether or not you volunteer below.</span>
+              3. Enable downloaded models in Advanced mode
+              <span class="field-help bui-hint">Local mode always uses the verified, tested bundle. This preference only selects local inference inside Advanced. Both modes require the current bundle to pass its WebGPU audio test.</span>
             </span>
           </label>
           <label class="checkbox-row bui-label bui-card bui-setting-toggle" for="volunteerInferenceEnabled">
-            <input id="volunteerInferenceEnabled" name="volunteerInferenceEnabled" type="checkbox" checked="" class="bui-checkbox">
+            <input id="volunteerInferenceEnabled" name="volunteerInferenceEnabled" type="checkbox" class="bui-checkbox">
             <span>
               Volunteer to process other users' L0 audio
-              <span class="field-help bui-hint">Uncheck to use local models for your own tasks only. Save Settings to stop accepting new volunteer jobs; recheck and save to join again.</span>
+              <span class="field-help bui-hint">Off for new installs. This explicitly permits downloading other users' audio from the coordinator and using your compute and network. Save Settings to apply your choice; own-task local inference does not require volunteering.</span>
             </span>
           </label>
           <button type="button" data-role="local-model-remove" disabled="" class="bui-button">Remove downloaded models</button>

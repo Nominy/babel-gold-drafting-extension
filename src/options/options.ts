@@ -2,12 +2,16 @@ import { ensureUiStyles, confirmDialog } from '@nominy/babel-extension-frontend'
 import {
   LOCAL_MODEL_BASE_URL,
   LOCAL_MODEL_SAMPLE_URL,
+  IS_DEV_C_DENOISE,
+  isBrowserLocalMode,
   loadSettings,
   normalizeL0CustomBaseUrl,
   saveSettings
 } from '../core/settings';
 import {
   getLocalModelStatus,
+  getCachedBundleDescriptor,
+  markLocalModelWebGpuTested,
   removeLocalModels,
   setupLocalModels,
   type LocalModelStatus
@@ -41,54 +45,26 @@ function formatByteCount(bytes: number): string {
   const unitIndex = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
   return `${(bytes / 1024 ** unitIndex).toFixed(unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
 }
-function readAudioDurationSeconds(file: File): Promise<number> {
-  const { promise, resolve, reject } = Promise.withResolvers<number>();
-  const objectUrl = URL.createObjectURL(file);
-  const audio = new Audio();
-  const cleanup = (): void => {
-    audio.removeAttribute('src');
-    audio.load();
-    URL.revokeObjectURL(objectUrl);
-  };
-  audio.preload = 'metadata';
-  audio.addEventListener(
-    'loadedmetadata',
-    () => {
-      const durationSeconds = audio.duration;
-      cleanup();
-      if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
-        reject(new Error('The selected audio file has no readable duration.'));
-        return;
-      }
-      resolve(durationSeconds);
-    },
-    { once: true }
-  );
-  audio.addEventListener(
-    'error',
-    () => {
-      cleanup();
-      reject(new Error('The selected file could not be read as audio. Choose a WAV or another supported audio file.'));
-    },
-    { once: true }
-  );
-  audio.src = objectUrl;
-  return promise;
-}
 export interface OptionsDependencies {
   fetchResource: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
-  readAudioDuration: (file: File) => Promise<number>;
   transcribeAudio: typeof transcribeLocalAudio;
   volunteerStatus?: () => Promise<VolunteerStatus>;
 }
 const DEFAULT_OPTIONS_DEPENDENCIES: OptionsDependencies = {
   fetchResource: globalThis.fetch.bind(globalThis),
-  readAudioDuration: readAudioDurationSeconds,
   transcribeAudio: transcribeLocalAudio
 };
 export async function boot(overrides: Partial<OptionsDependencies> = {}): Promise<void> {
   ensureUiStyles();
   const dependencies = { ...DEFAULT_OPTIONS_DEPENDENCIES, ...overrides };
+  const modeSelect = requireElement<HTMLSelectElement>('#mode');
+  const simpleSettings = requireElement<HTMLElement>('[data-role="simple-settings"]');
+  const localSettings = requireElement<HTMLElement>('[data-role="local-settings"]');
+  const cloudKeySettings = requireElement<HTMLElement>('[data-role="cloud-key-settings"]');
+  const localModelSetup = requireElement<HTMLElement>('[data-role="local-model-setup"]');
+  const advancedSettings = requireElement<HTMLFieldSetElement>('[data-role="advanced-settings"]');
+  const isAdvanced = (): boolean => modeSelect.value === 'advanced';
+  const showsLocalModels = (): boolean => modeSelect.value !== 'simple';
   const backendBaseUrlInput = requireElement<HTMLInputElement>('#backendBaseUrl');
   const projectPresetSelect = requireElement<HTMLSelectElement>('#projectPreset');
   const openRouterApiKeyInput = requireElement<HTMLInputElement>('#openRouterApiKey');
@@ -128,15 +104,16 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
   const renderLocalModelControls = (): void => {
     const hasAudioFile = Boolean(localModelTestAudioInput.files?.[0]);
     const localModelCanEnable = localModelStatus.state === 'ready' && localModelTestSucceeded;
-    localModelsEnabledInput.disabled = localModelOperationRunning || !localModelCanEnable;
-    volunteerInferenceEnabledInput.disabled = localModelOperationRunning;
+    localModelsEnabledInput.disabled = !isAdvanced() || localModelOperationRunning || !localModelCanEnable;
+    volunteerInferenceEnabledInput.disabled = IS_DEV_C_DENOISE || localModelOperationRunning;
     localModelTestAudioInput.disabled = localModelOperationRunning || localModelStatus.state !== 'ready';
     localModelDownloadButton.disabled = localModelOperationRunning;
-    localModelRemoveButton.disabled = localModelOperationRunning || localModelStatus.state !== 'ready';
+    localModelRemoveButton.disabled = localModelOperationRunning;
     localModelTestButton.disabled =
       localModelOperationRunning || localModelStatus.state !== 'ready' || !hasAudioFile;
     localModelSuppliedTestButton.disabled = localModelOperationRunning || localModelStatus.state !== 'ready';
     saveButton.disabled = localModelOperationRunning;
+    modeSelect.disabled = localModelOperationRunning;
     const showProgress = localModelStatus.state === 'downloading' && localModelStatus.totalBytes > 0;
     localModelProgress.hidden = !showProgress;
     localModelProgress.max = Math.max(localModelStatus.totalBytes, 1);
@@ -147,7 +124,11 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
     if (localModelNotice) {
       localModelStatusElement.textContent = localModelNotice;
     } else if (localModelStatus.state === 'ready') {
-      localModelStatusElement.textContent = `Ready — ${formatByteCount(localModelStatus.totalBytes)} verified and cached.`;
+      localModelStatusElement.textContent =
+        `C-denoise v3 — ${formatByteCount(localModelStatus.totalBytes)} verified and cached. ` +
+        (localModelStatus.tested ? 'WebGPU audio test passed.' : 'Run the WebGPU audio test before use.') +
+        ` ASR ${localModelStatus.source?.asrCheckpointSha256 ?? 'unknown'}; ` +
+        `C-denoise ${localModelStatus.source?.cDenoiseCheckpointSha256 ?? 'unknown'}.`;
     } else if (localModelStatus.state === 'downloading') {
       const currentPath = localModelStatus.currentPath ? ` (${localModelStatus.currentPath})` : '';
       localModelStatusElement.textContent =
@@ -162,6 +143,7 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
   };
   const refreshLocalModelStatus = async (): Promise<void> => {
     localModelNotice = '';
+    if (!showsLocalModels()) return;
     localModelNoticeIsError = false;
     try {
       localModelStatus = await getLocalModelStatus(LOCAL_MODEL_BASE_URL);
@@ -176,6 +158,7 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
     renderLocalModelControls();
   };
   const writeSettingsToControls = (settings: ExtensionSettings): void => {
+    modeSelect.value = settings.mode;
     backendBaseUrlInput.value = settings.backendBaseUrl;
     projectPresetSelect.value = settings.projectPreset;
     openRouterApiKeyInput.value = settings.openRouterApiKey;
@@ -193,10 +176,18 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
   };
   let persistedSettings = await loadSettings();
   const refreshVolunteerStatus = async (): Promise<void> => {
-    if (localModelsEnabledInput.checked !== persistedSettings.localModelsEnabled ||
+    if (!showsLocalModels()) return;
+    if (IS_DEV_C_DENOISE) {
+      volunteerStatusElement.textContent = 'Own-task WebGPU trial; shared coordinator not enabled. Your stored volunteer preference is preserved, but no shared jobs run in this dev build.';
+      volunteerStatusElement.setAttribute('role', 'status');
+      return;
+    }
+    const selectedLocal = modeSelect.value === 'local' || (isAdvanced() && localModelsEnabledInput.checked);
+    const savedLocal = isBrowserLocalMode(persistedSettings);
+    if (selectedLocal !== savedLocal ||
         volunteerInferenceEnabledInput.checked !== persistedSettings.volunteerInferenceEnabled) {
-      const selected = localModelsEnabledInput.checked && volunteerInferenceEnabledInput.checked;
-      const saved = persistedSettings.localModelsEnabled && persistedSettings.volunteerInferenceEnabled;
+      const selected = selectedLocal && volunteerInferenceEnabledInput.checked;
+      const saved = savedLocal && persistedSettings.volunteerInferenceEnabled;
       volunteerStatusElement.textContent = selected && !saved
         ? 'Volunteer: Save Settings to start volunteering.'
         : !selected && saved
@@ -206,11 +197,11 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
       return;
     }
     let worker: VolunteerStatus;
-    if (!persistedSettings.localModelsEnabled) {
+    if (!savedLocal) {
       worker = { state: 'disabled' };
     } else if (!persistedSettings.volunteerInferenceEnabled) {
       worker = { state: 'disabled', detail: 'Swarm participation is off; local models remain available for your own tasks.' };
-    } else if (localModelStatus.state !== 'ready') {
+    } else if (localModelStatus.state !== 'ready' || !localModelStatus.tested) {
       worker = { state: 'disabled', detail: 'The local model bundle is not ready.' };
     } else {
       try {
@@ -234,24 +225,51 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
     volunteerStatusElement.textContent = `Volunteer: ${label[worker.state]}${worker.detail ? ` ${worker.detail}` : ''}`;
     volunteerStatusElement.setAttribute('role', worker.state === 'error' ? 'alert' : 'status');
   };
-  const settings = persistedSettings;
-  writeSettingsToControls(settings);
-  await refreshLocalModelStatus();
-  if (settings.localModelsEnabled && localModelStatus.state === 'ready') {
-    localModelTestSucceeded = true;
-  } else if (settings.localModelsEnabled) {
-    localModelsEnabledInput.checked = false;
-  }
-  renderLocalModelControls();
-  await refreshVolunteerStatus();
-  const volunteerStatusTimer = setInterval(() => { void refreshVolunteerStatus(); }, 3_000);
-  if (typeof volunteerStatusTimer === 'object' && 'unref' in volunteerStatusTimer) volunteerStatusTimer.unref();
-  window.addEventListener('pagehide', () => clearInterval(volunteerStatusTimer), { once: true });
+  let localModelsInitialized = false;
+  let volunteerStatusRunning = false;
+  let stopVolunteerStatus = (): void => {};
+  const renderMode = async (): Promise<void> => {
+    const advanced = isAdvanced();
+    const local = modeSelect.value === 'local';
+    simpleSettings.hidden = modeSelect.value !== 'simple';
+    localSettings.hidden = !local;
+    cloudKeySettings.hidden = false;
+    openRouterApiKeyInput.disabled = false;
+    requireElement<HTMLElement>('[data-role="gold-llm-settings"]').hidden = modeSelect.value === 'simple';
+    advancedSettings.hidden = !advanced;
+    advancedSettings.disabled = !advanced;
+    localModelSetup.hidden = !showsLocalModels();
+    if (!showsLocalModels()) {
+      stopVolunteerStatus();
+      return;
+    }
+    if (!localModelsInitialized) {
+      localModelsInitialized = true;
+      await refreshLocalModelStatus();
+      localModelTestSucceeded = localModelStatus.state === 'ready' && localModelStatus.tested === true;
+    }
+    renderLocalModelControls();
+    if (!showsLocalModels()) return;
+    await refreshVolunteerStatus();
+    if (IS_DEV_C_DENOISE || !showsLocalModels() || volunteerStatusRunning) return;
+    const volunteerStatusTimer = setInterval(() => { void refreshVolunteerStatus(); }, 3_000);
+    volunteerStatusRunning = true;
+    stopVolunteerStatus = (): void => {
+      clearInterval(volunteerStatusTimer);
+      volunteerStatusRunning = false;
+    };
+    if (typeof volunteerStatusTimer === 'object' && 'unref' in volunteerStatusTimer) volunteerStatusTimer.unref();
+  };
+  writeSettingsToControls(persistedSettings);
+  await renderMode();
+  window.addEventListener('pagehide', () => stopVolunteerStatus(), { once: true });
+  modeSelect.addEventListener('change', () => { void renderMode(); });
   l0ReplacementPreviewEnabledInput.addEventListener('change', renderL0ReplacementSettings);
   localModelTestAudioInput.addEventListener('change', renderLocalModelControls);
   localModelsEnabledInput.addEventListener('change', () => { void refreshVolunteerStatus(); });
   volunteerInferenceEnabledInput.addEventListener('change', () => { void refreshVolunteerStatus(); });
   localModelDownloadButton.addEventListener('click', () => {
+    if (!showsLocalModels() || localModelOperationRunning) return;
     localModelTestSucceeded = false;
     localModelsEnabledInput.checked = false;
     localModelOperationRunning = true;
@@ -259,7 +277,8 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
     localModelNoticeIsError = false;
     localModelStatus = { state: 'downloading', completedBytes: 0, totalBytes: 0 };
     renderLocalModelControls();
-    void saveSettings({ ...persistedSettings, localModelsEnabled: false })
+    void requestHostPermission(LOCAL_MODEL_BASE_URL, 'download the model bundle')
+      .then(() => saveSettings({ ...persistedSettings, localModelsEnabled: false }))
       .then((saved) => {
         persistedSettings = saved;
         void refreshVolunteerStatus();
@@ -287,12 +306,7 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
       });
   });
   localModelRemoveButton.addEventListener('click', async () => {
-    if (localModelStatus.state !== 'ready') {
-      localModelNotice = 'Only the ready Babel model bundle can be removed.';
-      localModelNoticeIsError = true;
-      renderLocalModelControls();
-      return;
-    }
+    if (!showsLocalModels() || localModelOperationRunning) return;
     if (!(await confirmDialog({ accent: 'purple', title: 'Remove local models?', message: 'Remove the downloaded local model bundle and disable local browser models?', confirmLabel: 'Remove models' }))) {
       return;
     }
@@ -328,23 +342,46 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
     if (file.size === 0 || (!file.type.startsWith('audio/') && !file.name.toLowerCase().endsWith('.wav'))) {
       throw new Error('Choose a non-empty WAV or another supported audio file.');
     }
-    localModelNotice = 'Checking the audio length…';
+    localModelNotice = 'Decoding this sample and running C-denoise on WebGPU…';
     renderLocalModelControls();
-    const durationSeconds = await dependencies.readAudioDuration(file);
-    if (durationSeconds > MAX_TEST_AUDIO_SECONDS) {
-      throw new Error(
-        `The selected audio is ${durationSeconds.toFixed(1)} seconds. Choose a sample no longer than ${MAX_TEST_AUDIO_SECONDS} seconds.`
-      );
+    const descriptor = await getCachedBundleDescriptor(LOCAL_MODEL_BASE_URL);
+    if (!descriptor) throw new Error('Download and verify the C-denoise v3 bundle before testing.');
+    const result = await dependencies.transcribeAudio(file, {
+      maxDurationSeconds: MAX_TEST_AUDIO_SECONDS, allowUntestedBundle: true
+    });
+    const execution = result.execution;
+    if (!execution || execution.provider !== 'webgpu' || execution.shaderF16 !== true ||
+        execution.denoiseSteps !== 4 || execution.neuralCpuFallback !== false ||
+        execution.bundleIdentity !== descriptor.identity ||
+        execution.asrCheckpointSha256 !== descriptor.source.asrCheckpointSha256 ||
+        execution.cDenoiseCheckpointSha256 !== descriptor.source.cDenoiseCheckpointSha256 ||
+        !execution.adapter || execution.adapter.isFallbackAdapter !== false ||
+        execution.adapter.shaderF16 !== true ||
+        execution.placementAudit?.method !== 'sha256-bound-source-nodes-and-webgpu-dispatch-profile' ||
+        execution.placementAudit.graphOptimizations !== 'disabled' ||
+        execution.placementAudit.hostMetadataAllowed !== true ||
+        execution.placementAudit.graphs.length !== 3 ||
+        ['asr/v3_ctc.onnx', 'punctuation/context.fp16.onnx', 'punctuation/denoise.fp16.onnx'].some((path) => {
+          const graph = execution.placementAudit.graphs.find((candidate) => candidate.path === path);
+          const file = descriptor.files.find((candidate) => candidate.path === path);
+          return !graph || !file || graph.sha256 !== file.sha256 ||
+            !Number.isSafeInteger(graph.requiredGpuNodes) || graph.requiredGpuNodes <= 0 ||
+            graph.verifiedGpuNodes !== graph.requiredGpuNodes ||
+            !Number.isSafeInteger(graph.gpuPrograms) || graph.gpuPrograms < graph.requiredGpuNodes ||
+            !Number.isSafeInteger(graph.verifiedRuns) ||
+            graph.verifiedRuns < (path === 'punctuation/denoise.fp16.onnx' ? 4 : 1);
+        })) {
+      throw new Error('The test did not prove complete C-denoise WebGPU execution with the current checkpoint bundle. No local activation or cloud fallback occurred.');
     }
-    localModelNotice = 'Running the downloaded models on this sample…';
-    renderLocalModelControls();
-    const result = await dependencies.transcribeAudio(file);
     const transcript = result.text.trim() || '[No speech recognized]';
     localModelNotice = `Test succeeded (${result.durationSeconds.toFixed(1)}s): ${transcript}`;
+    await markLocalModelWebGpuTested(LOCAL_MODEL_BASE_URL, descriptor.identity);
+    localModelStatus = await getLocalModelStatus(LOCAL_MODEL_BASE_URL);
     localModelTestSucceeded = true;
     localModelNoticeIsError = false;
   };
   const startLocalModelTest = (loadFile: () => Promise<File>): void => {
+    if (!showsLocalModels() || localModelOperationRunning) return;
     localModelOperationRunning = true;
     localModelNoticeIsError = false;
     renderLocalModelControls();
@@ -361,6 +398,7 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
       });
   };
   localModelTestButton.addEventListener('click', () => {
+    if (!showsLocalModels() || localModelOperationRunning) return;
     const file = localModelTestAudioInput.files?.[0];
     if (!file) {
       localModelNotice = 'Choose a WAV or another supported audio file before testing.';
@@ -371,6 +409,7 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
     startLocalModelTest(() => Promise.resolve(file));
   });
   localModelSuppliedTestButton.addEventListener('click', () => {
+    if (!showsLocalModels() || localModelOperationRunning) return;
     localModelNotice = 'Fetching the supplied public-domain sample…';
     startLocalModelTest(async () => {
       let response: Response;
@@ -396,29 +435,10 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
     status.textContent = 'Saving...';
     status.setAttribute('role', 'status');
     status.setAttribute('aria-live', 'polite');
-    const l0CustomBaseUrl = normalizeL0CustomBaseUrl(l0CustomBaseUrlInput.value);
-    const validateLocalModels = async (): Promise<void> => {
-      if (!localModelsEnabledInput.checked) {
-        return;
-      }
-      const currentStatus = await getLocalModelStatus(LOCAL_MODEL_BASE_URL);
-      localModelStatus = currentStatus;
-      renderLocalModelControls();
-      if (currentStatus.state !== 'ready') {
-        throw new Error('Download and verify the Babel model bundle before enabling local browser models.');
-      }
-      if (!localModelTestSucceeded) {
-        throw new Error('Test the ready local model bundle with a short audio sample before enabling it.');
-      }
-    };
-    void validateLocalModels()
-      .then(() =>
-        l0ReplacementPreviewEnabledInput.checked && !localModelsEnabledInput.checked
-          ? requestHostPermission(l0CustomBaseUrl, 'use the custom L0 endpoint')
-          : Promise.resolve()
-      )
-      .then(() =>
-        saveSettings({
+    const advanced = isAdvanced();
+    const settingsToSave = advanced
+      ? {
+          mode: 'advanced',
           backendBaseUrl: backendBaseUrlInput.value,
           projectPreset: 'ru-gold-2sp-v1',
           openRouterApiKey: openRouterApiKeyInput.value,
@@ -427,18 +447,50 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
           reasoningEffort: reasoningEffortSelect.value,
           aiBrokerProvider: aiBrokerProviderSelect.value,
           l0ReplacementPreviewEnabled: l0ReplacementPreviewEnabledInput.checked,
-          l0CustomBaseUrl,
+          l0CustomBaseUrl: normalizeL0CustomBaseUrl(l0CustomBaseUrlInput.value),
           l0DontRunLlm: l0DontRunLlmInput.checked,
           audioInputEnabled: audioInputEnabledInput.checked,
           localModelsEnabled: localModelsEnabledInput.checked,
-          volunteerInferenceEnabled: volunteerInferenceEnabledInput.checked
-        })
+          volunteerInferenceEnabled: IS_DEV_C_DENOISE
+            ? persistedSettings.volunteerInferenceEnabled
+            : volunteerInferenceEnabledInput.checked
+        }
+      : {
+          ...persistedSettings,
+          mode: modeSelect.value === 'local' ? 'local' : 'simple',
+          ...(modeSelect.value === 'local'
+            ? { openRouterApiKey: openRouterApiKeyInput.value, l0DontRunLlm: l0DontRunLlmInput.checked, volunteerInferenceEnabled: IS_DEV_C_DENOISE
+                ? persistedSettings.volunteerInferenceEnabled
+                : volunteerInferenceEnabledInput.checked }
+            : { openRouterApiKey: openRouterApiKeyInput.value })
+        };
+    const validateLocalModels = async (): Promise<void> => {
+      if (!advanced || !settingsToSave.localModelsEnabled) {
+        return;
+      }
+      const currentStatus = await getLocalModelStatus(LOCAL_MODEL_BASE_URL);
+      localModelStatus = currentStatus;
+      renderLocalModelControls();
+      if (currentStatus.state !== 'ready') {
+        throw new Error('Download and verify the Babel model bundle before enabling local browser models.');
+      }
+      if (!localModelTestSucceeded || !currentStatus.tested) {
+        throw new Error('Test the ready local model bundle with a short audio sample before enabling it.');
+      }
+    };
+    void validateLocalModels()
+      .then(() =>
+        advanced && settingsToSave.l0ReplacementPreviewEnabled && !settingsToSave.localModelsEnabled
+          ? requestHostPermission(settingsToSave.l0CustomBaseUrl, 'use the custom L0 endpoint')
+          : Promise.resolve()
       )
+      .then(() => saveSettings(settingsToSave))
       .then((saved) => {
         persistedSettings = saved;
-        writeSettingsToControls(saved);
+        if (advanced) writeSettingsToControls(saved);
+        else if (saved.mode === 'simple') openRouterApiKeyInput.value = saved.openRouterApiKey;
         renderLocalModelControls();
-        void refreshVolunteerStatus();
+        void renderMode();
         status.textContent = 'Saved. Reload Babel tabs to pick up the new settings.';
         status.setAttribute('role', 'status');
         status.setAttribute('aria-live', 'polite');

@@ -1,3 +1,4 @@
+import { INFERENCE_HEADERS } from './inference-release';
 import { normalizeL0CustomBaseUrl } from './settings';
 import { timingAuthorization } from './l0-timing-client';
 import { buildCanonicalTaskIdentity } from './transcript';
@@ -114,6 +115,7 @@ export async function generateL0SegmentDraft(
   const response = await fetch(endpoint, {
     method: 'POST',
     headers: {
+      ...INFERENCE_HEADERS,
       Accept: 'application/json',
       'Content-Type': 'application/json',
       ...await timingAuthorization(taskId)
@@ -159,6 +161,7 @@ export async function generateL0Draft(
     response = await fetch(endpoint, {
       method: 'POST',
       headers: {
+      ...INFERENCE_HEADERS,
         Accept: 'application/json',
         'Content-Type': 'application/json',
         ...await timingAuthorization(taskId)

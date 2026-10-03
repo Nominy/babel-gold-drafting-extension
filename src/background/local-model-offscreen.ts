@@ -1,5 +1,5 @@
 import { getLocalModelStatus } from '../core/local-model-bundle';
-import { LOCAL_MODEL_BASE_URL, SETTINGS_STORAGE_KEY, loadSettings } from '../core/settings';
+import { IS_DEV_C_DENOISE, isBrowserLocalMode, LOCAL_MODEL_BASE_URL, SETTINGS_STORAGE_KEY, loadSettings } from '../core/settings';
 import { isVolunteerMessage, type VolunteerMessage, type VolunteerStatus } from '../core/volunteer-protocol';
 import {
   createLocalModelFailure,
@@ -124,11 +124,15 @@ export function createVolunteerLifecycle(dependencies: VolunteerLifecycleDepende
     const work = tail.then(async () => {
       try {
         const settings = await dependencies.loadSettings();
-        enabled = settings.localModelsEnabled && settings.volunteerInferenceEnabled;
+        enabled = !IS_DEV_C_DENOISE && isBrowserLocalMode(settings) && settings.volunteerInferenceEnabled;
         if (!enabled || !(await dependencies.ready())) {
-          state = { state: 'disabled', detail: settings.localModelsEnabled && !settings.volunteerInferenceEnabled
-            ? 'Swarm participation is off; local models remain available for your own tasks.'
-            : enabled ? 'Local model bundle is not ready.' : undefined };
+          state = { state: 'disabled', detail: IS_DEV_C_DENOISE
+            ? 'Own-task C-denoise WebGPU trial; the shared coordinator is not enabled.'
+            : settings.mode === 'simple'
+              ? 'Simple mode uses MAI cloud transcription; local volunteering is off.'
+            : isBrowserLocalMode(settings) && !settings.volunteerInferenceEnabled
+              ? 'Swarm participation is off; local models remain available for your own tasks.'
+              : enabled ? 'Local model bundle is not ready.' : undefined };
           if (await dependencies.hasDocument()) {
             await dependencies.sendMessage({ type: 'babel-l0-volunteer', target: 'offscreen', action: 'stop' });
           }
@@ -188,7 +192,10 @@ if (defaultDependencies) {
   });
   const volunteer = createVolunteerLifecycle({
     loadSettings,
-    ready: async () => (await getLocalModelStatus(LOCAL_MODEL_BASE_URL)).state === 'ready',
+    ready: async () => {
+      const status = await getLocalModelStatus(LOCAL_MODEL_BASE_URL);
+      return status.state === 'ready' && status.tested === true;
+    },
     hasDocument: defaultDependencies.hasDocument,
     ensureDocument: bridge.ensureDocument,
     sendMessage: (message) => chrome.runtime.sendMessage(message)

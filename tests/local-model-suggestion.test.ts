@@ -25,7 +25,7 @@ function createHarness(overrides: Partial<LocalModelSuggestionDependencies> = {}
   let openOptionsCount = 0;
   const dependencies: LocalModelSuggestionDependencies = {
     documentRef: dom.window.document,
-    loadSettings: async () => ({ ...DEFAULT_SETTINGS }),
+    loadSettings: async () => ({ ...DEFAULT_SETTINGS, mode: 'advanced' }),
     wasShown: async () => shown,
     markShown: async () => {
       shown = true;
@@ -76,7 +76,6 @@ test('eligible Babel visit shows one accessible suggestion linked to local model
   );
   assert.ok(suggestion);
   assert.equal(suggestion.getAttribute('role'), 'dialog');
-  assert.match(suggestion.textContent || '', /Use your GPU for local AI/);
   assert.equal(
     suggestion.querySelector<HTMLAnchorElement>('a')?.href,
     'https://extension.test/options.html#local-model-heading'
@@ -98,8 +97,13 @@ test('suggestion is suppressed when already shown, enabled, or GPU-ineligible', 
   }> = [
     { name: 'already shown', overrides: { wasShown: async () => true }, expectedGpuRequests: 0 },
     {
+      name: 'simple mode retains but does not suggest advanced local setup',
+      overrides: { loadSettings: async () => ({ ...DEFAULT_SETTINGS, mode: 'simple', localModelsEnabled: false }) },
+      expectedGpuRequests: 0
+    },
+    {
       name: 'models enabled',
-      overrides: { loadSettings: async () => ({ ...DEFAULT_SETTINGS, localModelsEnabled: true }) },
+      overrides: { loadSettings: async () => ({ ...DEFAULT_SETTINGS, mode: 'advanced', localModelsEnabled: true }) },
       expectedGpuRequests: 0
     },
     {

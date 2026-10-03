@@ -1,12 +1,13 @@
 import { assertL0WavAudio, type PreparedL0Track } from '../core/l0-client';
-import { LOCAL_MODEL_BASE_URL, PUBLIC_L0_BASE_URL, normalizeSettings } from '../core/settings';
-import { getCachedLocalModelFile } from '../core/local-model-bundle';
+import { INFERENCE_RELEASE, INFERENCE_HEADERS, assertReleasedGraphs } from '../core/inference-release';
+import { IS_DEV_C_DENOISE, isBrowserLocalMode, LOCAL_MODEL_BASE_URL, PUBLIC_L0_BASE_URL, normalizeSettings } from '../core/settings';
+import { getCachedBundleDescriptor } from '../core/local-model-bundle';
 import type { CapturedAudioTrack, ExtensionSettings, L0DraftResponse, L0TimingResponse, TranscriptJob, TranscriptRow } from '../core/types';
 import type { VolunteerStatus } from '../core/volunteer-protocol';
 import { generateLocalL0DraftFromTiming, generateLocalL0Timing } from '../core/local-model-runtime';
 import { parseL0TimingResponse } from '../core/l0-timing-client';
 
-const SCHEMA = 'babel-browser-model-bundle-v2';
+const SCHEMA = INFERENCE_RELEASE.bundleSchema;
 const CONTROL_REQUEST_TIMEOUT_MS = 45_000;
 const AUDIO_REQUEST_TIMEOUT_MS = 5 * 60_000;
 const IDLE_POLL_MS = 3_000;
@@ -49,7 +50,11 @@ export async function loadVolunteerSettings(): Promise<ExtensionSettings> {
 export const defaultVolunteerDependencies: VolunteerDependencies = {
   fetch: (url, init) => fetch(url, init),
   settings: loadVolunteerSettings,
-  ready: async () => Boolean(await getCachedLocalModelFile('asr/v3_ctc.yaml', LOCAL_MODEL_BASE_URL)),
+  ready: async () => {
+    const bundle = await getCachedBundleDescriptor(LOCAL_MODEL_BASE_URL);
+    if (!bundle?.tested) return false;
+    try { assertReleasedGraphs(bundle.files); return true; } catch { return false; }
+  },
   runExclusive: (action) => action(),
   draft: generateLocalL0DraftFromTiming,
   transcribe: generateLocalL0Timing,
@@ -126,6 +131,7 @@ function preserveRows(lease: DraftLease): TranscriptRow[] | undefined {
 async function request(dependencies: VolunteerDependencies, path: string, init: RequestInit, signal: AbortSignal): Promise<Response> {
   return dependencies.fetch(`${PUBLIC_L0_BASE_URL}${path}`, {
     ...init,
+    headers: { ...INFERENCE_HEADERS, ...init.headers },
     redirect: 'error',
     signal: AbortSignal.any([
       signal,
@@ -182,8 +188,10 @@ export function createVolunteer(dependencies: VolunteerDependencies = defaultVol
     while (!signal.aborted) {
       try {
         const settings = await dependencies.settings();
-        if (!settings.localModelsEnabled) {
-          status = { state: 'disabled', detail: 'Saved local model settings are disabled.' };
+        if (IS_DEV_C_DENOISE || !isBrowserLocalMode(settings)) {
+          status = { state: 'disabled', detail: IS_DEV_C_DENOISE
+            ? 'Own-task C-denoise WebGPU trial; the shared coordinator is not enabled.'
+            : 'Local browser model settings are disabled.' };
           return;
         }
         if (!settings.volunteerInferenceEnabled) {
@@ -198,7 +206,7 @@ export function createVolunteer(dependencies: VolunteerDependencies = defaultVol
           status = { state: 'connecting' };
           const response = await request(dependencies, '/v1/workers/register', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ modelBundleSchema: SCHEMA, protocolVersion: 2 })
+            body: JSON.stringify({ modelBundleSchema: SCHEMA, protocolVersion: INFERENCE_RELEASE.protocolVersion, modelRelease: INFERENCE_RELEASE.id })
           }, signal);
           if (!response.ok) throw new Error(`Worker registration failed: HTTP ${response.status}`);
           credentials = parseCredentials(await response.json());

@@ -9,6 +9,7 @@ import {
   AI_BROKER_INTERNAL_PORT_NAME
 } from '../src/core/ai-broker-protocol';
 import type { AiBrokerPortMessage, AiBrokerResponse } from '../src/core/ai-broker-protocol';
+import type { ExtensionSettings } from '../src/core/types';
 import { registerAiBrokerContentHandler } from '../src/content/ai-broker-content';
 
 interface TestEvent<Args extends unknown[]> {
@@ -63,7 +64,7 @@ test('broker transports preserve admission, failure policy and disconnect framin
     Object.assign(globalThis, { chrome: previousChrome, fetch: previousFetch });
     console.error = previousConsoleError;
   });
-  let settings = { ...DEFAULT_SETTINGS, openRouterApiKey: 'test-key' };
+  let settings: ExtensionSettings = { ...DEFAULT_SETTINGS, mode: 'advanced', openRouterApiKey: 'test-key' };
   let storageFailure = false;
   const onMessageExternal = event<[unknown, chrome.runtime.MessageSender, (response: AiBrokerResponse) => void]>();
   const onConnectExternal = event<[TestPort]>();
@@ -114,7 +115,7 @@ test('broker transports preserve admission, failure policy and disconnect framin
       { provider: 'remote-openrouter', key: 'key', operation: 'redistributeText', reason: 'missing-tab', fallback: false },
       { provider: 'local-gemini-nano', key: '', operation: 'transcribeSegmentL0', reason: 'missing-tab', fallback: false }
     ] as const) {
-      settings = { ...DEFAULT_SETTINGS, aiBrokerProvider: scenario.provider, openRouterApiKey: scenario.key };
+      settings = { ...DEFAULT_SETTINGS, mode: 'advanced', aiBrokerProvider: scenario.provider, openRouterApiKey: scenario.key };
       const message = { ...request, operation: scenario.operation };
       const response = await sendMessage(message, {});
       const connection = await sendPort(message, {});
@@ -135,17 +136,18 @@ test('broker transports preserve admission, failure policy and disconnect framin
     }
   });
 
-  await t.test('settings failure emits no accepted event and retains the transport error', async () => {
+  await t.test('unreadable settings preserve the transport error without allowing another provider charge', async (t) => {
     storageFailure = true;
+    t.after(() => { storageFailure = false; });
     const response = await sendMessage(request);
     const connection = await sendPort(request);
     assert.deepEqual(connection.messages, [{ type: 'error', response }]);
-    assert.deepEqual(response, { ok: false, reason: 'broker-error', message: 'Storage unavailable', fallbackAllowed: true });
+    assert.deepEqual(response, { ok: false, reason: 'broker-error', message: 'Storage unavailable', fallbackAllowed: false });
     storageFailure = false;
   });
 
   await t.test('tab failure keeps remote-only policy and disconnected forwarding emits one terminal error', async () => {
-    settings = { ...DEFAULT_SETTINGS, aiBrokerProvider: 'remote-openrouter', openRouterApiKey: 'key' };
+    settings = { ...DEFAULT_SETTINGS, mode: 'advanced', aiBrokerProvider: 'remote-openrouter', openRouterApiKey: 'key' };
     const response = await sendMessage(request);
     assert.equal(response.ok, false);
     if (response.ok) throw new Error('Expected tab failure');
@@ -184,7 +186,7 @@ test('broker transports preserve admission, failure policy and disconnect framin
     console.error = (...args) => { logged.push(args); };
     for (const internalPort of [false, true]) {
       for (const reloadFails of [false, true]) {
-        settings = { ...DEFAULT_SETTINGS, aiBrokerProvider: 'auto', openRouterApiKey: 'key' };
+        settings = { ...DEFAULT_SETTINGS, mode: 'advanced', aiBrokerProvider: 'auto', openRouterApiKey: 'key' };
         storageFailure = false;
         globalThis.fetch = async () => {
           settings.aiBrokerProvider = 'remote-openrouter';
@@ -206,7 +208,7 @@ test('broker transports preserve admission, failure policy and disconnect framin
   });
 
   await t.test('content rechecks provider policy independently and frames ordinary rejections as results', async () => {
-    settings = { ...DEFAULT_SETTINGS, aiBrokerProvider: 'local-gemini-nano', openRouterApiKey: 'key' };
+    settings = { ...DEFAULT_SETTINGS, mode: 'advanced', aiBrokerProvider: 'local-gemini-nano', openRouterApiKey: 'key' };
     globalThis.fetch = async () => { throw new Error('Backend must not be called'); };
     const message = { ...request, type: AI_BROKER_INTERNAL_MESSAGE_TYPE };
     const response = await sendMessage(message, sender, true);
@@ -217,5 +219,33 @@ test('broker transports preserve admission, failure policy and disconnect framin
     if (response.ok) throw new Error('Expected local provider rejection');
     assert.equal(response.reason, 'provider-local-gemini-nano');
     assert.equal(response.fallbackAllowed, true);
+  });
+
+  await t.test('Simple key errors never permit a local fallback for either segment shortcut or redistribution', async () => {
+    settings = { ...DEFAULT_SETTINGS, mode: 'simple', openRouterApiKey: '', localModelsEnabled: true, aiBrokerProvider: 'local-gemini-nano' };
+    for (const operation of ['transcribeSegment', 'transcribeSegmentL0', 'redistributeText']) {
+      const message = { ...request, operation, type: AI_BROKER_INTERNAL_MESSAGE_TYPE };
+      const response = await sendMessage(message, sender, true);
+      assert.equal(response.ok, false);
+      if (response.ok) throw new Error('Expected missing Simple key');
+      assert.equal(response.reason, 'remote-not-configured');
+      assert.equal(response.fallbackAllowed, false);
+      assert.match(response.message ?? '', /OpenRouter API key.*extension options/i);
+    }
+  });
+
+  await t.test('a Simple action that fails after switching to Advanced still cannot fall back to local rewriting', async () => {
+    settings = { ...DEFAULT_SETTINGS, mode: 'simple', openRouterApiKey: 'key' };
+    Object.assign(chrome.runtime, {
+      sendMessage: async () => {
+        settings = { ...DEFAULT_SETTINGS, mode: 'advanced', aiBrokerProvider: 'auto' };
+        throw new Error('Background disconnected during mode change');
+      }
+    });
+    const response = await sendMessage({ ...request, type: AI_BROKER_INTERNAL_MESSAGE_TYPE }, sender, true);
+    assert.equal(response.ok, false);
+    if (response.ok) throw new Error('Expected Simple cloud failure');
+    assert.equal(response.reason, 'broker-error');
+    assert.equal(response.fallbackAllowed, false);
   });
 });

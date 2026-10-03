@@ -1,9 +1,12 @@
+import { INFERENCE_RELEASE } from '../src/core/inference-release';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { webcrypto } from 'node:crypto';
 import {
   LOCAL_MODEL_CACHE_NAME,
   getCachedLocalModelFile,
+  getCachedBundleDescriptor,
+  markLocalModelWebGpuTested,
   getLocalModelStatus,
   removeLocalModels,
   setupLocalModels,
@@ -13,7 +16,10 @@ import {
 const REQUIRED_PATHS = [
   'asr/v3_ctc.onnx',
   'asr/v3_ctc.yaml',
-  'punctuation/model.fp16.onnx',
+  'punctuation/context.fp16.onnx',
+  'punctuation/denoise.fp16.onnx',
+  'punctuation/c-denoise.json',
+  'punctuation/gpu-placement.json',
   'punctuation/config.json',
   'punctuation/tokenizer.json',
   'punctuation/tokenizer_config.json',
@@ -29,6 +35,7 @@ type ManifestFile = {
 };
 
 type Manifest = {
+  releaseId: string;
   schema: string;
   generatedAt: string;
   targetBytes: number;
@@ -37,10 +44,13 @@ type Manifest = {
   runtimeLibrariesExcluded: boolean;
   files: ManifestFile[];
   models: Record<string, unknown>;
+  source: { asrCheckpointSha256: string; cDenoiseCheckpointSha256: string; baseModelFiles: Record<string, string> };
+  validation: Record<string, unknown>;
 };
 
 class MemoryCache {
   readonly entries = new Map<string, Response>();
+  async keys(): Promise<Request[]> { return [...this.entries.keys()].map(url => new Request(url)); }
 
   async match(request: RequestInfo | URL): Promise<Response | undefined> {
     const response = this.entries.get(requestKey(request));
@@ -93,7 +103,11 @@ class MemoryStorageArea {
   }
 
   async set(items: Record<string, unknown>): Promise<void> {
-    Object.assign(this.values, items);
+    // Match Chrome's storage serialization rather than preserving JS insertion order.
+    Object.assign(this.values, JSON.parse(JSON.stringify(items, (_key, value) =>
+      value && typeof value === 'object' && !Array.isArray(value)
+        ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, value[key]]))
+        : value)));
   }
 
   async remove(keys: string | string[]): Promise<void> {
@@ -140,14 +154,23 @@ async function createBundle(
     });
   }
   const manifest: Manifest = {
-    schema: 'babel-browser-model-bundle-v2',
+    schema: 'babel-browser-model-bundle-v3', releaseId: INFERENCE_RELEASE.id,
     generatedAt: '2026-08-30T00:00:00.000Z',
     targetBytes: 1_500_000_000,
     totalBytes: files.reduce((total, file) => total + file.bytes, 0),
     pass: true,
     runtimeLibrariesExcluded: true,
     files,
-    models: {}
+    models: {},
+    source: {
+      asrCheckpointSha256: '02cea9973d0e839f6a3eeca101b83a93f93a066c2da2e3ebfa176d57e61d84d3',
+      cDenoiseCheckpointSha256: '0a01c3535fb66627b13f266bc59ab7b95c2aa85f7413a051d1e17294515ded5a',
+      baseModelFiles: { 'model.safetensors': '1'.repeat(64) }
+    },
+    validation: { numericExport: { pass: true, reportSha256: '2'.repeat(64), limits: { maxAbs: 0.2 },
+      cases: [{ id: 'context-and-core', pass: true, comparisons: { logits: { pass: true, finite: true, maxAbs: 0.01, rmse: 0.001 } } }],
+      asr: [{ id: 'asr', pass: true, comparisons: { logits: { pass: true, finite: true, maxAbs: 0.01, rmse: 0.001 } } }]
+    } }
   };
   await mutate?.(manifest, contents);
   manifest.totalBytes = manifest.files.reduce((total, file) => total + file.bytes, 0);
@@ -241,7 +264,9 @@ test('installs a fully verified bundle and reads only manifest-listed files from
   assert.deepEqual(status, {
     state: 'ready',
     completedBytes: bundle.manifest.totalBytes,
-    totalBytes: bundle.manifest.totalBytes
+    totalBytes: bundle.manifest.totalBytes,
+    tested: false,
+    source: bundle.manifest.source
   });
   assert.equal(harness.requestedUrls[0], `${baseUrl}/manifest.json`);
   assert.ok(harness.requestedUrls.every((url) => !url.includes('password') && !url.includes('token=')));
@@ -327,7 +352,7 @@ test('offscreen lookup discovers one complete manifest-backed bundle without chr
   );
 });
 
-test('offscreen lookup rejects bundles without a verified v2 manifest', async () => {
+test('offscreen lookup rejects bundles without a verified v3 manifest', async () => {
   const harness = installHarness();
   const baseUrl = 'https://models.example.test/offscreen-missing-manifest';
   const bundle = await createBundle('offscreen-missing-manifest');
@@ -353,6 +378,11 @@ test('offscreen lookup rejects ambiguous complete caches for the same bundle URL
   for (const [url, response] of source.entries) {
     await duplicate.put(url, response);
   }
+  const pointerResponse = duplicate.entries.get(`${baseUrl}/__bundle-pointer.json`);
+  assert.ok(pointerResponse);
+  const pointer = await pointerResponse.json();
+  await duplicate.put(`${baseUrl}/__bundle-pointer.json`,
+    new Response(JSON.stringify({ ...pointer, cacheName: `${LOCAL_MODEL_CACHE_NAME}:bundle:duplicate` })));
   enterOffscreenEnvironment();
 
   assert.equal(await getCachedLocalModelFile('asr/v3_ctc.onnx', baseUrl), null);
@@ -406,6 +436,28 @@ test('offscreen lookup rejects a cached manifest with an invalid schema', async 
   assert.equal(await getCachedLocalModelFile('asr/v3_ctc.onnx', baseUrl), null);
 });
 
+test('release migration reuses only verified cached bytes across supplier URLs and requires a new GPU test', async () => {
+  const harness = installHarness();
+  const oldUrl = 'https://models.example.test/previous';
+  const newUrl = 'https://models.example.test/release';
+  const bundle = await createBundle('same-verified-bytes');
+  harness.setBundle(oldUrl, bundle.manifest, bundle.contents);
+  await setupLocalModels(oldUrl);
+  const pointer = harness.storageArea.values['babel_gold_local_model_bundle_pointer'] as { releaseId?: string };
+  delete pointer.releaseId;
+  assert.equal(await getCachedBundleDescriptor(oldUrl), null);
+  harness.requestedUrls.length = 0;
+  harness.setBundle(newUrl, bundle.manifest, bundle.contents);
+  await setupLocalModels(newUrl);
+  assert.deepEqual(harness.requestedUrls, [`${newUrl}/manifest.json`]);
+  const descriptor = await getCachedBundleDescriptor(newUrl);
+  assert.equal(descriptor?.releaseId, INFERENCE_RELEASE.id);
+  assert.equal(descriptor?.tested, false);
+  const graph = await getCachedLocalModelFile('asr/v3_ctc.onnx', newUrl);
+  assert.ok(graph);
+  assert.equal(await sha256(new Uint8Array(await graph.arrayBuffer())), bundle.manifest.files[0].sha256);
+});
+
 test('installer refuses the old quantized and distilled model bundle schema', async () => {
   const harness = installHarness();
   const baseUrl = 'https://models.example.test/old-bundle';
@@ -414,7 +466,7 @@ test('installer refuses the old quantized and distilled model bundle schema', as
   bundle.manifest.targetBytes = 500_000_000;
   harness.setBundle(baseUrl, bundle.manifest, bundle.contents);
 
-  await assert.rejects(setupLocalModels(baseUrl), /manifest schema must be babel-browser-model-bundle-v2/);
+  await assert.rejects(setupLocalModels(baseUrl), /manifest schema must be babel-browser-model-bundle-v3/);
   assert.deepEqual(await harness.cacheStorage.keys(), []);
 });
 
@@ -429,7 +481,7 @@ test('a present storage area never falls back when its active pointer is missing
   assert.equal(await getCachedLocalModelFile('asr/v3_ctc.onnx', baseUrl), null);
 });
 
-test('a replacement hash failure leaves the previously ready bundle and pointer untouched', async () => {
+test('a replacement hash failure preserves cached data but stops readiness without fallback', async () => {
   const harness = installHarness();
   const baseUrl = 'https://models.example.test/bundle';
   const original = await createBundle('original');
@@ -443,14 +495,9 @@ test('a replacement hash failure leaves the previously ready bundle and pointer 
   harness.setBundle(baseUrl, corrupt.manifest, corrupt.contents);
   await assert.rejects(setupLocalModels(baseUrl), /failed SHA-256 verification/);
 
-  const cached = await getCachedLocalModelFile('asr/v3_ctc.onnx', baseUrl);
-  assert.ok(cached);
-  assert.deepEqual(
-    new Uint8Array(await cached.arrayBuffer()),
-    original.contents['asr/v3_ctc.onnx']
-  );
-  assert.deepEqual(await harness.cacheStorage.keys(), originalCacheNames);
-  assert.equal((await getLocalModelStatus(baseUrl)).state, 'ready');
+  assert.equal(await getCachedLocalModelFile('asr/v3_ctc.onnx', baseUrl), null);
+  for (const name of originalCacheNames) assert.equal(await harness.cacheStorage.has(name), true);
+  assert.equal((await getLocalModelStatus(baseUrl)).state, 'error');
 });
 
 test('a replacement size failure also preserves the active cache', async () => {
@@ -466,12 +513,8 @@ test('a replacement size failure also preserves the active cache', async () => {
   harness.setBundle(baseUrl, corrupt.manifest, corrupt.contents);
   await assert.rejects(setupLocalModels(baseUrl), /has size .* expected/);
 
-  const cached = await getCachedLocalModelFile('asr/v3_ctc.onnx', baseUrl);
-  assert.ok(cached);
-  assert.deepEqual(
-    new Uint8Array(await cached.arrayBuffer()),
-    original.contents['asr/v3_ctc.onnx']
-  );
+  assert.equal(await getCachedLocalModelFile('asr/v3_ctc.onnx', baseUrl), null);
+  assert.equal((await getLocalModelStatus(baseUrl)).state, 'error');
 });
 
 test('rejects traversal before fetching or caching any manifest file', async () => {
@@ -495,7 +538,7 @@ test('rejects traversal before fetching or caching any manifest file', async () 
   assert.equal(await getCachedLocalModelFile('../outside.onnx', baseUrl), null);
 });
 
-test('an interrupted first install is discarded instead of remaining stuck downloading', async () => {
+test('an interrupted install clears stale progress while retaining resumable data', async () => {
   const harness = installHarness();
   const baseUrl = 'https://models.example.test/interrupted-install';
   const operationId = 'abandoned-first-install';
@@ -519,7 +562,7 @@ test('an interrupted first install is discarded instead of remaining stuck downl
     completedBytes: 0,
     totalBytes: 0
   });
-  assert.equal(await harness.cacheStorage.has(stagingCacheName), false);
+  assert.equal(await harness.cacheStorage.has(stagingCacheName), true);
   assert.equal(
     Object.hasOwn(harness.storageArea.values, 'babel_gold_local_model_bundle_status'),
     false
@@ -587,10 +630,12 @@ test('an interrupted replacement reports the complete active bundle and preserve
   assert.deepEqual(await getLocalModelStatus(baseUrl), {
     state: 'ready',
     completedBytes: original.manifest.totalBytes,
-    totalBytes: original.manifest.totalBytes
+    totalBytes: original.manifest.totalBytes,
+    tested: false,
+    source: original.manifest.source
   });
   assert.equal(await harness.cacheStorage.has(activePointer.cacheName), true);
-  assert.equal(await harness.cacheStorage.has(stagingCacheName), false);
+  assert.equal(await harness.cacheStorage.has(stagingCacheName), true);
   assert.equal(
     Object.hasOwn(harness.storageArea.values, 'babel_gold_local_model_bundle_status'),
     false
@@ -675,4 +720,91 @@ test('download progress is monotonic and identifies the current sequential file'
     [...new Set(progress.map((update) => update.currentPath))],
     bundle.manifest.files.map((file) => file.path)
   );
+});
+
+test('v2 readiness is invalidated without deleting old data before v3 installation succeeds', async () => {
+  const harness = installHarness();
+  const baseUrl = 'https://models.example.test/upgrade';
+  const oldCacheName = `${LOCAL_MODEL_CACHE_NAME}:bundle:old-v2`;
+  const oldCache = await harness.cacheStorage.open(oldCacheName);
+  await oldCache.put(`${baseUrl}/punctuation/model.fp16.onnx`, new Response('old learned BERT graph'));
+  harness.storageArea.values.babel_gold_local_model_bundle_pointer = {
+    version: 2, cacheName: oldCacheName, baseUrl, totalBytes: 22,
+    files: [{ path: 'punctuation/model.fp16.onnx', bytes: 22, sha256: '0'.repeat(64) }]
+  };
+  assert.equal((await getLocalModelStatus(baseUrl)).state, 'error');
+  assert.equal(await getCachedLocalModelFile('punctuation/model.fp16.onnx', baseUrl), null);
+  assert.equal(await harness.cacheStorage.has(oldCacheName), true);
+  const bundle = await createBundle('upgrade');
+  harness.setBundle(baseUrl, bundle.manifest, bundle.contents);
+  await setupLocalModels(baseUrl);
+  assert.equal(await harness.cacheStorage.has(oldCacheName), false);
+  assert.equal((await getLocalModelStatus(baseUrl)).tested, false);
+});
+
+test('decorative pass cannot admit wrong provenance or failed numeric parity', async () => {
+  for (const corrupt of [
+    (manifest: Manifest) => { manifest.source.cDenoiseCheckpointSha256 = '0'.repeat(64); },
+    (manifest: Manifest) => { manifest.validation = { numericExport: { pass: false } }; },
+    (manifest: Manifest) => {
+      manifest.validation = { numericExport: { pass: true, reportSha256: '1'.repeat(64), limits: { maxAbs: 0.2 },
+        cases: [{ id: 'invalid', pass: true, comparisons: { logits: { pass: true, finite: true, maxAbs: null, rmse: 0 } } }],
+        asr: [{ id: 'asr', pass: true, comparisons: { logits: { pass: true, finite: true, maxAbs: 0, rmse: 0 } } }] } };
+    }
+  ]) {
+    const harness = installHarness();
+    const baseUrl = 'https://models.example.test/unvalidated';
+    const bundle = await createBundle('unvalidated', corrupt);
+    harness.setBundle(baseUrl, bundle.manifest, bundle.contents);
+    await assert.rejects(setupLocalModels(baseUrl), /provenance|numeric|parity/i);
+    assert.equal((await getLocalModelStatus(baseUrl)).state, 'error');
+    assert.equal(await getCachedBundleDescriptor(baseUrl), null);
+    assert.deepEqual(harness.requestedUrls, [`${baseUrl}/manifest.json`]);
+  }
+});
+
+test('explicit retry resumes checksum-verified whole files and never activates a partial bundle', async () => {
+  const harness = installHarness();
+  const baseUrl = 'https://models.example.test/resume';
+  const bundle = await createBundle('resume');
+  harness.setBundle(baseUrl, bundle.manifest, bundle.contents);
+  const fetchNormally = globalThis.fetch;
+  const interruptedPath = REQUIRED_PATHS[3];
+  globalThis.fetch = async (input, init) => requestKey(input) === `${baseUrl}/${interruptedPath}`
+    ? new Response('interrupted', { status: 503 }) : fetchNormally(input, init);
+  await assert.rejects(setupLocalModels(baseUrl), /HTTP 503/);
+  assert.equal(await getCachedBundleDescriptor(baseUrl), null);
+  globalThis.fetch = fetchNormally;
+  harness.requestedUrls.length = 0;
+  await setupLocalModels(baseUrl);
+  for (const path of REQUIRED_PATHS.slice(0, 3)) assert.equal(harness.requestedUrls.includes(`${baseUrl}/${path}`), false);
+  assert.equal((await getLocalModelStatus(baseUrl)).tested, false);
+  assert.equal((await harness.cacheStorage.keys()).length, 1);
+});
+
+test('WebGPU activation is bound to bundle identity and is visible in the offscreen cache', async () => {
+  const harness = installHarness();
+  const baseUrl = 'https://models.example.test/tested';
+  const first = await createBundle('first');
+  harness.setBundle(baseUrl, first.manifest, first.contents);
+  await setupLocalModels(baseUrl);
+  const descriptor = await getCachedBundleDescriptor(baseUrl);
+  assert.ok(descriptor);
+  await markLocalModelWebGpuTested(baseUrl, descriptor.identity);
+  const tested = await getCachedBundleDescriptor(baseUrl);
+  assert.equal(tested?.identity, descriptor.identity);
+  assert.equal(tested?.tested, true);
+  const second = await createBundle('second');
+  harness.setBundle(baseUrl, second.manifest, second.contents);
+  await setupLocalModels(baseUrl);
+  await assert.rejects(markLocalModelWebGpuTested(baseUrl, descriptor.identity), /changed during its test/);
+  const replacement = await getCachedBundleDescriptor(baseUrl);
+  assert.ok(replacement);
+  assert.notEqual(replacement.identity, descriptor.identity);
+  assert.equal(replacement.tested, false);
+  await markLocalModelWebGpuTested(baseUrl, replacement.identity);
+  enterOffscreenEnvironment();
+  const offscreen = await getCachedBundleDescriptor(baseUrl);
+  assert.equal(offscreen?.identity, replacement.identity);
+  assert.equal(offscreen?.tested, true);
 });

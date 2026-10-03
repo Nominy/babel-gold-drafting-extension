@@ -1,14 +1,20 @@
 import { createSettingsStore } from '@nominy/babel-extension-frontend';
+import { INFERENCE_RELEASE } from './inference-release';
 import type { ExtensionSettings } from './types';
 
 export const SETTINGS_STORAGE_KEY = 'babel_gold_drafting_settings';
 export const PUBLIC_L0_BASE_URL =
   'https://reviewgen.ovh/a3f73d6cf25fa138be653daaf2d7cd0702c0b2d69c40fb9eaee4e07d4b067dd5';
-export const LOCAL_MODEL_BASE_URL = 'https://reviewgen.ovh/browser-model';
+declare const __BABEL_DEV_C_DENOISE_MODEL_URL__: string | undefined;
+const DEV_C_DENOISE_MODEL_URL =
+  typeof __BABEL_DEV_C_DENOISE_MODEL_URL__ === 'string' ? __BABEL_DEV_C_DENOISE_MODEL_URL__ : '';
+export const IS_DEV_C_DENOISE = Boolean(DEV_C_DENOISE_MODEL_URL);
+export const LOCAL_MODEL_BASE_URL = DEV_C_DENOISE_MODEL_URL || INFERENCE_RELEASE.modelBaseUrl;
 export const LOCAL_MODEL_SAMPLE_URL = `${LOCAL_MODEL_BASE_URL}/sample-russian-15s.wav`;
 
 
 export const DEFAULT_SETTINGS: ExtensionSettings = {
+  mode: 'local',
   backendBaseUrl: 'https://reviewgen.ovh',
   projectPreset: 'ru-gold-2sp-v1',
   openRouterApiKey: '',
@@ -21,8 +27,12 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
   l0DontRunLlm: false,
   audioInputEnabled: true,
   localModelsEnabled: false,
-  volunteerInferenceEnabled: true,
+  volunteerInferenceEnabled: false,
 };
+
+export function isBrowserLocalMode(settings: ExtensionSettings): boolean {
+  return settings.mode === 'local' || (settings.mode === 'advanced' && settings.localModelsEnabled);
+}
 
 export function normalizeL0CustomBaseUrl(input: unknown): string {
   if (typeof input !== 'string' || !input.trim()) {
@@ -50,6 +60,12 @@ export function normalizeL0CustomBaseUrl(input: unknown): string {
 
 export function normalizeSettings(input: unknown): ExtensionSettings {
   const raw = input && typeof input === 'object' ? (input as Record<string, unknown>) : {};
+  const mode =
+    raw.mode === 'local' || raw.mode === 'simple' || raw.mode === 'advanced'
+      ? raw.mode
+      : Object.keys(raw).length > 0
+        ? 'advanced'
+        : DEFAULT_SETTINGS.mode;
   const backendBaseUrl =
     typeof raw.backendBaseUrl === 'string' && raw.backendBaseUrl.trim()
       ? raw.backendBaseUrl.trim().replace(/\/+$/, '')
@@ -88,9 +104,13 @@ export function normalizeSettings(input: unknown): ExtensionSettings {
       ? raw.audioInputEnabled
       : DEFAULT_SETTINGS.audioInputEnabled;
   const localModelsEnabled = raw.localModelsEnabled === true;
-  const volunteerInferenceEnabled = raw.volunteerInferenceEnabled !== false;
+  const volunteerInferenceEnabled =
+    typeof raw.volunteerInferenceEnabled === 'boolean'
+      ? raw.volunteerInferenceEnabled
+      : DEFAULT_SETTINGS.volunteerInferenceEnabled;
 
   return {
+    mode,
     backendBaseUrl,
     projectPreset,
     openRouterApiKey,

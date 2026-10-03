@@ -3,6 +3,7 @@ node_modules/
 .env.*
 !.env.cws.example
 dist/
+babel-gold-drafting-extension/
 .artifacts/
 dist.zip
 babel-gold-drafting-extension-*.zip

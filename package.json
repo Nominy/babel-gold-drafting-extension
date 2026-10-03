@@ -1,20 +1,23 @@
 {
   "name": "babel-gold-drafting-extension",
-  "version": "0.2.39",
+  "version": "0.2.41",
   "private": true,
   "license": "Apache-2.0 AND LGPL-2.1-or-later",
   "type": "module",
   "scripts": {
-    "build": "npm run version:patch && npm run build:core",
+    "build": "npm run build:core && npm run sync:unpacked",
     "build:core": "node esbuild.config.mjs",
     "build:watch": "node esbuild.config.mjs --watch",
     "build:zip": "node scripts/pack.mjs",
+    "sync:unpacked": "node scripts/sync-unpacked.mjs",
     "version:patch": "node scripts/increment-version.mjs",
     "publish:cws": "node scripts/publish-cws.mjs",
     "setup:github-secrets": "node scripts/setup-github-secrets.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test tests/*.test.ts",
-    "models:full-bundle": "node scripts/create-full-model-bundle.mjs"
+    "models:serve-dev": "node scripts/serve-dev-cdenoise.mjs",
+    "build:backend": "node scripts/build-inference-backend.mjs",
+    "prepare:inference-release": "node scripts/prepare-inference-release.mjs"
   },
   "devDependencies": {
     "@nominy/babel-extension-build": "file:../../shared/babel-extension-platform/packages/babel-extension-build",
@@ -24,6 +27,7 @@
     "@types/node": "^24.6.0",
     "esbuild": "^0.25.10",
     "jsdom": "^26.1.0",
+    "playwright": "1.63.0",
     "tsx": "^4.20.5",
     "typescript": "^5.9.3"
   },

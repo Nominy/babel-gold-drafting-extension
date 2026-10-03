@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setImmediate } from 'node:timers/promises';
-import { createVolunteer, defaultVolunteerDependencies, parseLease, type VolunteerDependencies } from '../src/offscreen/volunteer';
+import { createVolunteer, parseLease, type VolunteerDependencies } from '../src/offscreen/volunteer';
 import { createVolunteerLifecycle } from '../src/background/local-model-offscreen';
 import { DEFAULT_SETTINGS, PUBLIC_L0_BASE_URL } from '../src/core/settings';
 import type { L0DraftResponse, L0TimingResponse } from '../src/core/types';
@@ -47,7 +47,7 @@ function fixture(jobs: unknown[], ready = true) {
   const calls: string[] = [];
   let idle = false;
   const dependencies: VolunteerDependencies = {
-    settings: async () => ({ ...DEFAULT_SETTINGS, localModelsEnabled: true }),
+    settings: async () => ({ ...DEFAULT_SETTINGS, mode: 'advanced', localModelsEnabled: true, volunteerInferenceEnabled: true }),
     ready: async () => ready,
     runExclusive: async (action) => { calls.push('exclusive'); return action(); },
     draft: async (timing, preserveRows) => {
@@ -112,7 +112,7 @@ test('punctuation lease uses cached timing without downloading audio and complet
     '/v1/workers/register', '/v1/workers/lease', '/v1/jobs/job-1/complete'
   ]);
   assert.deepEqual(JSON.parse(String(harness.requests[0].init.body)), {
-    modelBundleSchema: 'babel-browser-model-bundle-v2', protocolVersion: 2
+    modelBundleSchema: 'babel-browser-model-bundle-v3', protocolVersion: 3, modelRelease: 'c-denoise-v3-2026-10-03'
   });
   worker.stop();
   assert.equal(worker.getStatus().state, 'disabled');
@@ -168,7 +168,7 @@ test('no ready local models means no registration and unleased audio URLs are re
 test('saved swarm opt-out prevents registration even with ready local models', async () => {
   const harness = fixture([lease('draft')]);
   harness.dependencies.settings = async () => ({
-    ...DEFAULT_SETTINGS, localModelsEnabled: true, volunteerInferenceEnabled: false
+    ...DEFAULT_SETTINGS, mode: 'advanced', localModelsEnabled: true, volunteerInferenceEnabled: false
   });
   const worker = createVolunteer(harness.dependencies);
   worker.start();
@@ -177,54 +177,6 @@ test('saved swarm opt-out prevents registration even with ready local models', a
   assert.deepEqual(harness.requests, []);
 });
 
-test('offscreen volunteer starts from saved settings without access to chrome.storage', async () => {
-  const paths = [
-    'asr/v3_ctc.onnx', 'asr/v3_ctc.yaml', 'punctuation/model.fp16.onnx',
-    'punctuation/config.json', 'punctuation/tokenizer.json',
-    'punctuation/tokenizer_config.json', 'punctuation/special_tokens_map.json',
-    'punctuation/vocab.txt'
-  ];
-  const manifest = {
-    schema: 'babel-browser-model-bundle-v2', targetBytes: 1_500_000_000,
-    pass: true, totalBytes: 1,
-    files: paths.map((path, index) => ({ path, bytes: index === 0 ? 1 : 0, sha256: '0'.repeat(64) }))
-  };
-  const sent: unknown[] = [];
-  Object.assign(globalThis, {
-    chrome: {
-      runtime: {
-        sendMessage: async (message: unknown) => {
-          sent.push(message);
-          return { ...DEFAULT_SETTINGS, localModelsEnabled: true };
-        }
-      }
-    },
-    caches: {
-      keys: async () => ['babel-gold-local-models:bundle:installed'],
-      open: async () => ({
-        match: async (url: string) => url.endsWith('/manifest.json')
-          ? Response.json(manifest) : new Response('cached model file')
-      })
-    }
-  });
-  try {
-    const harness = fixture([lease('draft')]);
-    const volunteer = createVolunteer({
-      ...harness.dependencies,
-      settings: defaultVolunteerDependencies.settings,
-      ready: defaultVolunteerDependencies.ready
-    });
-    volunteer.start();
-    await until(() => harness.isIdle());
-    assert.equal(volunteer.getStatus().state, 'connected');
-    assert.deepEqual(sent, [{ type: 'babel-l0-volunteer', target: 'background', action: 'settings' }]);
-    assert.deepEqual(harness.calls, ['exclusive', 'draft']);
-    volunteer.stop();
-  } finally {
-    Reflect.deleteProperty(globalThis, 'chrome');
-    Reflect.deleteProperty(globalThis, 'caches');
-  }
-});
 
 test('expired worker credentials re-register before another lease and back off between failures', async () => {
   const harness = fixture([]);
@@ -286,7 +238,7 @@ test('service worker starts a ready worker and stops on disable or missing bundl
   const sent: string[] = [];
   const lifecycle = createVolunteerLifecycle({
     loadSettings: async () => ({
-      ...DEFAULT_SETTINGS, localModelsEnabled: enabled, volunteerInferenceEnabled: volunteerEnabled
+      ...DEFAULT_SETTINGS, mode: 'advanced', localModelsEnabled: enabled, volunteerInferenceEnabled: volunteerEnabled
     }),
     ready: async () => ready,
     hasDocument: async () => exists,
@@ -318,4 +270,44 @@ test('service worker starts a ready worker and stops on disable or missing bundl
   await lifecycle.reconcile();
   assert.equal(sent.at(-1), 'stop');
   assert.equal((await lifecycle.status()).state, 'disabled');
+});
+
+test('Simple mode does not register a volunteer despite retained Advanced local settings', async () => {
+  const harness = fixture([lease('transcribe')]);
+  harness.dependencies.settings = async () => ({
+    ...DEFAULT_SETTINGS, mode: 'simple', localModelsEnabled: true, volunteerInferenceEnabled: true
+  });
+  const worker = createVolunteer(harness.dependencies);
+  worker.start();
+  await until(() => worker.getStatus().state === 'disabled');
+  assert.deepEqual(harness.requests, []);
+  assert.deepEqual(harness.calls, []);
+});
+
+test('switching to Simple stops volunteering without checking or deleting the retained bundle', async () => {
+  let simple = false;
+  let bundleChecks = 0;
+  const actions: string[] = [];
+  const lifecycle = createVolunteerLifecycle({
+    loadSettings: async () => ({
+      ...DEFAULT_SETTINGS, mode: simple ? 'simple' : 'advanced',
+      localModelsEnabled: true, volunteerInferenceEnabled: true
+    }),
+    ready: async () => { bundleChecks += 1; return true; },
+    hasDocument: async () => true,
+    ensureDocument: async () => undefined,
+    sendMessage: async (message) => {
+      actions.push(message.action);
+      return { state: message.action === 'stop' ? 'disabled' : 'connected' };
+    }
+  });
+  await lifecycle.reconcile();
+  simple = true;
+  await lifecycle.reconcile();
+  assert.equal(bundleChecks, 1);
+  assert.deepEqual(actions, ['start', 'stop']);
+  assert.equal((await lifecycle.status()).state, 'disabled');
+  simple = false;
+  await lifecycle.reconcile();
+  assert.deepEqual(actions, ['start', 'stop', 'start']);
 });

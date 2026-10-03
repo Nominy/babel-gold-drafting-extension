@@ -4,6 +4,7 @@ export type OpenRouterReasoningEffort = 'default' | 'none' | 'minimal' | 'low' |
 export type AiBrokerProvider = 'auto' | 'remote-openrouter' | 'local-gemini-nano';
 
 export interface ExtensionSettings {
+  mode: 'local' | 'simple' | 'advanced';
   backendBaseUrl: string;
   projectPreset: ProjectPresetId;
   openRouterApiKey: string;
@@ -76,6 +77,7 @@ export interface L0TimingSegment {
 }
 
 export interface L0TimingTrack {
+  punctuationLabels?: number[];
   lane: string;
   tokens: L0TimingToken[];
   segments: L0TimingSegment[];

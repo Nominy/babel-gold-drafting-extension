@@ -4,6 +4,7 @@ import { Buffer } from 'node:buffer';
 
 import { createLocalModelOffscreenBridge } from '../src/background/local-model-offscreen';
 import { LocalModelBridgeError, createLocalModelClient } from '../src/core/local-model-client';
+import { LocalTimingUnavailableError } from '../src/core/local-model-runtime';
 import {
   LOCAL_MODEL_AUDIO_CHUNK_BYTES,
   LOCAL_MODEL_OFFSCREEN_MESSAGE_TYPE,
@@ -243,6 +244,7 @@ test('offscreen host serializes heavyweight inference and turns runtime failures
   const timingStarted = Promise.withResolvers<void>();
   const calls: string[] = [];
   const host = createLocalModelHost(async () => ({
+    isLocalTimingCurrent: async () => true,
     generateLocalL0Timing: async () => {
       calls.push('timing:start');
       timingStarted.resolve();
@@ -290,6 +292,7 @@ test('all operations JSON-roundtrip bounded chunks and restore exact Blob bytes,
   const runtimeDraftTimings: L0TimingResponse[] = [];
   const runtimeSegmentTracks: PreparedL0Track[][] = [];
   const host = createLocalModelHost(async () => ({
+    isLocalTimingCurrent: async () => true,
     generateLocalL0Timing: async (_settings, _job, tracks) => {
       runtimeTimingTracks.push(tracks);
       return timingResult;
@@ -402,6 +405,7 @@ test('uploads do not initialize runtime and reject duplicates, gaps, buffer over
     async () => {
       runtimeLoads += 1;
       return {
+        isLocalTimingCurrent: async () => true,
         generateLocalL0Timing: async () => timingResult,
         generateLocalL0DraftFromTiming: async () => draftResult,
         generateLocalL0SegmentDraft: async () => 'segment'
@@ -508,12 +512,13 @@ test('client rejects mismatched responses and propagates host errors through the
 
 for (const loss of ['eviction', 'restart'] as const) {
   test(`local drafting recaptures completed timing after offscreen ${loss} without growing the two-task cache`, async () => {
-    const settings = { ...DEFAULT_SETTINGS, localModelsEnabled: true };
+    const settings = { ...DEFAULT_SETTINGS, mode: 'advanced' as const, localModelsEnabled: true };
     const captured = ['Speaker 1', 'Speaker 2'].map((speakerKey, index) => ({
       ...audioTracks[0], speakerKey, trackId: `small-${index}`, blob: new Blob([new Uint8Array([index + 1])])
     }));
     const generatedTaskIds: string[] = [];
     const loadRuntime = async () => ({
+      isLocalTimingCurrent: async () => true,
       generateLocalL0Timing: async (_settings: unknown, requestedJob: TranscriptJob) => {
         const taskId = buildCanonicalTaskIdentity(requestedJob);
         generatedTaskIds.push(taskId);
@@ -564,3 +569,30 @@ for (const loss of ['eviction', 'restart'] as const) {
     assert.equal(captures, jobs.length + 1, 'a cache hit must not capture or run ASR again');
   });
 }
+
+test('model replacement invalidates private timing before draft reuse and segment cache loss requests full capture', async () => {
+  let current = true;
+  const host = createLocalModelHost(async () => ({
+    isLocalTimingCurrent: async () => current,
+    generateLocalL0Timing: async () => timingResult,
+    generateLocalL0DraftFromTiming: async () => draftResult,
+    generateLocalL0SegmentDraft: async (_settings, taskId) => { throw new LocalTimingUnavailableError(taskId); }
+  }));
+  const uploaded = await uploadBlob(host, 'versioned-audio', audioTracks[0].blob);
+  assert.equal((await host.handleRequest({ ...timingRequest('before-update', uploaded.audioTransferId), target: 'offscreen' })).ok, true);
+  current = false;
+  const draft = await host.handleRequest({
+    type: LOCAL_MODEL_OFFSCREEN_MESSAGE_TYPE, version: LOCAL_MODEL_OFFSCREEN_VERSION, target: 'offscreen',
+    operation: 'draft', requestId: 'after-update', settings: DEFAULT_SETTINGS, taskId: timingResult.taskId
+  });
+  assert.equal(draft.ok, false);
+  if (!draft.ok) assert.equal(draft.error.code, 'timing-unavailable');
+  const segmentAudio = await uploadBlob(host, 'segment-versioned-audio', audioTracks[0].blob);
+  const segment = await host.handleRequest({
+    type: LOCAL_MODEL_OFFSCREEN_MESSAGE_TYPE, version: LOCAL_MODEL_OFFSCREEN_VERSION, target: 'offscreen',
+    operation: 'segment', requestId: 'after-private-eviction', settings: DEFAULT_SETTINGS, taskId: timingResult.taskId, row,
+    tracks: [{ lane: 'Speaker 1', fieldName: 'audio:1', audio: segmentAudio }]
+  });
+  assert.equal(segment.ok, false);
+  if (!segment.ok) assert.equal(segment.error.code, 'timing-unavailable');
+});

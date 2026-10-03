@@ -1,16 +1,22 @@
+import { INFERENCE_RELEASE } from './inference-release';
 export const LOCAL_MODEL_CACHE_NAME = 'babel-gold-local-models';
 
-const MANIFEST_SCHEMA = 'babel-browser-model-bundle-v2';
+const MANIFEST_SCHEMA = 'babel-browser-model-bundle-v3';
 const MANIFEST_TARGET_BYTES = 1_500_000_000;
 const POINTER_STORAGE_KEY = 'babel_gold_local_model_bundle_pointer';
 const STATUS_STORAGE_KEY = 'babel_gold_local_model_bundle_status';
-const POINTER_VERSION = 2;
+const POINTER_VERSION = 3;
+const ASR_CHECKPOINT_SHA256 = '02cea9973d0e839f6a3eeca101b83a93f93a066c2da2e3ebfa176d57e61d84d3';
+const C_DENOISE_CHECKPOINT_SHA256 = '0a01c3535fb66627b13f266bc59ab7b95c2aa85f7413a051d1e17294515ded5a';
 const DOWNLOAD_STALE_AFTER_MS = 30 * 60 * 1000;
 const DOWNLOAD_CHUNK_BYTES = 16 * 1024 * 1024;
 const REQUIRED_FILES: Record<string, true> = {
   'asr/v3_ctc.onnx': true,
   'asr/v3_ctc.yaml': true,
-  'punctuation/model.fp16.onnx': true,
+  'punctuation/context.fp16.onnx': true,
+  'punctuation/denoise.fp16.onnx': true,
+  'punctuation/c-denoise.json': true,
+  'punctuation/gpu-placement.json': true,
   'punctuation/config.json': true,
   'punctuation/tokenizer.json': true,
   'punctuation/tokenizer_config.json': true,
@@ -30,6 +36,14 @@ export type LocalModelStatus = {
   totalBytes: number;
   currentPath?: string;
   error?: string;
+  tested?: boolean;
+  source?: ModelSource;
+};
+
+type ModelSource = {
+  asrCheckpointSha256: string;
+  cDenoiseCheckpointSha256: string;
+  baseModelFiles: Record<string, string>;
 };
 
 type ManifestFile = {
@@ -39,16 +53,27 @@ type ManifestFile = {
 };
 
 type ModelManifest = {
+  releaseId: string;
   files: ManifestFile[];
   totalBytes: number;
+  source: ModelSource;
+};
+
+export type CachedBundleDescriptor = ModelManifest & {
+  identity: string;
+  baseUrl: string;
+  tested: boolean;
 };
 
 type ActiveBundlePointer = {
   version: typeof POINTER_VERSION;
+  releaseId: string;
   cacheName: string;
   baseUrl: string;
   totalBytes: number;
   files: ManifestFile[];
+  source: ModelSource;
+  webgpuTestedAt?: number;
 };
 
 type StoredStatus = LocalModelStatus & {
@@ -98,31 +123,11 @@ function normalizeBaseUrl(input: string): string {
 }
 
 function assertSafeRelativePath(path: unknown): asserts path is string {
-  if (typeof path !== 'string' || !path || path.startsWith('/') || /[\\?#\u0000-\u001f\u007f]/.test(path)) {
+  if (typeof path !== 'string' || !path || path.startsWith('/') || /[\\%:?#\u0000-\u001f\u007f]/.test(path)) {
     throw new Error(`Unsafe local model file path: ${String(path)}`);
   }
 
-  let decoded = path;
-  for (let pass = 0; pass < 3; pass += 1) {
-    let next: string;
-    try {
-      next = decodeURIComponent(decoded);
-    } catch {
-      throw new Error(`Unsafe local model file path: ${path}`);
-    }
-    if (next === decoded) {
-      break;
-    }
-    decoded = next;
-  }
-
-  if (
-    decoded.startsWith('/') ||
-    decoded.includes('\\') ||
-    decoded.includes('?') ||
-    decoded.includes('#') ||
-    decoded.split('/').some((segment) => !segment || segment === '.' || segment === '..')
-  ) {
+  if (path.split('/').some((segment) => !segment || segment === '.' || segment === '..')) {
     throw new Error(`Unsafe local model file path: ${path}`);
   }
 }
@@ -138,8 +143,26 @@ function requireRecord(value: unknown, label: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+function validateSource(value: unknown): ModelSource {
+  const source = requireRecord(value, 'Local model source');
+  if (source.asrCheckpointSha256 !== ASR_CHECKPOINT_SHA256 ||
+      source.cDenoiseCheckpointSha256 !== C_DENOISE_CHECKPOINT_SHA256) {
+    throw new Error('Local C-denoise bundle uses unsupported speech or correction checkpoint provenance');
+  }
+  const baseModelFiles = requireRecord(source.baseModelFiles, 'Local model baseModelFiles');
+  if (Object.keys(baseModelFiles).length === 0 ||
+      Object.values(baseModelFiles).some((sha) => typeof sha !== 'string' || !/^[a-f0-9]{64}$/.test(sha))) {
+    throw new Error('Local C-denoise bundle must identify its base model files by SHA-256');
+  }
+  return { asrCheckpointSha256: ASR_CHECKPOINT_SHA256, cDenoiseCheckpointSha256: C_DENOISE_CHECKPOINT_SHA256,
+    baseModelFiles: baseModelFiles as Record<string, string> };
+}
+
 function validateManifest(value: unknown): ModelManifest {
   const manifest = requireRecord(value, 'Local model manifest');
+  if (manifest.releaseId !== INFERENCE_RELEASE.id) {
+    throw new Error('This model bundle is outdated. Download the current C-denoise release.');
+  }
   if (manifest.schema !== MANIFEST_SCHEMA) {
     throw new Error(`Local model manifest schema must be ${MANIFEST_SCHEMA}`);
   }
@@ -148,6 +171,32 @@ function validateManifest(value: unknown): ModelManifest {
   }
   if (manifest.pass !== true) {
     throw new Error('Local model manifest has not passed bundle validation');
+  }
+  const source = validateSource(manifest.source);
+  const validation = requireRecord(manifest.validation, 'Local model validation');
+  const numeric = requireRecord(validation.numericExport, 'Local model numeric export validation');
+  if (numeric.pass !== true || typeof numeric.reportSha256 !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(numeric.reportSha256) ||
+      !Array.isArray(numeric.cases) || numeric.cases.length === 0 ||
+      !Array.isArray(numeric.asr) || numeric.asr.length === 0 ||
+      Object.keys(requireRecord(numeric.limits, 'Numeric export limits')).length === 0) {
+    throw new Error('Local C-denoise bundle requires successful numeric export parity evidence');
+  }
+  for (const result of [...numeric.cases, ...numeric.asr]) {
+    const row = requireRecord(result, 'Numeric export case');
+    const comparisons = requireRecord(row.comparisons, 'Numeric export comparisons');
+    if (row.pass !== true || typeof row.id !== 'string' || !row.id ||
+        Object.keys(comparisons).length === 0) {
+      throw new Error('Local C-denoise numeric export contains a failed or empty case');
+    }
+    for (const comparison of Object.values(comparisons)) {
+      const metric = requireRecord(comparison, 'Numeric export metric');
+      if (metric.pass !== true || metric.finite !== true ||
+          typeof metric.maxAbs !== 'number' || !Number.isFinite(metric.maxAbs) || metric.maxAbs < 0 ||
+          typeof metric.rmse !== 'number' || !Number.isFinite(metric.rmse) || metric.rmse < 0) {
+        throw new Error('Local C-denoise numeric export contains failed or non-finite parity metrics');
+      }
+    }
   }
   if (!Number.isSafeInteger(manifest.totalBytes) || (manifest.totalBytes as number) <= 0) {
     throw new Error('Local model manifest totalBytes must be a positive safe integer');
@@ -168,7 +217,7 @@ function validateManifest(value: unknown): ModelManifest {
     if (paths.has(file.path)) {
       throw new Error(`Duplicate local model file path: ${file.path}`);
     }
-    if (!Number.isSafeInteger(file.bytes) || (file.bytes as number) < 0) {
+    if (!Number.isSafeInteger(file.bytes) || (file.bytes as number) <= 0) {
       throw new Error(`Invalid byte size for local model file: ${file.path}`);
     }
     if (typeof file.sha256 !== 'string' || !/^[a-fA-F0-9]{64}$/.test(file.sha256)) {
@@ -176,6 +225,10 @@ function validateManifest(value: unknown): ModelManifest {
     }
 
     paths.add(file.path);
+    if (file.path === 'punctuation/model.fp16.onnx' ||
+        (!Object.hasOwn(REQUIRED_FILES, file.path) && !/^((asr|punctuation)\/)[^/]+\.onnx\.data(?:\.\d+)?$/.test(file.path))) {
+      throw new Error(`Unsupported local C-denoise model file: ${file.path}`);
+    }
     declaredTotal += file.bytes as number;
     if (!Number.isSafeInteger(declaredTotal)) {
       throw new Error('Local model manifest byte total is not a safe integer');
@@ -196,7 +249,7 @@ function validateManifest(value: unknown): ModelManifest {
     }
   }
 
-  return { files, totalBytes: manifest.totalBytes as number };
+  return { releaseId: INFERENCE_RELEASE.id, files, totalBytes: manifest.totalBytes as number, source };
 }
 
 function isActiveBundlePointer(value: unknown): value is ActiveBundlePointer {
@@ -205,7 +258,7 @@ function isActiveBundlePointer(value: unknown): value is ActiveBundlePointer {
   }
   const pointer = value as Partial<ActiveBundlePointer>;
   if (
-    pointer.version !== POINTER_VERSION ||
+    pointer.version !== POINTER_VERSION || pointer.releaseId !== INFERENCE_RELEASE.id ||
     typeof pointer.cacheName !== 'string' ||
     !pointer.cacheName.startsWith(`${LOCAL_MODEL_CACHE_NAME}:bundle:`) ||
     typeof pointer.baseUrl !== 'string' ||
@@ -216,6 +269,9 @@ function isActiveBundlePointer(value: unknown): value is ActiveBundlePointer {
   }
 
   try {
+    validateSource(pointer.source);
+    if (pointer.webgpuTestedAt !== undefined &&
+        (!Number.isFinite(pointer.webgpuTestedAt) || pointer.webgpuTestedAt <= 0)) return false;
     if (normalizeBaseUrl(pointer.baseUrl) !== pointer.baseUrl) {
       return false;
     }
@@ -226,7 +282,7 @@ function isActiveBundlePointer(value: unknown): value is ActiveBundlePointer {
       if (
         paths.has(file.path) ||
         !Number.isSafeInteger(file.bytes) ||
-        file.bytes < 0 ||
+        file.bytes <= 0 ||
         typeof file.sha256 !== 'string' ||
         !/^[a-f0-9]{64}$/.test(file.sha256)
       ) {
@@ -266,12 +322,31 @@ async function readPointer(): Promise<ActiveBundlePointer | null> {
   return isActiveBundlePointer(pointer) ? pointer : null;
 }
 
+// Chrome storage may reorder nested object keys. Identity and cache admission
+// compare semantic metadata, not insertion order from either serializer.
+function bundleMetadataJson(value: unknown): string {
+  return JSON.stringify(value, (_key, item: unknown) =>
+    item && typeof item === 'object' && !Array.isArray(item)
+      ? Object.fromEntries(Object.keys(item).sort().map((key) => [key, (item as Record<string, unknown>)[key]]))
+      : item);
+}
+
 async function cacheIsComplete(pointer: ActiveBundlePointer): Promise<boolean> {
   const cacheStorage = getCacheStorage();
   if (!(await cacheStorage.has(pointer.cacheName))) {
     return false;
   }
   const cache = await cacheStorage.open(pointer.cacheName);
+  const manifestResponse = await cache.match(fileUrl(pointer.baseUrl, 'manifest.json'));
+  if (!manifestResponse?.ok) return false;
+  try {
+    const manifest = validateManifest(await manifestResponse.json());
+    if (manifest.totalBytes !== pointer.totalBytes ||
+        bundleMetadataJson(manifest.source) !== bundleMetadataJson(pointer.source) ||
+        bundleMetadataJson(manifest.files) !== bundleMetadataJson(pointer.files)) return false;
+  } catch {
+    return false;
+  }
   for (const file of pointer.files) {
     if (!(await cache.match(fileUrl(pointer.baseUrl, file.path)))) {
       return false;
@@ -280,53 +355,57 @@ async function cacheIsComplete(pointer: ActiveBundlePointer): Promise<boolean> {
   return true;
 }
 
-async function findCachedBundleFileWithoutPointer(
-  path: string,
-  baseUrl: string
-): Promise<Response | null> {
+async function cacheHasWebGpuTest(pointer: ActiveBundlePointer): Promise<boolean> {
+  const cache = await getCacheStorage().open(pointer.cacheName);
+  const response = await cache.match(fileUrl(pointer.baseUrl, '__bundle-pointer.json'));
+  if (!response?.ok) return false;
+  try {
+    const metadata: unknown = await response.json();
+    return isActiveBundlePointer(metadata) && typeof metadata.webgpuTestedAt === 'number' &&
+      metadata.cacheName === pointer.cacheName && metadata.baseUrl === pointer.baseUrl &&
+      metadata.totalBytes === pointer.totalBytes &&
+      bundleMetadataJson(metadata.files) === bundleMetadataJson(pointer.files) &&
+      bundleMetadataJson(metadata.source) === bundleMetadataJson(pointer.source);
+  } catch {
+    return false;
+  }
+}
+
+async function findCachedPointer(baseUrl: string): Promise<ActiveBundlePointer | null> {
   const normalizedBaseUrl = normalizeBaseUrl(baseUrl);
   const cacheStorage = getCacheStorage();
-  const cacheNames = await cacheStorage.keys();
-  let matchingResponse: Response | null = null;
-  let matchingCaches = 0;
-
-  for (const cacheName of cacheNames) {
-    if (!cacheName.startsWith(`${LOCAL_MODEL_CACHE_NAME}:bundle:`)) {
-      continue;
-    }
-
+  let found: ActiveBundlePointer | null = null;
+  for (const cacheName of await cacheStorage.keys()) {
+    if (!cacheName.startsWith(`${LOCAL_MODEL_CACHE_NAME}:bundle:`)) continue;
     const cache = await cacheStorage.open(cacheName);
-    const manifestResponse = await cache.match(fileUrl(normalizedBaseUrl, 'manifest.json'));
-    if (!manifestResponse?.ok) continue;
-    let listedPaths: string[];
+    const response = await cache.match(fileUrl(normalizedBaseUrl, '__bundle-pointer.json'));
+    if (!response?.ok) continue;
     try {
-      listedPaths = validateManifest(await manifestResponse.json()).files.map((file) => file.path);
+      const pointer: unknown = await response.json();
+      if (!isActiveBundlePointer(pointer) || pointer.cacheName !== cacheName ||
+          pointer.baseUrl !== normalizedBaseUrl || !(await cacheIsComplete(pointer))) continue;
+      if (found) return null;
+      found = pointer;
     } catch {
       continue;
     }
-    if (!listedPaths.includes(path)) continue;
-    let complete = true;
-    for (const listedPath of listedPaths) {
-      if (!(await cache.match(fileUrl(normalizedBaseUrl, listedPath)))) {
-        complete = false;
-        break;
-      }
-    }
-    if (!complete) {
-      continue;
-    }
-    const response = (await cache.match(fileUrl(normalizedBaseUrl, path))) ?? null;
-    if (!response) {
-      continue;
-    }
-    matchingCaches += 1;
-    if (matchingCaches > 1) {
-      return null;
-    }
-    matchingResponse = response;
   }
+  return found;
+}
 
-  return matchingCaches === 1 ? matchingResponse : null;
+export async function getCachedBundleDescriptor(baseUrl: string): Promise<CachedBundleDescriptor | null> {
+  const normalizedBaseUrl = normalizeBaseUrl(baseUrl);
+  const pointer = globalThis.chrome?.storage?.local
+    ? await readPointer()
+    : await findCachedPointer(normalizedBaseUrl);
+  if (!pointer || pointer.baseUrl !== normalizedBaseUrl || !(await cacheIsComplete(pointer))) return null;
+  if (globalThis.chrome?.storage?.local && (await getLocalModelStatus(baseUrl)).state !== 'ready') return null;
+  const files = pointer.files.toSorted((a, b) => a.path.localeCompare(b.path));
+  const identity = await sha256Hex(new TextEncoder().encode(bundleMetadataJson({
+    baseUrl: normalizedBaseUrl, source: pointer.source, files
+  })).buffer);
+  return { identity, releaseId: pointer.releaseId, baseUrl: normalizedBaseUrl, files, source: pointer.source,
+    totalBytes: pointer.totalBytes, tested: await cacheHasWebGpuTest(pointer) };
 }
 
 function makeOperationId(): string {
@@ -353,14 +432,8 @@ async function clearStatus(operationId?: string): Promise<void> {
   await storage.remove(STATUS_STORAGE_KEY);
 }
 
-async function clearStaleDownload(
-  status: StoredStatus,
-  pointer: ActiveBundlePointer | null
-): Promise<void> {
-  const stagingCacheName = `${LOCAL_MODEL_CACHE_NAME}:bundle:${status.operationId}`;
-  if (pointer?.cacheName !== stagingCacheName) {
-    await getCacheStorage().delete(stagingCacheName).catch(() => false);
-  }
+async function clearStaleDownload(status: StoredStatus): Promise<void> {
+  // Keep verified files for an explicitly requested retry; never activate a partial cache.
   await clearStatus(status.operationId);
 }
 
@@ -452,16 +525,23 @@ export async function getLocalModelStatus(baseUrl: string): Promise<LocalModelSt
       const { state, completedBytes, totalBytes, currentPath, error } = pendingStatus;
       return { state, completedBytes, totalBytes, currentPath, error };
     }
-    await clearStaleDownload(pendingStatus, pointer);
+    await clearStaleDownload(pendingStatus);
     staleDownloadCleared = true;
   }
 
+  if (!staleDownloadCleared && isStoredStatus(pendingStatus) &&
+      pendingStatus.baseUrl === normalizedBaseUrl && pendingStatus.state === 'error') {
+    const { state, completedBytes, totalBytes, currentPath, error } = pendingStatus;
+    return { state, completedBytes, totalBytes, currentPath, error };
+  }
   if (pointer?.baseUrl === normalizedBaseUrl) {
     if (await cacheIsComplete(pointer)) {
       return {
         state: 'ready',
         completedBytes: pointer.totalBytes,
-        totalBytes: pointer.totalBytes
+        totalBytes: pointer.totalBytes,
+        tested: await cacheHasWebGpuTest(pointer),
+        source: pointer.source
       };
     }
     return {
@@ -480,8 +560,25 @@ export async function getLocalModelStatus(baseUrl: string): Promise<LocalModelSt
     const { state, completedBytes, totalBytes, currentPath, error } = pendingStatus;
     return { state, completedBytes, totalBytes, currentPath, error };
   }
+  if (storedPointer && typeof storedPointer === 'object' &&
+      'version' in storedPointer && storedPointer.version !== POINTER_VERSION) {
+    return { state: 'error', completedBytes: 0, totalBytes: 0,
+      error: 'The cached legacy model bundle is not C-denoise v3. Click Download to install the verified new bundle; old files remain until installation succeeds or you remove them.' };
+  }
 
   return { state: 'not-installed', completedBytes: 0, totalBytes: 0 };
+}
+
+export async function markLocalModelWebGpuTested(baseUrl: string, expectedIdentity: string): Promise<void> {
+  const pointer = await readPointer();
+  const descriptor = await getCachedBundleDescriptor(baseUrl);
+  if (!pointer || !descriptor || descriptor.identity !== expectedIdentity) {
+    throw new Error('The verified C-denoise bundle changed during its test. Test the current bundle again.');
+  }
+  const testedPointer = { ...pointer, webgpuTestedAt: Date.now() };
+  const cache = await getCacheStorage().open(pointer.cacheName);
+  await cache.put(fileUrl(pointer.baseUrl, '__bundle-pointer.json'),
+    new Response(JSON.stringify(testedPointer), { headers: { 'content-type': 'application/json' } }));
 }
 
 export async function setupLocalModels(
@@ -494,7 +591,6 @@ export async function setupLocalModels(
   const operationId = makeOperationId();
   const startedAt = Date.now();
   const cacheName = `${LOCAL_MODEL_CACHE_NAME}:bundle:${operationId}`;
-  const previousPointer = await readPointer();
   let completedBytes = 0;
   let totalBytes = 0;
   let currentPath = 'manifest.json';
@@ -519,12 +615,14 @@ export async function setupLocalModels(
     }
     const manifestDocument: unknown = await manifestResponse.json();
     const manifest = validateManifest(manifestDocument);
-    const cachedManifestResponse = new Response(JSON.stringify(manifestDocument), {
-      status: 200,
-      headers: { 'content-type': 'application/json' }
-    });
     totalBytes = manifest.totalBytes;
     const stageCache = await cacheStorage.open(cacheName);
+    await stageCache.put(fileUrl(normalizedBaseUrl, 'manifest.json'), new Response(JSON.stringify(manifestDocument), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    }));
+    const previousCacheNames = (await cacheStorage.keys()).filter((name) =>
+      name !== cacheName && (name === LOCAL_MODEL_CACHE_NAME || name.startsWith(`${LOCAL_MODEL_CACHE_NAME}:`)));
 
     for (const file of manifest.files) {
       currentPath = file.path;
@@ -538,6 +636,22 @@ export async function setupLocalModels(
         state: 'downloading',
         ...beforeProgress
       });
+      let resumed = false;
+      for (const previousCacheName of previousCacheNames) {
+        const previousCache = await cacheStorage.open(previousCacheName);
+        const previousUrl = (await previousCache.keys()).find(request => new URL(request.url).pathname.endsWith(`/${file.path}`));
+        const response = await previousCache.match(fileUrl(normalizedBaseUrl, file.path)) ??
+          (previousUrl ? await previousCache.match(previousUrl) : undefined);
+        if (!response?.ok) continue;
+        const bytes = await response.clone().arrayBuffer();
+        if (bytes.byteLength !== file.bytes || await sha256Hex(bytes) !== file.sha256) continue;
+        await stageCache.put(fileUrl(normalizedBaseUrl, file.path), response);
+        completedBytes += file.bytes;
+        onProgress?.({ completedBytes, totalBytes, currentPath });
+        resumed = true;
+        break;
+      }
+      if (resumed) continue;
 
       const { bytes, headers } = await downloadModelFile(
         fileUrl(normalizedBaseUrl, file.path),
@@ -567,9 +681,21 @@ export async function setupLocalModels(
 
       headers.delete('content-range');
       headers.delete('content-length');
+      // A single 850 MB Response chunk can exceed Chromium's cache transport
+      // limits. Preserve the verified bytes while feeding CacheStorage in the
+      // same bounded chunks used for downloads.
+      let offset = 0;
+      const body = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (offset === bytes.byteLength) { controller.close(); return; }
+          const end = Math.min(offset + DOWNLOAD_CHUNK_BYTES, bytes.byteLength);
+          controller.enqueue(new Uint8Array(bytes, offset, end - offset));
+          offset = end;
+        }
+      });
       await stageCache.put(
         fileUrl(normalizedBaseUrl, file.path),
-        new Response(bytes, { status: 200, headers })
+        new Response(body, { status: 200, headers })
       );
       completedBytes += file.bytes;
       const afterProgress = { completedBytes, totalBytes, currentPath };
@@ -587,28 +713,26 @@ export async function setupLocalModels(
     if (completedBytes !== totalBytes) {
       throw new Error('Downloaded local model byte total does not match the manifest');
     }
-    await stageCache.put(
-      fileUrl(normalizedBaseUrl, 'manifest.json'),
-      cachedManifestResponse
-    );
 
     const pointer: ActiveBundlePointer = {
       version: POINTER_VERSION,
+      releaseId: INFERENCE_RELEASE.id,
       cacheName,
       baseUrl: normalizedBaseUrl,
       totalBytes,
-      files: manifest.files
+      files: manifest.files,
+      source: manifest.source
     };
+    await stageCache.put(fileUrl(normalizedBaseUrl, '__bundle-pointer.json'),
+      new Response(JSON.stringify(pointer), { headers: { 'content-type': 'application/json' } }));
     await storage.set({ [POINTER_STORAGE_KEY]: pointer });
     await clearStatus(operationId).catch(() => undefined);
 
-    if (previousPointer && previousPointer.cacheName !== cacheName) {
-      await cacheStorage.delete(previousPointer.cacheName).catch(() => false);
-    }
+    await Promise.all(previousCacheNames.map((name) => cacheStorage.delete(name).catch(() => false)));
 
-    return { state: 'ready', completedBytes, totalBytes };
+    return { state: 'ready', completedBytes, totalBytes, tested: false, source: manifest.source };
   } catch (error) {
-    await cacheStorage.delete(cacheName).catch(() => false);
+    // Retain only checksum-verified whole files for a later explicit resume.
     const message = error instanceof Error ? error.message : String(error);
     await writeStatus({
       baseUrl: normalizedBaseUrl,
@@ -651,22 +775,12 @@ export async function getCachedLocalModelFile(
     return null;
   }
 
-  if (!globalThis.chrome?.storage?.local) {
-    try {
-      return await findCachedBundleFileWithoutPointer(path, baseUrl);
-    } catch {
-      return null;
-    }
-  }
-
-  const pointer = await readPointer();
-  if (!pointer || !pointer.files.some((file) => file.path === path)) {
-    return null;
-  }
-  if (!(await cacheIsComplete(pointer))) {
-    return null;
-  }
-
+  const pointer = globalThis.chrome?.storage?.local
+    ? await readPointer()
+    : await findCachedPointer(baseUrl);
+  if (!pointer || pointer.baseUrl !== normalizeBaseUrl(baseUrl) ||
+      !pointer.files.some((file) => file.path === path) || !(await cacheIsComplete(pointer))) return null;
+  if (globalThis.chrome?.storage?.local && (await getLocalModelStatus(baseUrl)).state !== 'ready') return null;
   const cache = await getCacheStorage().open(pointer.cacheName);
   return (await cache.match(fileUrl(pointer.baseUrl, path))) ?? null;
 }
