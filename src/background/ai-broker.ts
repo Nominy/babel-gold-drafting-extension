@@ -1,4 +1,6 @@
 import './local-model-offscreen';
+import './l0-timing-token';
+import './mai-broker';
 import {
   AI_BROKER_EXTERNAL_MESSAGE_TYPE,
   AI_BROKER_INTERNAL_MESSAGE_TYPE,
@@ -11,8 +13,9 @@ import {
   type AiBrokerPortMessage,
   type AiBrokerResponse
 } from '../core/ai-broker-protocol';
-import { getLocalModelStatus, type LocalModelStatus } from '../core/local-model-bundle';
-import { LOCAL_MODEL_BASE_URL, loadSettings } from '../core/settings';
+import { getLocalModelStatus, getCachedBundleDescriptor, type LocalModelStatus } from '../core/local-model-bundle';
+import { assertReleasedGraphs } from '../core/inference-release';
+import { isBrowserLocalMode, LOCAL_MODEL_BASE_URL, loadSettings } from '../core/settings';
 import { isOpenLocalModelOptionsMessage } from '../core/local-model-suggestion-protocol';
 import type { ExtensionSettings } from '../core/types';
 
@@ -20,10 +23,19 @@ export async function resolveBrokerCapabilities(
   settings: ExtensionSettings,
   getStatus: (baseUrl: string) => Promise<LocalModelStatus> = getLocalModelStatus
 ) {
+  if (settings.mode === 'simple') {
+    const configured = Boolean(settings.openRouterApiKey.trim());
+    return {
+      transcribeSegment: configured,
+      transcribeSegmentL0: configured,
+      redistributeText: configured
+    };
+  }
   let transcribeSegmentL0 = true;
-  if (settings.localModelsEnabled) {
+  if (isBrowserLocalMode(settings)) {
     try {
-      transcribeSegmentL0 = (await getStatus(LOCAL_MODEL_BASE_URL)).state === 'ready';
+      const status = await getStatus(LOCAL_MODEL_BASE_URL);
+      transcribeSegmentL0 = status.state === 'ready' && status.tested === true;
     } catch {
       transcribeSegmentL0 = false;
     }
@@ -31,9 +43,9 @@ export async function resolveBrokerCapabilities(
   const remoteConfigured = Boolean(settings.openRouterApiKey);
   const remoteBrokerAvailable = shouldUseRemoteBroker(settings.aiBrokerProvider) && remoteConfigured;
   return {
-    transcribeSegment: remoteBrokerAvailable,
+    transcribeSegment: settings.mode === 'local' ? transcribeSegmentL0 : remoteBrokerAvailable,
     transcribeSegmentL0,
-    redistributeText: remoteBrokerAvailable
+    redistributeText: settings.mode === 'local' ? remoteConfigured : remoteBrokerAvailable
   };
 }
 
@@ -192,7 +204,7 @@ async function admitBrokerRequest(
   onAccepted?: () => void
 ): Promise<BrokerAdmission> {
   const settings = await loadSettings();
-  const fallbackAllowed = request.operation === 'transcribeSegmentL0'
+  const fallbackAllowed = settings.mode !== 'advanced' || request.operation === 'transcribeSegmentL0'
     ? false
     : providerAllowsLocalFallback(settings.aiBrokerProvider);
   const remoteConfigured = Boolean(settings.openRouterApiKey);
@@ -203,19 +215,25 @@ async function admitBrokerRequest(
     return {
       response: {
         ok: true,
-        provider: settings.aiBrokerProvider,
+        provider: settings.mode === 'simple' ? 'remote-openrouter' : settings.aiBrokerProvider,
         remoteConfigured,
         capabilities
       }
     };
   }
 
-  if (request.operation !== 'transcribeSegmentL0' && !shouldUseRemoteBroker(settings.aiBrokerProvider)) {
+  if (settings.mode === 'advanced' && request.operation !== 'transcribeSegmentL0' && !shouldUseRemoteBroker(settings.aiBrokerProvider)) {
     return { response: unavailable('provider-local-gemini-nano', 'Gold Drafting is configured to use local Gemini Nano.', true) };
   }
 
-  if (request.operation !== 'transcribeSegmentL0' && !remoteConfigured) {
+  if ((settings.mode === 'simple' || request.operation !== 'transcribeSegmentL0' && !(settings.mode === 'local' && request.operation === 'transcribeSegment')) && !remoteConfigured) {
     return { response: unavailable('remote-not-configured', 'Gold Drafting OpenRouter API key is not configured.', fallbackAllowed) };
+  }
+  if (settings.mode === 'local' && (request.operation === 'transcribeSegment' || request.operation === 'transcribeSegmentL0')) {
+    const status = await getLocalModelStatus(LOCAL_MODEL_BASE_URL);
+    if (status.state !== 'ready' || status.tested !== true) {
+      return { response: unavailable('local-models-unavailable', 'Local WebGPU C-denoise is not ready. Download and test the dev model bundle in extension Options.', false) };
+    }
   }
 
   const tabId = Number(sender?.tab?.id);
@@ -224,6 +242,19 @@ async function admitBrokerRequest(
   }
 
   return { tabId, fallbackAllowed };
+}
+
+async function requestFailure(request: AiBrokerExternalRequest, error: unknown): Promise<Extract<AiBrokerResponse, { ok: false }>> {
+  let fallbackAllowed = false;
+  try {
+    const settings = await loadSettings();
+    fallbackAllowed = settings.mode === 'advanced' &&
+      request.operation !== 'transcribeSegmentL0' &&
+      providerAllowsLocalFallback(settings.aiBrokerProvider);
+  } catch {
+    // Without a readable mode, never turn a failed paid request into another provider call.
+  }
+  return unavailable('broker-error', error instanceof Error ? error.message : String(error), fallbackAllowed);
 }
 
 async function handleBrokerRequest(
@@ -259,6 +290,17 @@ async function handleBrokerPortRequest(
 }
 
 const externalMessageHandler = globalThis.chrome?.runtime?.onMessageExternal;
+globalThis.chrome?.runtime?.onInstalled?.addListener(() => {
+  void (async () => {
+    const settings = await loadSettings();
+    if (!isBrowserLocalMode(settings)) return;
+    const bundle = await getCachedBundleDescriptor(LOCAL_MODEL_BASE_URL);
+    if (bundle?.tested) {
+      try { assertReleasedGraphs(bundle.files); return; } catch { /* Model setup is required. */ }
+    }
+    await chrome.runtime.openOptionsPage();
+  })().catch(() => undefined);
+});
 if (externalMessageHandler && typeof externalMessageHandler.addListener === 'function') {
   externalMessageHandler.addListener((message, sender, sendResponse) => {
     if (!isBrokerRequest(message)) {
@@ -267,11 +309,7 @@ if (externalMessageHandler && typeof externalMessageHandler.addListener === 'fun
 
     void handleBrokerRequest(message, sender)
       .then(sendResponse)
-      .catch((error) =>
-        sendResponse(
-          unavailable('broker-error', error instanceof Error ? error.message : String(error), true)
-        )
-      );
+      .catch(async (error) => sendResponse(await requestFailure(message, error)));
     return true;
   });
 }
@@ -292,11 +330,8 @@ if (externalConnectHandler && typeof externalConnectHandler.addListener === 'fun
         return;
       }
 
-      void handleBrokerPortRequest(message, port).catch((error) => {
-        postPortMessage(port, {
-          type: 'error',
-          response: unavailable('broker-error', error instanceof Error ? error.message : String(error), true)
-        });
+      void handleBrokerPortRequest(message, port).catch(async (error) => {
+        postPortMessage(port, { type: 'error', response: await requestFailure(message, error) });
       });
     });
   });

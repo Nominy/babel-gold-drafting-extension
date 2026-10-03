@@ -70,7 +70,7 @@ export interface AiBrokerPingResponse {
 
 export interface AiBrokerTranscribeSegmentResponse {
   ok: true;
-  provider: 'remote-openrouter';
+  provider: 'remote-openrouter' | 'browser-local';
   text: string;
   model: string;
 }
@@ -78,7 +78,7 @@ export interface AiBrokerTranscribeSegmentResponse {
 
 export interface AiBrokerTranscribeSegmentL0Response {
   ok: true;
-  provider: 'local-l0';
+  provider: 'local-l0' | 'remote-openrouter';
   result: {
     text: string;
   };
@@ -96,6 +96,7 @@ export interface AiBrokerUnavailableResponse {
     | 'invalid-request'
     | 'provider-local-gemini-nano'
     | 'remote-not-configured'
+    | 'local-models-unavailable'
     | 'stale-task'
     | 'missing-tab'
     | 'tab-broker-unavailable'

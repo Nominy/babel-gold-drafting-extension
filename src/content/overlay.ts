@@ -1,13 +1,14 @@
 import { ensureUiStyles, themeRoot, applyComponent } from '@nominy/babel-extension-frontend';
 import { generateDraftStream } from '../core/backend-client';
 import { generateL0Draft } from '../core/l0-client';
-import { generateLocalL0Draft } from '../core/local-model-client';
+import { generateMaiL0Draft, MaiBridgeError } from '../core/mai-client';
 import { replaceTranscriptWithL0Rows, requireL0ReplacementConsumer } from '../core/l0-replacement-bridge';
 import { matchL0CreatedRows } from '../core/l0-created-row-matcher';
 import { assessAudioCaptureForDrafting, type AudioCaptureIssue } from '../core/audio-capture-guard';
 import { captureAudioTracksForDrafting } from '../core/audio-cues';
-import { loadSettings } from '../core/settings';
+import { isBrowserLocalMode, loadSettings } from '../core/settings';
 import { applyDraftRows, buildCanonicalTaskIdentity, buildDiffPreviewItems, captureTranscriptJob, restoreCapturedRows } from '../core/transcript';
+import { generateCurrentLocalL0Draft, getCurrentL0TimingGeneration, waitForCurrentL0Timing } from './l0-timing-service';
 import {
   getL0TimingAvailability,
   requestL0TimingRegeneration,
@@ -29,25 +30,32 @@ const STYLE_ID = 'babel-gold-drafting-style';
 const BUTTON_ID = 'babel-gold-drafting-magic-button';
 const OVERLAY_ID = 'babel-gold-drafting-overlay';
 const TOOLBAR_BUTTON_SELECTOR = 'button[aria-label="Play all tracks"]';
+export function shouldRunGoldLlmAfterL0(settings: ExtensionSettings): boolean {
+  return settings.mode !== 'simple' && !settings.l0DontRunLlm &&
+    (settings.mode === 'advanced' || Boolean(settings.openRouterApiKey.trim()));
+}
+
 export type L0DraftGenerators = {
   remote: typeof generateL0Draft;
-  local: typeof generateLocalL0Draft;
+  local: typeof generateCurrentLocalL0Draft;
+  mai: typeof generateMaiL0Draft;
 };
 
 const DEFAULT_L0_DRAFT_GENERATORS: L0DraftGenerators = {
   remote: generateL0Draft,
-  local: generateLocalL0Draft
+  local: generateCurrentLocalL0Draft,
+  mai: generateMaiL0Draft
 };
 
 export function generateConfiguredL0Draft(
   settings: ExtensionSettings,
   job: TranscriptJob,
-  tracks: CapturedAudioTrack[],
   generators: L0DraftGenerators = DEFAULT_L0_DRAFT_GENERATORS
 ) {
-  return settings.localModelsEnabled
-    ? generators.local(settings, job, tracks)
-    : generators.remote(settings, job, tracks);
+  if (settings.mode === 'simple') return generators.mai(settings, job);
+  return isBrowserLocalMode(settings)
+    ? generators.local(settings, job)
+    : generators.remote(settings, job);
 }
 
 
@@ -254,10 +262,17 @@ export class DraftingOverlayController {
     const retry = createElement('button', 'bgd-timing-retry bui-button', 'Regenerate timestamp data');
     retry.type = 'button';
     retry.addEventListener('click', () => {
-      if (requestL0TimingRegeneration()) {
-        this.timingAvailability = getL0TimingAvailability();
-        this.renderTimingPanel();
-      }
+      void loadSettings().then(async (settings) => {
+        if (settings.mode === 'simple') {
+          await waitForCurrentL0Timing(captureTranscriptJob(), settings);
+        } else if (requestL0TimingRegeneration()) {
+          this.timingAvailability = getL0TimingAvailability();
+          this.renderTimingPanel();
+        }
+      }).catch((error) => {
+        this.openDialog();
+        this.setStatus(error instanceof Error ? error.message : String(error), true);
+      });
     });
     panel.addEventListener('mouseenter', () => this.cancelTimingPanelHide());
     panel.addEventListener('mouseleave', () => this.scheduleTimingPanelHide());
@@ -362,7 +377,7 @@ export class DraftingOverlayController {
     supportLink.target = '_blank';
     supportLink.rel = 'noopener noreferrer';
     titleRow.append(createElement('div', 'bgd-header-title bui-title', 'Gold Draft'), supportLink);
-    titleWrap.append(titleRow, createElement('div', 'bgd-header-subtitle bui-subtitle', 'Silver -> Gold draft preview before apply'));
+    titleWrap.append(titleRow, createElement('div', 'bgd-header-subtitle bui-subtitle', 'Generated transcript; review before saving or submitting.'));
     const closeButton = createElement('button', 'bgd-close bui-button', 'Close');
     closeButton.type = 'button';
     closeButton.addEventListener('click', () => this.closeDialog());
@@ -712,7 +727,7 @@ export class DraftingOverlayController {
 
       let capturedJob = captureTranscriptJob();
       const settings = await loadSettings();
-      if (!capturedJob.rows.length && !settings.l0ReplacementPreviewEnabled) {
+      if (!capturedJob.rows.length && settings.mode === 'advanced' && !settings.l0ReplacementPreviewEnabled) {
         throw new Error('No transcript rows detected on this page.');
       }
       this.state.capturedJob = capturedJob;
@@ -720,14 +735,19 @@ export class DraftingOverlayController {
       this.streamedTotalRows = capturedJob.rows.length;
       this.render();
 
-      if (settings.l0ReplacementPreviewEnabled) {
-        this.activeDraftLabel = settings.l0DontRunLlm
-          ? 'L0 replacement / no LLM'
-          : 'L0 replacement -> Gold / OpenRouter';
+      if (settings.mode !== 'advanced' || settings.l0ReplacementPreviewEnabled) {
+        if (settings.mode === 'simple' && !settings.openRouterApiKey.trim()) {
+          throw new Error('Simple mode requires an OpenRouter API key. Add your key in the Babel Gold Drafting extension options, then try again.');
+        }
+        this.activeDraftLabel = settings.mode === 'local'
+          ? 'Local / GigaAM + C-denoise (WebGPU)'
+          : settings.mode === 'simple'
+            ? 'Cloud / MAI native transcription'
+            : settings.l0DontRunLlm ? 'L0 replacement / no LLM' : 'L0 replacement -> Gold / OpenRouter';
         capturedJob = await this.runL0Replacement(capturedJob, settings);
         this.state.capturedJob = capturedJob;
-        if (settings.l0DontRunLlm) {
-          this.setButtonState('done', 'L0 Replacement Ready');
+        if (!shouldRunGoldLlmAfterL0(settings)) {
+          this.setButtonState('done', settings.mode === 'local' ? 'Local C-denoise Draft Ready' : settings.mode === 'simple' ? 'Cloud Draft Ready' : 'L0 Replacement Ready');
           window.setTimeout(() => this.setButtonState('idle', 'Gold Draft'), 1600);
           return;
         }
@@ -771,31 +791,57 @@ export class DraftingOverlayController {
     }
   }
 
+  private async requireCurrentDraft(capturedJob: TranscriptJob, settings: ExtensionSettings, timingGeneration?: number): Promise<void> {
+    this.requireCurrentTask(capturedJob);
+    const saved = await loadSettings();
+    if (saved.mode !== settings.mode ||
+      (saved.mode === 'advanced' && saved.localModelsEnabled !== settings.localModelsEnabled) ||
+      (timingGeneration !== undefined && getCurrentL0TimingGeneration() !== timingGeneration)) {
+      throw new Error('The drafting mode changed. Discard this draft and generate again in the current mode.');
+    }
+    this.requireCurrentTask(capturedJob);
+  }
+
   private async runL0Replacement(
     capturedJob: TranscriptJob,
     settings: ExtensionSettings
   ): Promise<TranscriptJob> {
     this.setStatus('Checking Babel Helper availability...');
     const helperConfirmed = await requireL0ReplacementConsumer();
+    if (settings.mode !== 'advanced' && !helperConfirmed) {
+      throw new Error('Babel Helper is required for native editor integration. Install or enable Babel Helper and reload this task before transcribing.');
+    }
     if (!helperConfirmed) {
       this.setStatus('Babel Helper did not confirm readiness; continuing with a direct replacement request...');
     }
-    this.requireCurrentTask(capturedJob);
-    this.setStatus('Capturing exactly two WAV speaker tracks for L0 replacement...');
-    const audioTracks = await captureAudioTracksForDrafting();
-    this.logCapturedAudioTracks(audioTracks);
-    this.requireCurrentTask(capturedJob);
-    this.setStatus(
-      settings.localModelsEnabled
-        ? 'Generating replacement segments with local browser models...'
-        : 'Generating replacement segments with the self-hosted L0 endpoint...'
-    );
-    const response = await generateConfiguredL0Draft(settings, capturedJob, audioTracks);
-    this.requireCurrentTask(capturedJob);
+    await this.requireCurrentDraft(capturedJob, settings);
+    this.setStatus(settings.mode === 'local'
+      ? 'Preparing local GigaAM + C-denoise on WebGPU; no audio cloud fallback...'
+      : settings.mode === 'simple'
+        ? 'Transcribing with MAI native punctuation and word timing (cached results are reused)...'
+        : 'Waiting for shared L0 word timing...');
+    await waitForCurrentL0Timing(capturedJob, settings);
+    const timingGeneration = getCurrentL0TimingGeneration();
+    await this.requireCurrentDraft(capturedJob, settings, timingGeneration);
+    this.setStatus(settings.mode === 'simple'
+      ? 'Loading the cached native MAI draft; no Gold rewriting...'
+      : isBrowserLocalMode(settings)
+        ? 'Punctuating cached full-lane words with C-denoise on WebGPU...'
+        : 'Punctuating cached segments with the self-hosted L0 endpoint...');
+    let response;
+    try {
+      response = await generateConfiguredL0Draft(settings, capturedJob);
+    } catch (error) {
+      if (settings.mode !== 'simple' || !(error instanceof MaiBridgeError) || error.code !== 'timing-unavailable') throw error;
+      await waitForCurrentL0Timing(capturedJob, settings);
+      await this.requireCurrentDraft(capturedJob, settings, timingGeneration);
+      response = await generateConfiguredL0Draft(settings, capturedJob);
+    }
+    await this.requireCurrentDraft(capturedJob, settings, timingGeneration);
 
     this.setStatus(`Replacing current transcript with ${response.rows.length} L0 segment(s) through Babel Helper...`);
     const created = await replaceTranscriptWithL0Rows(response.rows);
-    this.requireCurrentTask(capturedJob);
+    await this.requireCurrentDraft(capturedJob, settings, timingGeneration);
     const createdIds = new Set(created.map((mapping) => mapping.id));
     if (createdIds.size !== response.rows.length || response.rows.some((row) => !createdIds.has(row.id))) {
       throw new Error('Babel Helper returned incomplete or duplicate L0 row mappings.');
@@ -818,15 +864,19 @@ export class DraftingOverlayController {
         anomalyCounts: {}
       },
       generationMeta: {
-        model: Object.keys(response.models).join(' + ') || 'L0 two-model engine',
+        model: isBrowserLocalMode(settings) ? 'GigaAM + C-denoise / WebGPU' : settings.mode === 'simple' ? 'microsoft/mai-transcribe-2' : Object.keys(response.models).join(' + ') || 'L0 two-model engine',
         rulePackVersion: 'l0-replacement',
         generatedAt: new Date().toISOString()
       }
     };
     this.setStatus(
-      settings.l0DontRunLlm
-        ? `L0 replacement complete: ${created.length} segment(s). LLM drafting was skipped.`
-        : `L0 replacement complete: ${created.length} segment(s). Recaptured transcript for Gold LLM drafting.`
+      settings.mode === 'local'
+        ? `Local C-denoise complete: ${created.length} segment(s), computed on WebGPU. ${shouldRunGoldLlmAfterL0(settings) ? 'Continuing with Gold LLM drafting.' : 'Gold LLM drafting was skipped.'}`
+        : settings.mode === 'simple'
+          ? `Cloud transcription complete: ${created.length} native MAI segment(s). No Gold rewriting was run.`
+          : settings.l0DontRunLlm
+            ? `L0 replacement complete: ${created.length} segment(s). LLM drafting was skipped.`
+            : `L0 replacement complete: ${created.length} segment(s). Recaptured transcript for Gold LLM drafting.`
     );
     this.render();
     return populatedJob;

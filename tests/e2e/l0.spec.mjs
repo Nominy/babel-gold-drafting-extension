@@ -19,6 +19,7 @@ function speechAudio(babel) {
 
 async function configure(page, babel, settings = {}, overrides = {}) {
   await babel.setExtensionSettings('gold', {
+    mode: 'advanced',
     backendBaseUrl: babel.apiURL, l0CustomBaseUrl: babel.apiURL,
     openRouterApiKey: 'e2e-non-secret-admission-key', localModelsEnabled: false,
     l0ReplacementPreviewEnabled: true, l0DontRunLlm: true, ...settings,
@@ -34,6 +35,20 @@ async function configure(page, babel, settings = {}, overrides = {}) {
 // With no Helper installed, that request must eventually fail without mutation.
 test.describe('Gold without a replacement consumer', () => {
   test.use({ extensions: ['gold'] });
+
+  test('Simple requires its native replacement consumer before uploading paid audio', async ({ page, context, babel }) => {
+    let transcriptionRequests = 0;
+    context.on('request', (request) => {
+      if (request.url().includes('openrouter.ai/api/v1/audio/transcriptions')) transcriptionRequests += 1;
+    });
+    await configure(page, babel, { mode: 'simple' });
+    const original = annotationData(await nativeAnnotations(page));
+    await page.locator(WAND).click();
+    await expect(page.locator(`${STATUS}[data-error="true"]`)).toContainText('requires Babel Helper');
+    expect(transcriptionRequests).toBe(0);
+    expect(annotationData(await nativeAnnotations(page))).toEqual(original);
+    await expect(page.getByRole('button', { name: 'Apply Draft', exact: true })).toBeDisabled();
+  });
   test('unanswered L0 replacement reports Helper timeout and preserves every native row @local-engine', async ({ page, babel }) => {
     if (babel.ai !== 'placeholder') test.setTimeout(180_000);
     await configure(page, babel, {}, speechAudio(babel));
@@ -68,7 +83,7 @@ test.describe('Gold without a replacement consumer', () => {
 test.describe('Gold and Helper L0 integration', () => {
   test.use({ extensions: ['helper', 'gold'] });
 
-  test('L0 creates and saves native segments from audio with an empty transcript @local-engine', async ({ page, babel }) => {
+  test('L0 creates and saves native segments from shared timing with an empty transcript @local-engine', async ({ page, babel }) => {
     if (babel.ai !== 'placeholder') test.setTimeout(180_000);
     await configure(page, babel, {}, { ...speechAudio(babel), action: { annotations: [] } });
     await expect(page.locator(ROW)).toHaveCount(0);
@@ -120,7 +135,8 @@ test.describe('Gold and Helper L0 integration', () => {
     const state = await babel.state();
     const replacement = state.calls.find((call) => call.path === '/v1/draft');
     expect(replacement).toBeDefined();
-    expect(replacement.files).toHaveLength(2);
+    expect(replacement.files).toHaveLength(0);
+    expect(replacement.body.taskId).toBeTruthy();
     expect(state.calls.filter((call) => call.path.startsWith('/api/draft/'))).toEqual([]);
     if (babel.ai === 'placeholder') await expect.poll(() => texts(page)).not.toEqual(original);
     await page.getByRole('button', { name: 'Close', exact: true }).click();
@@ -184,10 +200,16 @@ test.describe('Gold and Helper L0 integration', () => {
     await page.getByRole('button', { name: 'Save progress', exact: true }).click();
     await expect.poll(async () => annotationData((await babel.state()).action.annotations))
       .toEqual(annotationData(applied));
+    const transcriptionsBeforeReload = state.calls.filter((call) => call.path === '/v1/transcribe').length;
+    const lookupsBeforeReload = state.calls.filter((call) => call.path === '/v1/timing/lookup').length;
+    expect(transcriptionsBeforeReload).toBe(1);
     await page.reload();
     await expect.poll(() => page.evaluate(() => window.__BABEL_E2E__?.snapshot().ready === true)).toBe(true);
     await expect.poll(async () => annotationData(await nativeAnnotations(page))).toEqual(annotationData(applied));
     await expect.poll(async () => (await texts(page)).sort()).toEqual(applied.map((row) => row.content).sort());
+    await expect.poll(async () => (await babel.state()).calls.filter((call) => call.path === '/v1/timing/lookup').length)
+      .toBeGreaterThan(lookupsBeforeReload);
+    expect((await babel.state()).calls.filter((call) => call.path === '/v1/transcribe')).toHaveLength(transcriptionsBeforeReload);
   });
 
   test('queue progression publishes current per-lane timestamps only after real timing completion @local-engine', async ({ page, babel }) => {
@@ -262,6 +284,47 @@ test.describe('Gold and Helper L0 integration', () => {
     await expect(page.getByRole('button', { name: 'Regenerate timestamp data', exact: true })).toBeHidden();
   });
 
+  test('navigation while timing is preparing releases the wand for the next task @local-engine', async ({ page, babel, request }) => {
+    if (babel.ai !== 'placeholder') test.setTimeout(180_000);
+    const initial = await configure(page, babel, {}, { audio: { laneCount: 0 } });
+    await page.locator(WAND).click();
+    await expect(page.locator(STATUS)).toContainText('Waiting for shared L0 word timing');
+    await expect(page.locator(WAND)).toBeDisabled();
+    expect((await babel.state()).calls.filter((call) => call.path === '/v1/transcribe' || call.path === '/v1/draft')).toEqual([]);
+
+    await page.getByRole('button', { name: 'Submit Review', exact: true }).focus();
+    await page.keyboard.press('Enter');
+    const submission = page.getByRole('dialog', { name: 'Confirm Submission' });
+    await expect(submission).toBeVisible();
+    await submission.getByRole('button', { name: 'Submit', exact: true }).focus();
+    await page.keyboard.press('Enter');
+    await expect(page).toHaveURL(/\/projects$/);
+    await expect(page.locator(STATUS)).toContainText('task changed');
+    await expect(page.locator('#babel-gold-drafting-overlay')).toBeHidden();
+
+    const nextId = '66666666-6666-4666-8666-666666666666';
+    const nextRows = initial.action.annotations.map((row, index) => ({
+      ...row, id: `preparing-next-${index}`, reviewActionId: nextId, content: `Следующая задача ${index + 1}.`
+    }));
+    const reset = await request.post(`${babel.apiURL}/__e2e__/reset`, {
+      data: { scenario: 'baseline', overrides: {
+        ...speechAudio(babel), action: { actionId: nextId, reviewActionId: nextId, annotations: nextRows }
+      } },
+    });
+    expect(reset.ok()).toBeTruthy();
+    await page.getByRole('link', { name: /RU-tx-gold/ }).click();
+    await expect(page.locator('html')).toHaveAttribute('data-babel-review-action-id', nextId);
+    await expect(page.locator(WAND)).toBeEnabled();
+    await expect.poll(async () => (await texts(page)).sort()).toEqual(nextRows.map((row) => row.content).sort());
+    await page.locator(WAND).click();
+    await expect(page.locator(STATUS)).toContainText('L0 replacement complete', {
+      timeout: babel.ai === 'placeholder' ? 60_000 : 150_000
+    });
+    await expect(page.locator(WAND)).toBeEnabled();
+    const replacement = (await babel.state()).calls.find((call) => call.path === '/v1/draft');
+    expect(JSON.parse(replacement.body.taskId).baseTaskId).toBe(nextId);
+  });
+
   test('pending L0 work cannot populate a newly navigated task @local-engine', async ({ page, babel, request }) => {
     if (babel.ai !== 'placeholder') test.setTimeout(180_000);
     const hold = 'stale-l0-draft';
@@ -316,5 +379,91 @@ test.describe('Gold and Helper L0 integration', () => {
     await page.locator(ROW).first().fill('Новая задача остаётся редактируемой.');
     await page.locator(ROW).nth(1).focus();
     await expect(page.locator(ROW).first()).toHaveValue('Новая задача остаётся редактируемой.');
+  });
+});
+
+test.describe('Simple native transcription in the existing editor', () => {
+  test.use({ extensions: ['helper', 'gold'] });
+
+  test('page load is free; wand replaces native rows and publishes timing without an implicit Gold pass', async ({ page, context, babel }) => {
+    const requests = [];
+    const nativeText = 'Ну, я… да!';
+    await context.route('https://openrouter.ai/**', async (route) => {
+      const path = new URL(route.request().url()).pathname;
+      requests.push(path);
+      if (!path.endsWith('/audio/transcriptions')) {
+        await route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'Unexpected implicit text-model request' }) });
+        return;
+      }
+      await route.fulfill({
+        status: 200, contentType: 'application/json',
+        body: JSON.stringify({ text: nativeText, words: [
+          { word: 'Ну', start: 0.5, end: 0.7 },
+          { word: 'я', start: 0.8, end: 1.0 },
+          { word: 'да', start: 1.1, end: 1.4 },
+        ] }),
+      });
+    });
+    await page.addInitScript(() => {
+      window.__simpleTiming = [];
+      window.addEventListener('message', (event) => {
+        if (event.source === window && event.data?.type === 'babel-gold-drafting:l0-timing-update') {
+          window.__simpleTiming.push(event.data);
+        }
+      });
+    });
+    await configure(page, babel, {
+      mode: 'simple', backendBaseUrl: 'https://not-configured.invalid',
+      l0CustomBaseUrl: 'https://not-configured.invalid', localModelsEnabled: true,
+      l0ReplacementPreviewEnabled: false, l0DontRunLlm: false,
+    });
+    await expect.poll(() => page.evaluate(() => window.__BABEL_E2E__.snapshot().audio.ready)).toBe(true);
+    await page.locator(WAND).hover();
+    await expect(page.locator(PANEL)).toHaveAttribute('data-status', 'unavailable');
+    expect(requests).toEqual([]);
+    await page.locator(WAND).click();
+    await expect(page.locator(STATUS)).toContainText('Simple transcription complete', { timeout: 30_000 });
+    expect(requests).toEqual(['/api/v1/audio/transcriptions', '/api/v1/audio/transcriptions']);
+    const annotations = await nativeAnnotations(page);
+    expect(annotations.map((row) => row.content)).toEqual([nativeText, nativeText]);
+    expect(new Set(annotations.map((row) => row.processedRecordingId))).toEqual(new Set(['speaker-1', 'speaker-2']));
+    for (const row of annotations) {
+      expect(row.startTimeInSeconds).toBeCloseTo(0.5, 2);
+      expect(row.endTimeInSeconds).toBeCloseTo(1.4, 2);
+    }
+    const timing = await page.evaluate(() => window.__simpleTiming.at(-1));
+    expect(timing.tracks.map((track) => track.tokens.map((token) => token.text))).toEqual([['Ну', 'я', 'да'], ['Ну', 'я', 'да']]);
+    await page.getByRole('button', { name: 'Apply Draft', exact: true }).click();
+    expect((await nativeAnnotations(page)).map((row) => row.content)).toEqual([nativeText, nativeText]);
+    await page.getByRole('button', { name: 'Save progress', exact: true }).click();
+    await expect.poll(async () => annotationData((await babel.state()).action.annotations)).toEqual(annotationData(await nativeAnnotations(page)));
+    await page.reload();
+    await expect(page.locator(WAND)).toBeVisible();
+    await page.locator(WAND).hover();
+    await expect(page.locator(PANEL)).toHaveAttribute('data-status', 'available');
+    expect(requests).toHaveLength(2);
+    await page.locator(WAND).click();
+    await expect(page.locator(STATUS)).toContainText('Simple transcription complete');
+    expect(requests).toHaveLength(2);
+    expect((await babel.state()).calls.filter((call) => call.path.startsWith('/api/draft/') || call.path.startsWith('/v1/'))).toEqual([]);
+  });
+
+  test('Simple missing-key wand and timestamp action show an actionable error without mutating native rows', async ({ page, context, babel }) => {
+    const cloud = [];
+    await context.route('https://openrouter.ai/**', async (route) => {
+      cloud.push(route.request().url());
+      await route.abort();
+    });
+    await configure(page, babel, { mode: 'simple', openRouterApiKey: '', localModelsEnabled: true });
+    const original = annotationData(await nativeAnnotations(page));
+    await page.locator(WAND).click();
+    await expect(page.locator(`${STATUS}[data-error="true"]`)).toContainText(/OpenRouter API key.*extension options/i);
+    expect(annotationData(await nativeAnnotations(page))).toEqual(original);
+    await page.getByRole('button', { name: 'Close', exact: true }).click();
+    await page.locator(WAND).hover();
+    await page.getByRole('button', { name: 'Regenerate timestamp data', exact: true }).click();
+    await expect(page.locator(`${STATUS}[data-error="true"]`)).toContainText(/OpenRouter API key.*extension options/i);
+    expect(cloud).toEqual([]);
+    expect(annotationData(await nativeAnnotations(page))).toEqual(original);
   });
 });

@@ -2,9 +2,24 @@ import { copyFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildExtension, defineExtensionBuild } from '@nominy/babel-extension-build';
+import { ortJsepBuildOptions } from './scripts/ort-jsep-options.mjs';
 
 const watch = process.argv.includes('--watch');
 const rootDir = path.dirname(fileURLToPath(import.meta.url));
+const requestedDevModelUrl = process.env.BABEL_DEV_C_DENOISE_MODEL_URL?.trim();
+let devModelUrl = '';
+if (requestedDevModelUrl) {
+  const url = new URL(requestedDevModelUrl);
+  if (
+    !['http:', 'https:'].includes(url.protocol) ||
+    !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname) ||
+    url.username || url.password || url.search || url.hash ||
+    url.pathname.replace(/\/+$/, '') !== '/c-denoise'
+  ) {
+    throw new Error('BABEL_DEV_C_DENOISE_MODEL_URL must be a loopback HTTP(S) /c-denoise URL');
+  }
+  devModelUrl = url.toString().replace(/\/+$/, '');
+}
 const ortRuntimeOutputDir = path.join(rootDir, 'dist/vendor/ort');
 const offscreenPageSourcePath = path.join(rootDir, 'src/offscreen/offscreen.html');
 const offscreenPageOutputPath = path.join(rootDir, 'offscreen.html');
@@ -37,6 +52,10 @@ const config = defineExtensionBuild({
     sourcemap: true,
     target: 'chrome114',
     conditions: ['onnxruntime-web-use-extern-wasm'],
+    alias: ortJsepBuildOptions.alias,
+    plugins: ortJsepBuildOptions.plugins,
+    external: ortJsepBuildOptions.external,
+    define: { ...ortJsepBuildOptions.define, __BABEL_DEV_C_DENOISE_MODEL_URL__: JSON.stringify(devModelUrl) },
     format: 'iife',
     logLevel: 'info'
   },

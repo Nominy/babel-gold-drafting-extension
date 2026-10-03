@@ -23,8 +23,8 @@ import type {
   TranscriptRow
 } from '../src/core/types';
 
-const settings: ExtensionSettings = { ...DEFAULT_SETTINGS };
-const localSettings: ExtensionSettings = { ...DEFAULT_SETTINGS, localModelsEnabled: true };
+const settings: ExtensionSettings = { ...DEFAULT_SETTINGS, mode: 'advanced' };
+const localSettings: ExtensionSettings = { ...DEFAULT_SETTINGS, mode: 'advanced', localModelsEnabled: true };
 const targetRow: TranscriptRow = {
   rowId: 'row-1',
   speakerKey: 'Speaker A',
@@ -64,9 +64,10 @@ const draftResponse: L0DraftResponse = {
   models: {}
 };
 
-test('timing routing keeps the remote generator as the default and uses local only after opt-in', async () => {
+test('Advanced timing uses the configured remote or local engine without cloud fallback', async () => {
   const calls: string[] = [];
   const generators: L0TimingGenerators = {
+    mai: async () => { assert.fail('Advanced must not use MAI'); },
     remote: async () => {
       calls.push('remote');
       return timingResponse;
@@ -83,9 +84,17 @@ test('timing routing keeps the remote generator as the default and uses local on
   calls.length = 0;
   assert.equal(await requestConfiguredL0Timing(localSettings, job, tracks, {}, generators), timingResponse);
   assert.deepEqual(calls, ['local']);
+  calls.length = 0;
+  assert.equal(
+    await requestConfiguredL0Timing(
+      { ...localSettings, volunteerInferenceEnabled: false }, job, tracks, {}, generators
+    ),
+    timingResponse
+  );
+  assert.deepEqual(calls, ['local']);
 });
 
-test('draft routing preserves the remote path by default and surfaces an opted-in local failure without fallback', async () => {
+test('Advanced drafting surfaces a local failure without falling back to remote or MAI', async () => {
   let remoteCalls = 0;
   const remote = async () => {
     remoteCalls += 1;
@@ -93,85 +102,28 @@ test('draft routing preserves the remote path by default and surfaces an opted-i
   };
   const successGenerators: L0DraftGenerators = {
     remote,
+    mai: async () => { assert.fail('Advanced must not use MAI'); },
     local: async () => draftResponse
   };
 
-  assert.equal(await generateConfiguredL0Draft(settings, job, tracks, successGenerators), draftResponse);
+  assert.equal(await generateConfiguredL0Draft(settings, job, successGenerators), draftResponse);
   assert.equal(remoteCalls, 1);
 
   const localError = new Error('local inference failed');
   const failureGenerators: L0DraftGenerators = {
+    mai: async () => { assert.fail('Advanced must not use MAI'); },
     remote,
     local: async () => {
       throw localError;
     }
   };
   await assert.rejects(
-    generateConfiguredL0Draft(localSettings, job, tracks, failureGenerators),
+    generateConfiguredL0Draft(localSettings, job, failureGenerators),
     (error) => error === localError
   );
   assert.equal(remoteCalls, 1);
 });
 
-test('segment routing keeps the existing prepared-track remote call when disabled', async () => {
-  let localCalls = 0;
-  let receivedTaskId = '';
-  let receivedTrackCount = 0;
-  const generators: L0SegmentGenerators = {
-    remote: async (_settings, taskId, row, preparedTracks) => {
-      receivedTaskId = taskId;
-      receivedTrackCount = preparedTracks.length;
-      assert.equal(row, targetRow);
-      return 'remote text';
-    },
-    local: async () => {
-      localCalls += 1;
-      return 'local text';
-    }
-  };
-
-  assert.equal(
-    await generateConfiguredL0SegmentText(settings, 'task-1', targetRow, tracks, generators),
-    'remote text'
-  );
-  assert.equal(receivedTaskId, 'task-1');
-  assert.equal(receivedTrackCount, 2);
-  assert.equal(localCalls, 0);
-});
-
-test('opted-in segment routing uses the exact cropped local result without remote fallback', async () => {
-  let remoteCalls = 0;
-  let receivedTrackCount = 0;
-  const generators: L0SegmentGenerators = {
-    remote: async () => {
-      remoteCalls += 1;
-      return 'remote text';
-    },
-    local: async (_settings, taskId, row, preparedTracks) => {
-      assert.equal(taskId, 'task-1');
-      assert.equal(row, targetRow);
-      receivedTrackCount = preparedTracks.length;
-      return 'exact local text';
-    }
-  };
-
-  assert.equal(
-    await generateConfiguredL0SegmentText(localSettings, 'task-1', targetRow, tracks, generators),
-    'exact local text'
-  );
-  assert.equal(receivedTrackCount, 2);
-  assert.equal(remoteCalls, 0);
-
-  const localError = new Error('browser model crashed');
-  generators.local = async () => {
-    throw localError;
-  };
-  await assert.rejects(
-    generateConfiguredL0SegmentText(localSettings, 'task-1', targetRow, tracks, generators),
-    (error) => error === localError
-  );
-  assert.equal(remoteCalls, 0);
-});
 
 test('L0 broker capability uses the fixed supplier readiness for opt-in and remote availability otherwise', async () => {
   let statusCalls = 0;
@@ -190,12 +142,12 @@ test('L0 broker capability uses the fixed supplier readiness for opt-in and remo
   assert.equal(notInstalledCapabilities.transcribeSegmentL0, false);
 
   const readyCapabilities = await resolveBrokerCapabilities(localSettings, async (baseUrl) => {
-    assert.equal(LOCAL_MODEL_BASE_URL, 'https://reviewgen.ovh/browser-model');
     assert.equal(baseUrl, LOCAL_MODEL_BASE_URL);
     return {
       state: 'ready',
       completedBytes: 1,
-      totalBytes: 1
+      totalBytes: 1,
+      tested: true
     };
   });
   assert.equal(readyCapabilities.transcribeSegmentL0, true);
@@ -204,4 +156,30 @@ test('L0 broker capability uses the fixed supplier readiness for opt-in and remo
     throw new Error('cache unavailable');
   });
   assert.equal(failedStatusCapabilities.transcribeSegmentL0, false);
+
+  const ownTaskSettings = { ...DEFAULT_SETTINGS, mode: 'local' as const, openRouterApiKey: '', aiBrokerProvider: 'local-gemini-nano' as const };
+  const untested = await resolveBrokerCapabilities(ownTaskSettings, async () => ({
+    state: 'ready', completedBytes: 1, totalBytes: 1, tested: false
+  }));
+  assert.deepEqual(untested, { transcribeSegment: false, transcribeSegmentL0: false, redistributeText: false });
+  const tested = await resolveBrokerCapabilities(ownTaskSettings, async () => ({
+    state: 'ready', completedBytes: 1, totalBytes: 1, tested: true
+  }));
+  assert.deepEqual(tested, { transcribeSegment: true, transcribeSegmentL0: true, redistributeText: false });
+});
+
+test('Simple native transcription ignores Advanced engine preferences and never falls back after a cloud failure', async () => {
+  const simple: ExtensionSettings = {
+    ...localSettings, mode: 'simple', l0ReplacementPreviewEnabled: false, l0DontRunLlm: false
+  };
+  const forbidden = async (): Promise<never> => { assert.fail('Simple must not run an Advanced engine'); };
+  const cloudFailure = new Error('MAI provider rejected transcription');
+  const timingGenerators: L0TimingGenerators = { remote: forbidden, local: forbidden, mai: async () => timingResponse };
+  const draftGenerators: L0DraftGenerators = { remote: forbidden, local: forbidden, mai: async () => draftResponse };
+  const segmentGenerators: L0SegmentGenerators = { remote: forbidden, local: forbidden, mai: async () => 'Ну, я… да!' };
+  assert.equal(await requestConfiguredL0Timing(simple, job, [], {}, timingGenerators), timingResponse);
+  assert.equal(await generateConfiguredL0Draft(simple, job, draftGenerators), draftResponse);
+  assert.equal(await generateConfiguredL0SegmentText(simple, 'task-1', targetRow, segmentGenerators), 'Ну, я… да!');
+  timingGenerators.mai = async () => { throw cloudFailure; };
+  await assert.rejects(requestConfiguredL0Timing(simple, job, [], {}, timingGenerators), (error) => error === cloudFailure);
 });

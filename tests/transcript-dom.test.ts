@@ -9,6 +9,8 @@ import {
   captureTranscriptJob,
   restoreCapturedRows
 } from '../src/core/transcript';
+import { PAGE_RECORDING_LANES_ATTRIBUTE, PAGE_TASK_ID_ATTRIBUTE } from '../src/core/audio-intercept-protocol';
+import { matchL0CreatedRows } from '../src/core/l0-created-row-matcher';
 
 function installDom(html: string) {
   const dom = new JSDOM(html, { url: 'https://dashboard.babel.audio/transcription/RU-transcription?jobId=job-42' });
@@ -143,6 +145,54 @@ test('captureTranscriptJob uses the main-world published review action in the is
 
   assert.equal(job.jobId, 'review-action-bridged');
 });
+
+test('isolated-world rows match recording lanes and remain editable after an empty transcript is populated', (t) => {
+  const dom = installDom(`
+    <table><tbody><tr>
+      <td>1</td><td>Speaker A</td><td>00:00:01.0</td><td>00:00:03.0</td>
+      <td><textarea placeholder="What was said">Hello.</textarea></td>
+    </tr></tbody></table>
+  `);
+  t.after(() => dom.window.close());
+  const root = dom.window.document.documentElement;
+  root.setAttribute(PAGE_TASK_ID_ATTRIBUTE, 'task-a');
+  root.setAttribute(PAGE_RECORDING_LANES_ATTRIBUTE, JSON.stringify({
+    reviewActionId: 'task-a', tracks: [{ id: 'recording-a', label: 'Speaker A' }]
+  }));
+  const job = captureTranscriptJob();
+  const matches = matchL0CreatedRows([
+    { id: 'new-row', lane: 'recording-a', startSeconds: 1, endSeconds: 3, text: 'Hello.' }
+  ], job.rows);
+  assert.equal(matches[0].capturedRow.processedRecordingId, 'recording-a');
+  applyDraftRows([{ rowId: job.rows[0].rowId, rewrittenText: 'Updated.', status: 'rewritten', warnings: [] }]);
+  assert.equal(dom.window.document.querySelector('textarea')!.value, 'Updated.');
+});
+
+for (const boundary of ['stale-task', 'ambiguous-label'] as const) {
+  test(`published recording metadata cannot assign a lane for ${boundary}`, (t) => {
+    const dom = installDom(`
+      <table><tbody><tr>
+        <td>1</td><td>Speaker A</td><td>00:00:01.0</td><td>00:00:03.0</td>
+        <td><textarea placeholder="What was said">Hello.</textarea></td>
+      </tr></tbody></table>
+    `);
+    t.after(() => dom.window.close());
+    const root = dom.window.document.documentElement;
+    root.setAttribute(PAGE_TASK_ID_ATTRIBUTE, 'task-a');
+    root.setAttribute(PAGE_RECORDING_LANES_ATTRIBUTE, JSON.stringify({
+      reviewActionId: boundary === 'stale-task' ? 'task-b' : 'task-a',
+      tracks: [
+        { id: 'recording-a', label: 'Speaker A' },
+        ...(boundary === 'ambiguous-label' ? [{ id: 'recording-b', label: 'Speaker A' }] : [])
+      ]
+    }));
+    const job = captureTranscriptJob();
+    assert.equal(job.rows[0].processedRecordingId, undefined);
+    assert.throws(() => matchL0CreatedRows([
+      { id: 'new-row', lane: 'recording-a', startSeconds: 1, endSeconds: 3, text: 'Hello.' }
+    ], job.rows), /Missing:/);
+  });
+}
 
 test('captureTranscriptJob detects start and end columns instead of assuming fixed indexes', () => {
   const dom = installDom(`

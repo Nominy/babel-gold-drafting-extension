@@ -1,5 +1,5 @@
 import { getReactFiber, normalizeText, setEditableValue } from '@nominy/babel-babel-runtime';
-import { PAGE_TASK_ID_ATTRIBUTE } from './audio-intercept-protocol';
+import { PAGE_RECORDING_LANES_ATTRIBUTE, PAGE_TASK_ID_ATTRIBUTE } from './audio-intercept-protocol';
 import type { ApplyDraftResult, DiffPreviewItem, DraftRowResult, TranscriptJob, TranscriptRow } from './types';
 
 const TRANSCRIPT_ROW_SELECTOR = 'tbody tr';
@@ -98,7 +98,7 @@ function readVisibleTimeCells(row: HTMLTableRowElement): {
   };
 }
 
-function readRowIdentity(row: HTMLTableRowElement): RowIdentity {
+function readRowIdentity(row: HTMLTableRowElement, laneIds: Map<string, string | null>): RowIdentity {
   const visibleCells = readVisibleTimeCells(row);
 
   const identity: RowIdentity = {
@@ -144,6 +144,13 @@ function readRowIdentity(row: HTMLTableRowElement): RowIdentity {
     current = current.return as { memoizedProps?: unknown; return?: unknown } | null;
     depth += 1;
   }
+  if (!identity.processedRecordingId) {
+    const recordingId = laneIds.get(identity.speakerKey.trim().replace(/\s+/g, ' ').toLocaleLowerCase());
+    if (recordingId) {
+      identity.processedRecordingId = recordingId;
+      identity.speakerKey = recordingId;
+    }
+  }
 
   return identity;
 }
@@ -175,6 +182,30 @@ function readPublishedReviewActionId(root: ParentNode): string {
       ? (root as Document)
       : ((root as Node).ownerDocument ?? null);
   return documentRef?.documentElement?.getAttribute(PAGE_TASK_ID_ATTRIBUTE)?.trim() || '';
+}
+
+function readPublishedLaneIds(root: ParentNode): Map<string, string | null> {
+  const result = new Map<string, string | null>();
+  const documentRef = 'documentElement' in root ? root as Document : (root as Node).ownerDocument;
+  const raw = documentRef?.documentElement?.getAttribute(PAGE_RECORDING_LANES_ATTRIBUTE);
+  if (!raw) return result;
+  try {
+    const published: unknown = JSON.parse(raw);
+    if (!published || typeof published !== 'object' ||
+        !('reviewActionId' in published) || published.reviewActionId !== readPublishedReviewActionId(root) ||
+        !('tracks' in published) || !Array.isArray(published.tracks)) return result;
+    for (const track of published.tracks) {
+      if (!track || typeof track.id !== 'string' || !track.id.trim() ||
+          typeof track.label !== 'string' || !track.label.trim()) continue;
+      const label = track.label.trim().replace(/\s+/g, ' ').toLocaleLowerCase();
+      const id = track.id.trim();
+      // Duplicate display labels cannot identify a recording safely.
+      result.set(label, result.has(label) && result.get(label) !== id ? null : id);
+    }
+  } catch {
+    // An absent or invalid page snapshot must not invent a recording identity.
+  }
+  return result;
 }
 
 function makeFallbackRowId(identity: RowIdentity, rowIndex: number): string {
@@ -214,8 +245,9 @@ export function captureTranscriptJob(
   locationLike: Pick<Location, 'pathname' | 'search'> = window.location
 ): TranscriptJob {
   const rowElements = getTranscriptRowElements(root);
+  const laneIds = readPublishedLaneIds(root);
   const rows = rowElements.map<TranscriptRow>((row, index) => {
-    const identity = readRowIdentity(row);
+    const identity = readRowIdentity(row, laneIds);
     const textarea = row.querySelector<HTMLTextAreaElement>(ROW_TEXTAREA_SELECTOR);
 
     return {
@@ -242,8 +274,9 @@ export function captureTranscriptJob(
 
 function buildLocatorMap(root: ParentNode = document): Map<string, HTMLTextAreaElement> {
   const map = new Map<string, HTMLTextAreaElement>();
+  const laneIds = readPublishedLaneIds(root);
   for (const [index, row] of getTranscriptRowElements(root).entries()) {
-    const identity = readRowIdentity(row);
+    const identity = readRowIdentity(row, laneIds);
     const textarea = row.querySelector<HTMLTextAreaElement>(ROW_TEXTAREA_SELECTOR);
     if (!textarea) {
       continue;

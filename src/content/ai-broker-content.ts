@@ -11,15 +11,23 @@ import {
 import { captureAudioTracksForDrafting } from '../core/audio-cues';
 import { redistributeTextWithBroker, transcribeSegmentWithBroker } from '../core/backend-client';
 import { generateL0SegmentDraft } from '../core/l0-client';
-import { generateLocalL0SegmentDraft } from '../core/local-model-client';
-import { prepareL0TimingTracks } from '../core/l0-timing-client';
-import { loadSettings } from '../core/settings';
+import { generateLocalL0SegmentDraft, LocalModelBridgeError } from '../core/local-model-client';
+import { generateMaiL0SegmentDraft, redistributeMaiText, MaiBridgeError } from '../core/mai-client';
+import { getCurrentL0TimingGeneration, recoverCurrentLocalL0Timing, waitForCurrentL0Timing } from './l0-timing-service';
+import { isBrowserLocalMode, loadSettings } from '../core/settings';
 import { buildCanonicalTaskIdentity, captureTranscriptJob } from '../core/transcript';
-import type { CapturedAudioTrack, ExtensionSettings, TranscriptRow } from '../core/types';
+import type { ExtensionSettings, TranscriptRow } from '../core/types';
 
 const AI_BROKER_CONTENT_BUILD = 'port-stream-postmortem-2026-06-23';
 const AI_BROKER_CONTENT_BUILD_ATTR = 'data-babel-gold-drafting-ai-broker-build';
 const BROKER_BACKEND_PROGRESS_INTERVAL_MS = 5000;
+
+class NoFallbackBrokerError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = 'NoFallbackBrokerError';
+  }
+}
 
 function brokerError(reason: Extract<AiBrokerResponse, { ok: false }>['reason'], message: string, fallbackAllowed: boolean): Extract<AiBrokerResponse, { ok: false }> {
   return {
@@ -35,7 +43,8 @@ function formatElapsedSeconds(elapsedMs: number): string {
 }
 
 function allowsBrokerFallback(message: AiBrokerInternalRequest, settings: ExtensionSettings | null): boolean {
-  if (message.operation === 'transcribeSegmentL0' && settings?.localModelsEnabled) {
+  if (settings && settings.mode !== 'advanced') return false;
+  if (message.operation === 'transcribeSegmentL0' && settings && isBrowserLocalMode(settings)) {
     return false;
   }
   return settings === null || providerAllowsLocalFallback(settings.aiBrokerProvider);
@@ -139,25 +148,32 @@ function captureCurrentCanonicalTaskId(): string {
 export type L0SegmentGenerators = {
   remote: typeof generateL0SegmentDraft;
   local: typeof generateLocalL0SegmentDraft;
+  mai: typeof generateMaiL0SegmentDraft;
 };
 
 const DEFAULT_L0_SEGMENT_GENERATORS: L0SegmentGenerators = {
   remote: generateL0SegmentDraft,
-  local: generateLocalL0SegmentDraft
+  local: generateLocalL0SegmentDraft,
+  mai: generateMaiL0SegmentDraft
 };
 
 export async function generateConfiguredL0SegmentText(
   settings: ExtensionSettings,
   taskId: string,
   targetRow: TranscriptRow,
-  audioTracks: CapturedAudioTrack[],
   generators: L0SegmentGenerators = DEFAULT_L0_SEGMENT_GENERATORS
 ): Promise<string> {
-  const segmentJob = { jobId: taskId, rows: [targetRow] };
-  const tracks = prepareL0TimingTracks(segmentJob, audioTracks);
-  return settings.localModelsEnabled
-    ? generators.local(settings, taskId, targetRow, tracks)
-    : generators.remote(settings, taskId, targetRow, tracks);
+  if (settings.mode === 'simple') return generators.mai(settings, taskId, targetRow);
+  if (!isBrowserLocalMode(settings)) return generators.remote(settings, taskId, targetRow);
+  try {
+    return await generators.local(settings, taskId, targetRow, []);
+  } catch (error) {
+    if (!(error instanceof LocalModelBridgeError) || error.code !== 'timing-unavailable') throw error;
+    const job = captureTranscriptJob();
+    if (buildCanonicalTaskIdentity(job) !== taskId) throw new Error('The task changed before its local acoustic cache could be recovered.');
+    await recoverCurrentLocalL0Timing(settings, job);
+    return generators.local(settings, taskId, targetRow, []);
+  }
 }
 
 async function handleBrokerRequest(
@@ -165,6 +181,106 @@ async function handleBrokerRequest(
   emit?: (message: AiBrokerPortMessage) => void
 ): Promise<AiBrokerResponse> {
   const settings = await loadSettings();
+
+  if (settings.mode === 'local') {
+    try {
+      if (message.operation === 'redistributeText') {
+        emit?.({ type: 'event', event: 'calling-backend', operation: message.operation, message: 'Explicit text alignment uses OpenRouter; task audio remains local.' });
+        const response = await redistributeMaiText(settings, message.groups);
+        if ((await loadSettings()).mode !== 'local') return brokerError('stale-task', 'The model mode changed during text alignment.', false);
+        return { ok: true, provider: 'remote-openrouter', results: response.results, model: response.model };
+      }
+      if (message.operation !== 'transcribeSegment' && message.operation !== 'transcribeSegmentL0') {
+        return brokerError('invalid-request', 'Unsupported local browser model operation.', false);
+      }
+      const job = captureTranscriptJob();
+      const taskId = buildCanonicalTaskIdentity(job);
+      const requested = message.operation === 'transcribeSegmentL0' ? message.row : message.segment;
+      const known = job.rows.find((row) => row.rowId === requested.rowId);
+      const row: TranscriptRow = { ...requested, processedRecordingId: known?.processedRecordingId, text: '', index: 0 };
+      if (!isValidL0TargetRow(row) ||
+          (message.operation === 'transcribeSegmentL0' && message.taskId !== taskId) ||
+          (known && known.speakerKey.trim().toLowerCase() !== row.speakerKey.trim().toLowerCase())) {
+        return brokerError('stale-task', 'The requested source or transcript task is no longer current.', false);
+      }
+      emit?.({ type: 'event', event: 'calling-backend', operation: message.operation, message: 'Using local GigaAM + C-denoise on WebGPU; no cloud audio fallback.' });
+      await waitForCurrentL0Timing(job, settings);
+      const generation = getCurrentL0TimingGeneration();
+      const isCurrent = async () => captureCurrentCanonicalTaskId() === taskId &&
+        (await loadSettings()).mode === 'local' && getCurrentL0TimingGeneration() === generation;
+      if (!(await isCurrent())) return brokerError('stale-task', 'The task or model mode changed while preparing local timing.', false);
+      const text = await generateConfiguredL0SegmentText(settings, taskId, row);
+      if (!(await isCurrent())) return brokerError('stale-task', 'The task or model mode changed before local transcription completed.', false);
+      return message.operation === 'transcribeSegmentL0'
+        ? { ok: true, provider: 'local-l0', result: { text } }
+        : { ok: true, provider: 'browser-local', text, model: 'GigaAM + C-denoise / WebGPU' };
+    } catch (error) {
+      throw new NoFallbackBrokerError(error);
+    }
+  }
+
+  if (settings.mode === 'simple') {
+    try {
+      if (!settings.openRouterApiKey.trim()) {
+        return brokerError('remote-not-configured', 'Simple mode requires an OpenRouter API key. Add your key in the Babel Gold Drafting extension options, then try again.', false);
+      }
+      if (message.operation === 'redistributeText') {
+        emit?.({ type: 'event', event: 'calling-backend', operation: message.operation, message: 'Redistributing text with OpenRouter. This is a separate paid text-model request.' });
+        const response = await withBrokerBackendProgress(
+          message.operation, emit, () => redistributeMaiText(settings, message.groups), 'OpenRouter text redistribution'
+        );
+        if ((await loadSettings()).mode !== 'simple') {
+          return brokerError('stale-task', 'The drafting mode changed before text redistribution completed.', false);
+        }
+        return { ok: true, provider: 'remote-openrouter', results: response.results, model: response.model };
+      }
+      if (message.operation !== 'transcribeSegmentL0' && message.operation !== 'transcribeSegment') {
+        return brokerError('invalid-request', 'Unsupported Helper AI broker operation.', false);
+      }
+      const job = captureTranscriptJob();
+      const taskId = buildCanonicalTaskIdentity(job);
+      const requestedRow = message.operation === 'transcribeSegmentL0' ? message.row : message.segment;
+      const knownRow = job.rows.find((row) => row.rowId === requestedRow.rowId);
+      const targetRow: TranscriptRow = {
+        ...requestedRow,
+        processedRecordingId: knownRow?.processedRecordingId,
+        text: '',
+        index: 0
+      };
+      if (!isValidL0TargetRow(targetRow) ||
+        (message.operation === 'transcribeSegmentL0' && message.taskId !== taskId) ||
+        (knownRow && knownRow.speakerKey.trim().toLowerCase() !== targetRow.speakerKey.trim().toLowerCase()) ||
+        (!job.taskScoped && !job.rows.some((row) => row.speakerKey.trim().toLowerCase() === targetRow.speakerKey.trim().toLowerCase()))) {
+        return brokerError('stale-task', 'The requested source or transcript task is no longer current.', false);
+      }
+      targetRow.rowId = targetRow.rowId.trim();
+      targetRow.speakerKey = targetRow.speakerKey.trim();
+      emit?.({ type: 'event', event: 'calling-backend', operation: message.operation, message: 'Using MAI native transcription and timing; cached source audio results are reused.' });
+      await waitForCurrentL0Timing(job, settings);
+      const timingGeneration = getCurrentL0TimingGeneration();
+      const isCurrent = async () => captureCurrentCanonicalTaskId() === taskId &&
+        (await loadSettings()).mode === 'simple' && getCurrentL0TimingGeneration() === timingGeneration;
+      if (!(await isCurrent())) return brokerError('stale-task', 'The transcript task or drafting mode changed while transcribing.', false);
+      let text: string;
+      try {
+        text = await generateConfiguredL0SegmentText(settings, taskId, targetRow);
+      } catch (error) {
+        if (!(error instanceof MaiBridgeError) || error.code !== 'timing-unavailable') throw error;
+        // Only an explicit Helper action can recover a missing session cache.
+        await waitForCurrentL0Timing(job, settings);
+        if (!(await isCurrent())) return brokerError('stale-task', 'The transcript task or drafting mode changed while transcribing.', false);
+        text = await generateConfiguredL0SegmentText(settings, taskId, targetRow);
+      }
+      if (!(await isCurrent())) return brokerError('stale-task', 'The transcript task or drafting mode changed before transcription completed.', false);
+      return message.operation === 'transcribeSegmentL0'
+        ? { ok: true, provider: 'remote-openrouter', result: { text } }
+        : { ok: true, provider: 'remote-openrouter', text, model: 'microsoft/mai-transcribe-2' };
+    } catch (error) {
+      // Failure policy belongs to the action's originating mode, even if the
+      // user switches to Advanced while a cloud request is pending.
+      throw new NoFallbackBrokerError(error);
+    }
+  }
 
   if (message.operation === 'transcribeSegmentL0') {
     if (
@@ -175,12 +291,11 @@ async function handleBrokerRequest(
     ) {
       return brokerError('stale-task', 'The requested transcript task is no longer current.', false);
     }
-    if (emit) {
-      emit({ type: 'event', event: 'capturing-audio', operation: message.operation, message: 'Capturing Babel segment audio.' });
+    if (emit && isBrowserLocalMode(settings)) {
+      emit({ type: 'event', event: 'calling-backend', operation: message.operation, message: 'Using cached full-lane C-denoise WebGPU labels.' });
     }
-    const audioTracks = await captureAudioTracksForDrafting();
     if (captureCurrentCanonicalTaskId() !== message.taskId) {
-      return brokerError('stale-task', 'The transcript task changed while audio was being captured.', false);
+      return brokerError('stale-task', 'The transcript task changed before its cached segment could be read.', false);
     }
     const targetRow: TranscriptRow = {
       ...message.row,
@@ -189,12 +304,13 @@ async function handleBrokerRequest(
       text: '',
       index: 0
     };
+    await waitForCurrentL0Timing(captureTranscriptJob(), settings);
     if (emit) {
       emit({
         type: 'event',
         event: 'calling-backend',
         operation: message.operation,
-        message: settings.localModelsEnabled
+        message: isBrowserLocalMode(settings)
           ? 'Running local browser models for the requested segment.'
           : 'Calling the local L0 drafting engine.'
       });
@@ -202,8 +318,8 @@ async function handleBrokerRequest(
     const text = await withBrokerBackendProgress(
       message.operation,
       emit,
-      () => generateConfiguredL0SegmentText(settings, message.taskId, targetRow, audioTracks),
-      settings.localModelsEnabled ? 'local browser models' : 'Gold Drafting backend'
+      () => generateConfiguredL0SegmentText(settings, message.taskId, targetRow),
+      isBrowserLocalMode(settings) ? 'local WebGPU C-denoise' : 'Gold Drafting backend'
     );
     if (captureCurrentCanonicalTaskId() !== message.taskId) {
       return brokerError('stale-task', 'The transcript task changed before L0 drafting completed.', false);
@@ -293,7 +409,7 @@ async function brokerFailureResponse(
   } catch {
     // Settings may also be unavailable while reporting the original request failure.
   }
-  const fallbackAllowed = allowsBrokerFallback(message, settings);
+  const fallbackAllowed = !(error instanceof NoFallbackBrokerError) && allowsBrokerFallback(message, settings);
   logBrokerRequestFailure(message, settings, error, fallbackAllowed);
   return brokerError('broker-error', error instanceof Error ? error.message : String(error), fallbackAllowed);
 }

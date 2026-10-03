@@ -4,6 +4,7 @@ import { Buffer } from 'node:buffer';
 
 import { createLocalModelOffscreenBridge } from '../src/background/local-model-offscreen';
 import { LocalModelBridgeError, createLocalModelClient } from '../src/core/local-model-client';
+import { LocalTimingUnavailableError } from '../src/core/local-model-runtime';
 import {
   LOCAL_MODEL_AUDIO_CHUNK_BYTES,
   LOCAL_MODEL_OFFSCREEN_MESSAGE_TYPE,
@@ -18,6 +19,7 @@ import {
   type WireCapturedAudioTrack
 } from '../src/core/local-model-offscreen-protocol';
 import { DEFAULT_SETTINGS } from '../src/core/settings';
+import { buildCanonicalTaskIdentity } from '../src/core/transcript';
 import type { PreparedL0Track } from '../src/core/l0-client';
 import type {
   CapturedAudioTrack,
@@ -26,6 +28,8 @@ import type {
   TranscriptJob
 } from '../src/core/types';
 import { createLocalModelHost, type LocalModelHost } from '../src/offscreen/local-model-host';
+import { L0TimingService } from '../src/content/l0-timing-service';
+import { getL0TimingAvailability } from '../src/content/l0-timing-availability';
 
 const row = {
   rowId: 'row-1',
@@ -52,11 +56,14 @@ const preparedTracks: PreparedL0Track[] = [
   { lane: 'Speaker 1', fieldName: 'audio:1', audio: audioTracks[0] }
 ];
 const timingResult: L0TimingResponse = {
-  taskId: 'task-1',
+  taskId: buildCanonicalTaskIdentity(job),
   tracks: [
     {
       lane: 'Speaker 1',
-      tokens: [{ id: 'token-1', text: 'hello', startSeconds: 1, endSeconds: 2 }]
+      pcmSha256: 'a'.repeat(64),
+      sampleRate: 16000,
+      tokens: [{ id: 'token-1', text: 'hello', startSeconds: 1, endSeconds: 2 }],
+      segments: [{ id: 'segment-1', startSeconds: 1, endSeconds: 2, startSample: 16000, endSample: 32000, sampleRate: 16000 }]
     }
   ],
   summary: {},
@@ -237,6 +244,7 @@ test('offscreen host serializes heavyweight inference and turns runtime failures
   const timingStarted = Promise.withResolvers<void>();
   const calls: string[] = [];
   const host = createLocalModelHost(async () => ({
+    isLocalTimingCurrent: async () => true,
     generateLocalL0Timing: async () => {
       calls.push('timing:start');
       timingStarted.resolve();
@@ -244,14 +252,13 @@ test('offscreen host serializes heavyweight inference and turns runtime failures
       calls.push('timing:end');
       return timingResult;
     },
-    generateLocalL0Draft: async () => {
+    generateLocalL0DraftFromTiming: async () => {
       calls.push('draft');
       throw new Error('ONNX model file is missing');
     },
     generateLocalL0SegmentDraft: async () => 'segment'
   }));
   const timingTrack = await uploadBlob(host, 'host-timing-audio', audioTracks[0].blob);
-  const draftTrack = await uploadBlob(host, 'host-draft-audio', audioTracks[0].blob);
 
   const timing = host.handleRequest({
     ...timingRequest('host-timing', timingTrack.audioTransferId),
@@ -264,8 +271,7 @@ test('offscreen host serializes heavyweight inference and turns runtime failures
     requestId: 'host-draft',
     operation: 'draft',
     settings: DEFAULT_SETTINGS,
-    job,
-    audioTracks: [draftTrack]
+    taskId: timingResult.taskId
   });
   await timingStarted.promise;
   assert.deepEqual(calls, ['timing:start']);
@@ -283,15 +289,16 @@ test('offscreen host serializes heavyweight inference and turns runtime failures
 test('all operations JSON-roundtrip bounded chunks and restore exact Blob bytes, MIME, and track metadata', async () => {
   const received: LocalModelOffscreenRequest[] = [];
   const runtimeTimingTracks: CapturedAudioTrack[][] = [];
-  const runtimeDraftTracks: CapturedAudioTrack[][] = [];
+  const runtimeDraftTimings: L0TimingResponse[] = [];
   const runtimeSegmentTracks: PreparedL0Track[][] = [];
   const host = createLocalModelHost(async () => ({
+    isLocalTimingCurrent: async () => true,
     generateLocalL0Timing: async (_settings, _job, tracks) => {
       runtimeTimingTracks.push(tracks);
       return timingResult;
     },
-    generateLocalL0Draft: async (_settings, _job, tracks) => {
-      runtimeDraftTracks.push(tracks);
+    generateLocalL0DraftFromTiming: async (timing) => {
+      runtimeDraftTimings.push(timing);
       return draftResult;
     },
     generateLocalL0SegmentDraft: async (_settings, _taskId, _row, tracks) => {
@@ -325,7 +332,7 @@ test('all operations JSON-roundtrip bounded chunks and restore exact Blob bytes,
     }),
     timingResult
   );
-  assert.equal(await client.generateLocalL0Draft(DEFAULT_SETTINGS, job, audioTracks), draftResult);
+  assert.equal(await client.generateLocalL0Draft(DEFAULT_SETTINGS, job), draftResult);
   assert.equal(
     await client.generateLocalL0SegmentDraft(DEFAULT_SETTINGS, 'task-1', row, preparedTracks),
     'Exact cropped text.'
@@ -335,8 +342,6 @@ test('all operations JSON-roundtrip bounded chunks and restore exact Blob bytes,
     'upload',
     'upload',
     'timing',
-    'upload',
-    'upload',
     'draft',
     'upload',
     'upload',
@@ -347,7 +352,7 @@ test('all operations JSON-roundtrip bounded chunks and restore exact Blob bytes,
   const uploads = received.filter(
     (request): request is LocalModelUploadRequest => request.operation === 'upload'
   );
-  assert.equal(uploads.length, 6);
+  assert.equal(uploads.length, 4);
   assert.ok(uploads.every((request) => decodeAudioChunk(request.dataBase64).byteLength <= LOCAL_MODEL_AUDIO_CHUNK_BYTES));
   assert.ok(uploads.every((request) => decodeAudioChunk(request.dataBase64).byteLength < audioTracks[0].blob.size));
   assert.ok(
@@ -356,28 +361,27 @@ test('all operations JSON-roundtrip bounded chunks and restore exact Blob bytes,
       .every((request) => !('dataBase64' in request))
   );
 
-  for (const tracks of [runtimeTimingTracks[0], runtimeDraftTracks[0]]) {
-    const audio = tracks[0];
-    assert.ok(audio.blob instanceof Blob);
-    assert.equal(audio.blob.type, 'audio/x-babel');
-    assert.deepEqual(new Uint8Array(await audio.blob.arrayBuffer()), audioBytes);
-    assert.deepEqual(
-      {
-        trackId: audio.trackId,
-        speakerKey: audio.speakerKey,
-        trackLabel: audio.trackLabel,
-        source: audio.source,
-        mimeType: audio.mimeType
-      },
-      {
-        trackId: 'track-1',
-        speakerKey: 'Speaker 1',
-        trackLabel: 'Left microphone',
-        source: 'captured.wav',
-        mimeType: 'audio/wav'
-      }
-    );
-  }
+  assert.deepEqual(runtimeDraftTimings, [timingResult]);
+  const audio = runtimeTimingTracks[0][0];
+  assert.ok(audio.blob instanceof Blob);
+  assert.equal(audio.blob.type, 'audio/x-babel');
+  assert.deepEqual(new Uint8Array(await audio.blob.arrayBuffer()), audioBytes);
+  assert.deepEqual(
+    {
+      trackId: audio.trackId,
+      speakerKey: audio.speakerKey,
+      trackLabel: audio.trackLabel,
+      source: audio.source,
+      mimeType: audio.mimeType
+    },
+    {
+      trackId: 'track-1',
+      speakerKey: 'Speaker 1',
+      trackLabel: 'Left microphone',
+      source: 'captured.wav',
+      mimeType: 'audio/wav'
+    }
+  );
   assert.equal(runtimeSegmentTracks[0][0].lane, 'Speaker 1');
   assert.equal(runtimeSegmentTracks[0][0].fieldName, 'audio:1');
   assert.equal(runtimeSegmentTracks[0][0].audio.blob.type, 'audio/x-babel');
@@ -390,8 +394,8 @@ test('all operations JSON-roundtrip bounded chunks and restore exact Blob bytes,
   );
   assert.ok(consumedTiming);
   const reused = await host.handleRequest({ ...consumedTiming, target: 'offscreen', requestId: 'reuse' });
-  assert.equal(reused.ok, false);
-  if (!reused.ok) assert.equal(reused.error.code, 'invalid-request');
+  assert.equal(reused.ok, true);
+  assert.equal(runtimeTimingTracks.length, 1, 'a second timing request reuses the offscreen ASR result');
 });
 
 test('uploads do not initialize runtime and reject duplicates, gaps, buffer overflow, and missing transfers', async () => {
@@ -401,8 +405,9 @@ test('uploads do not initialize runtime and reject duplicates, gaps, buffer over
     async () => {
       runtimeLoads += 1;
       return {
+        isLocalTimingCurrent: async () => true,
         generateLocalL0Timing: async () => timingResult,
-        generateLocalL0Draft: async () => draftResult,
+        generateLocalL0DraftFromTiming: async () => draftResult,
         generateLocalL0SegmentDraft: async () => 'segment'
       };
     },
@@ -484,7 +489,7 @@ test('client rejects mismatched responses and propagates host errors through the
     requestId: 'different-request'
   }));
   await assert.rejects(
-    invalidClient.generateLocalL0Draft(DEFAULT_SETTINGS, job, audioTracks),
+    invalidClient.generateLocalL0Draft(DEFAULT_SETTINGS, job),
     (error: unknown) =>
       error instanceof LocalModelBridgeError &&
       error.operation === 'draft' &&
@@ -503,4 +508,91 @@ test('client rejects mismatched responses and propagates host errors through the
       error.code === 'inference-failed' &&
       /WASM backend initialization failed/.test(error.message)
   );
+});
+
+for (const loss of ['eviction', 'restart'] as const) {
+  test(`local drafting recaptures completed timing after offscreen ${loss} without growing the two-task cache`, async () => {
+    const settings = { ...DEFAULT_SETTINGS, mode: 'advanced' as const, localModelsEnabled: true };
+    const captured = ['Speaker 1', 'Speaker 2'].map((speakerKey, index) => ({
+      ...audioTracks[0], speakerKey, trackId: `small-${index}`, blob: new Blob([new Uint8Array([index + 1])])
+    }));
+    const generatedTaskIds: string[] = [];
+    const loadRuntime = async () => ({
+      isLocalTimingCurrent: async () => true,
+      generateLocalL0Timing: async (_settings: unknown, requestedJob: TranscriptJob) => {
+        const taskId = buildCanonicalTaskIdentity(requestedJob);
+        generatedTaskIds.push(taskId);
+        return { ...timingResult, taskId };
+      },
+      generateLocalL0DraftFromTiming: async (timing: L0TimingResponse) => ({
+        ...draftResult,
+        rows: draftResult.rows.map((row) => ({ ...row, text: timing.taskId }))
+      }),
+      generateLocalL0SegmentDraft: async () => 'segment'
+    });
+    let host = createLocalModelHost(loadRuntime);
+    const client = createLocalModelClient((message) =>
+      host.handleRequest(JSON.parse(JSON.stringify({ ...message, target: 'offscreen' }))));
+    let currentJob = job;
+    let captures = 0;
+    const service = new L0TimingService({
+      captureTranscript: () => currentJob,
+      currentTaskId: () => buildCanonicalTaskIdentity(currentJob),
+      currentPathname: () => '/tasks/current',
+      captureAudio: async () => { captures += 1; return captured; },
+      getSettings: async () => settings,
+      lookupTiming: async () => { throw new Error('Local timing must not use the remote cache'); },
+      requestTiming: client.generateLocalL0Timing,
+      requestLocalDraft: client.generateLocalL0Draft,
+      publish: () => undefined,
+      now: () => 0,
+      schedule: () => { assert.fail('Recovery must not require retry timers'); }
+    });
+    const jobs = loss === 'eviction' ? [job, { ...job, jobId: 'task-2' }, { ...job, jobId: 'task-3' }] : [job];
+    for (const nextJob of jobs) {
+      currentJob = nextJob;
+      service.onLifecycleOpportunity();
+      await service.waitForTiming(currentJob, settings);
+    }
+    if (loss === 'restart') host = createLocalModelHost(loadRuntime);
+    currentJob = job;
+    service.onLifecycleOpportunity();
+    assert.equal(captures, jobs.length, 'the content-side completed flag still predates the cache loss');
+    await assert.rejects(client.generateLocalL0Draft(settings, job),
+      (error: unknown) => error instanceof LocalModelBridgeError && error.code === 'timing-unavailable');
+    const recovered = await service.generateLocalDraft(settings, job);
+    assert.equal(recovered.rows[0].text, buildCanonicalTaskIdentity(job));
+    assert.equal(captures, jobs.length + 1);
+    assert.deepEqual(generatedTaskIds, [...jobs, job].map(buildCanonicalTaskIdentity));
+    assert.deepEqual(getL0TimingAvailability(), { taskId: buildCanonicalTaskIdentity(job), status: 'available' });
+    assert.deepEqual(await service.generateLocalDraft(settings, job), recovered);
+    assert.equal(captures, jobs.length + 1, 'a cache hit must not capture or run ASR again');
+  });
+}
+
+test('model replacement invalidates private timing before draft reuse and segment cache loss requests full capture', async () => {
+  let current = true;
+  const host = createLocalModelHost(async () => ({
+    isLocalTimingCurrent: async () => current,
+    generateLocalL0Timing: async () => timingResult,
+    generateLocalL0DraftFromTiming: async () => draftResult,
+    generateLocalL0SegmentDraft: async (_settings, taskId) => { throw new LocalTimingUnavailableError(taskId); }
+  }));
+  const uploaded = await uploadBlob(host, 'versioned-audio', audioTracks[0].blob);
+  assert.equal((await host.handleRequest({ ...timingRequest('before-update', uploaded.audioTransferId), target: 'offscreen' })).ok, true);
+  current = false;
+  const draft = await host.handleRequest({
+    type: LOCAL_MODEL_OFFSCREEN_MESSAGE_TYPE, version: LOCAL_MODEL_OFFSCREEN_VERSION, target: 'offscreen',
+    operation: 'draft', requestId: 'after-update', settings: DEFAULT_SETTINGS, taskId: timingResult.taskId
+  });
+  assert.equal(draft.ok, false);
+  if (!draft.ok) assert.equal(draft.error.code, 'timing-unavailable');
+  const segmentAudio = await uploadBlob(host, 'segment-versioned-audio', audioTracks[0].blob);
+  const segment = await host.handleRequest({
+    type: LOCAL_MODEL_OFFSCREEN_MESSAGE_TYPE, version: LOCAL_MODEL_OFFSCREEN_VERSION, target: 'offscreen',
+    operation: 'segment', requestId: 'after-private-eviction', settings: DEFAULT_SETTINGS, taskId: timingResult.taskId, row,
+    tracks: [{ lane: 'Speaker 1', fieldName: 'audio:1', audio: segmentAudio }]
+  });
+  assert.equal(segment.ok, false);
+  if (!segment.ok) assert.equal(segment.error.code, 'timing-unavailable');
 });

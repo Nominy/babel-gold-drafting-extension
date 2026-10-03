@@ -4,6 +4,7 @@ export type OpenRouterReasoningEffort = 'default' | 'none' | 'minimal' | 'low' |
 export type AiBrokerProvider = 'auto' | 'remote-openrouter' | 'local-gemini-nano';
 
 export interface ExtensionSettings {
+  mode: 'local' | 'simple' | 'advanced';
   backendBaseUrl: string;
   projectPreset: ProjectPresetId;
   openRouterApiKey: string;
@@ -16,6 +17,7 @@ export interface ExtensionSettings {
   l0DontRunLlm: boolean;
   audioInputEnabled: boolean;
   localModelsEnabled: boolean;
+  volunteerInferenceEnabled: boolean;
 }
 
 export interface CapturedAudioTrack {
@@ -43,16 +45,6 @@ export interface TranscriptJob {
   rows: TranscriptRow[];
 }
 
-export interface L0DraftTrackSpec {
-  lane: string;
-  fieldName: string;
-}
-
-
-export interface L0DraftPayload {
-  taskId: string;
-  tracks: [L0DraftTrackSpec, L0DraftTrackSpec];
-}
 
 export interface L0DraftRow {
   id: string;
@@ -75,9 +67,22 @@ export interface L0TimingToken {
   endSeconds: number;
 }
 
+export interface L0TimingSegment {
+  id: string;
+  startSeconds: number;
+  endSeconds: number;
+  startSample: number;
+  endSample: number;
+  sampleRate: number;
+}
+
 export interface L0TimingTrack {
+  punctuationLabels?: number[];
   lane: string;
   tokens: L0TimingToken[];
+  segments: L0TimingSegment[];
+  pcmSha256: string;
+  sampleRate: number;
 }
 
 export interface L0TimingResponse {

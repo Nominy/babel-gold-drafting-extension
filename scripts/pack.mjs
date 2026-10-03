@@ -5,6 +5,9 @@ import { join, resolve } from 'node:path';
 import { collectFiles, packExtension } from '@nominy/babel-extension-build';
 
 const ROOT = resolve(import.meta.dirname, '..');
+if (process.env.BABEL_DEV_C_DENOISE_MODEL_URL?.trim()) {
+  throw new Error('Store packages must use the production model release URL. Clear BABEL_DEV_C_DENOISE_MODEL_URL.');
+}
 const tempManifestPath = join(ROOT, '.tmp.store.manifest.json');
 const STORE_EXTERNALLY_CONNECTABLE_IDS = ['dldjgploldmldipplklepcpjdjhehald'];
 

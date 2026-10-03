@@ -1,6 +1,13 @@
+import { INFERENCE_HEADERS } from './inference-release';
 import { normalizeL0CustomBaseUrl } from './settings';
-import { assertL0WavAudio, createL0Payload, type PreparedL0Track } from './l0-client';
+import { assertL0WavAudio, type PreparedL0Track } from './l0-client';
 import { buildCanonicalTaskIdentity } from './transcript';
+import {
+  L0_TIMING_TOKEN_MESSAGE_TYPE,
+  L0_TIMING_TOKEN_VERSION,
+  isL0TimingTokenResponse,
+  type L0TimingTokenRequest
+} from './l0-timing-token-protocol';
 import type {
   CapturedAudioTrack,
   ExtensionSettings,
@@ -10,8 +17,46 @@ import type {
 } from './types';
 
 const L0_TIMING_PATH = '/v1/transcribe';
+const L0_TIMING_LOOKUP_PATH = '/v1/timing/lookup';
 const L0_QUEUE_PATH = '/v1/queue';
 const DEFAULT_QUEUE_POLL_INTERVAL_MS = 500;
+async function ensureTimingAccessToken(taskId: string): Promise<string> {
+  const request: L0TimingTokenRequest = {
+    type: L0_TIMING_TOKEN_MESSAGE_TYPE,
+    version: L0_TIMING_TOKEN_VERSION,
+    taskId
+  };
+  const response: unknown = await chrome.runtime.sendMessage(request);
+  if (!isL0TimingTokenResponse(response, request)) {
+    throw new Error('The background returned an invalid timing credential response.');
+  }
+  if (!response.ok) throw new Error(`Could not allocate L0 timing access: ${response.error}`);
+  return response.token;
+}
+
+
+export async function timingAuthorization(taskId: string): Promise<Record<string, string>> {
+  const token = await ensureTimingAccessToken(taskId);
+  return { Authorization: `Bearer ${token}` };
+}
+
+export async function lookupL0Timing(settings: ExtensionSettings, taskId: string): Promise<L0TimingResponse | null> {
+  const response = await fetch(`${normalizeL0CustomBaseUrl(settings.l0CustomBaseUrl)}${L0_TIMING_LOOKUP_PATH}`, {
+    method: 'POST',
+    headers: {
+      ...INFERENCE_HEADERS,
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      ...await timingAuthorization(taskId)
+    },
+    body: JSON.stringify({ taskId })
+  });
+  if (response.status === 404) return null;
+  const payload = await parseResponsePayload(response);
+  if (!response.ok) throw new Error(`L0 timing lookup failed: ${responseError(response.status, payload)}`);
+  return parseL0TimingResponse(payload, taskId);
+}
+
 
 export type L0TimingQueueStatus =
   | { requestId: string; status: 'preparing' }
@@ -39,9 +84,6 @@ export function prepareL0TimingTracks(
     if (key && !transcriptLaneByKey.has(key)) {
       transcriptLaneByKey.set(key, row.speakerKey.trim());
     }
-  }
-  if (transcriptLaneByKey.size === 0) {
-    throw new Error('L0 transcription requires at least one transcript speaker lane.');
   }
 
   const candidates = audioTracks
@@ -124,9 +166,28 @@ export function parseL0TimingResponse(payload: unknown, expectedTaskId?: string)
         'lane' in track &&
         typeof track.lane === 'string' &&
         Boolean(track.lane) &&
+        'pcmSha256' in track && typeof track.pcmSha256 === 'string' &&
+        /^[0-9a-f]{64}$/.test(track.pcmSha256) &&
+        'sampleRate' in track && typeof track.sampleRate === 'number' &&
+        Number.isSafeInteger(track.sampleRate) && track.sampleRate > 0 &&
         'tokens' in track &&
         Array.isArray(track.tokens) &&
-        track.tokens.every(isTimingToken)
+        track.tokens.every(isTimingToken) &&
+        'segments' in track &&
+        Array.isArray(track.segments) &&
+        track.segments.every((segment: unknown) =>
+          segment !== null && typeof segment === 'object' &&
+          'id' in segment && typeof segment.id === 'string' && Boolean(segment.id) &&
+          'startSeconds' in segment && typeof segment.startSeconds === 'number' &&
+          Number.isFinite(segment.startSeconds) && segment.startSeconds >= 0 &&
+          'endSeconds' in segment && typeof segment.endSeconds === 'number' &&
+          Number.isFinite(segment.endSeconds) && segment.endSeconds > segment.startSeconds &&
+          'startSample' in segment && typeof segment.startSample === 'number' &&
+          Number.isSafeInteger(segment.startSample) && segment.startSample >= 0 &&
+          'endSample' in segment && typeof segment.endSample === 'number' &&
+          Number.isSafeInteger(segment.endSample) && segment.endSample > segment.startSample &&
+          'sampleRate' in segment && segment.sampleRate === track.sampleRate
+        )
     ) ||
     !payload.summary ||
     typeof payload.summary !== 'object' ||
@@ -137,7 +198,12 @@ export function parseL0TimingResponse(payload: unknown, expectedTaskId?: string)
   ) {
     throw new Error('L0 transcription endpoint returned an invalid timing response.');
   }
-  return payload as unknown as L0TimingResponse;
+  return {
+    taskId: payload.taskId,
+    tracks: payload.tracks,
+    summary: payload.summary,
+    models: payload.models
+  } as L0TimingResponse;
 }
 
 async function parseResponsePayload(response: Response): Promise<unknown> {
@@ -253,7 +319,7 @@ async function pollQueueStatus(
     try {
       const response = await fetch(endpoint, {
         method: 'GET',
-        headers: { Accept: 'application/json' },
+        headers: { ...INFERENCE_HEADERS, Accept: 'application/json' },
         signal
       });
       if (signal.aborted) {
@@ -287,9 +353,14 @@ export async function generateL0Timing(
   const tracks = prepareL0TimingTracks(job, audioTracks);
   await Promise.all(tracks.map(assertL0WavAudio));
   const taskId = buildCanonicalTaskIdentity(job);
+  const accessToken = await ensureTimingAccessToken(taskId);
+
 
   const body = new FormData();
-  body.set('payload', JSON.stringify({ ...createL0Payload(job, tracks), taskId }));
+  body.set('payload', JSON.stringify({
+    taskId,
+    tracks: tracks.map(({ lane, fieldName }) => ({ lane, fieldName }))
+  }));
   for (const track of tracks) {
     body.append(track.fieldName, track.audio.blob, `${track.fieldName.replace(':', '-')}.wav`);
   }
@@ -300,9 +371,11 @@ export async function generateL0Timing(
   const responsePromise = fetch(endpoint, {
     method: 'POST',
     headers: {
+      ...INFERENCE_HEADERS,
       Accept: 'application/json',
       'X-Babel-Local-Engine': '1',
-      'X-Babel-Request-Id': requestId
+      'X-Babel-Request-Id': requestId,
+      Authorization: `Bearer ${accessToken}`
     },
     body
   });
@@ -318,6 +391,10 @@ export async function generateL0Timing(
   const responsePayload = await parseResponsePayload(response);
   if (!response.ok) {
     throw new Error(`L0 transcription failed: ${responseError(response.status, responsePayload)}`);
+  }
+  if (!responsePayload || typeof responsePayload !== 'object' || !('accessToken' in responsePayload) ||
+      responsePayload.accessToken !== accessToken) {
+    throw new Error('L0 transcription did not return the expected timing access token.');
   }
   return parseL0TimingResponse(responsePayload, taskId);
 }

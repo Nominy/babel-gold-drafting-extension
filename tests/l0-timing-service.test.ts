@@ -6,10 +6,10 @@ import {
   L0TimingService,
   type L0TimingServiceDependencies
 } from '../src/content/l0-timing-service';
-import { getL0TimingAvailability } from '../src/content/l0-timing-availability';
+import { getL0TimingAvailability, publishL0TimingAvailability } from '../src/content/l0-timing-availability';
 import { DEFAULT_SETTINGS } from '../src/core/settings';
 import { buildCanonicalTaskIdentity } from '../src/core/transcript';
-import type { CapturedAudioTrack, L0TimingResponse, TranscriptJob } from '../src/core/types';
+import type { CapturedAudioTrack, ExtensionSettings, L0TimingResponse, TranscriptJob } from '../src/core/types';
 
 const job: TranscriptJob = {
   jobId: 'task-42',
@@ -26,8 +26,8 @@ const tracks: CapturedAudioTrack[] = [
 const response: L0TimingResponse = {
   taskId,
   tracks: [
-    { lane: 'Speaker 1', tokens: [{ id: 'token-1', text: 'one', startSeconds: 0, endSeconds: 0.5 }] },
-    { lane: 'Speaker 2', tokens: [] }
+    { lane: 'Speaker 1', tokens: [{ id: 'token-1', text: 'one', startSeconds: 0, endSeconds: 0.5 }], segments: [{ id: 'segment-1', startSeconds: 0, endSeconds: 1, startSample: 0, endSample: 16000, sampleRate: 16000 }], pcmSha256: 'a'.repeat(64), sampleRate: 16000 },
+    { lane: 'Speaker 2', tokens: [], segments: [], pcmSha256: 'b'.repeat(64), sampleRate: 16000 }
   ],
   summary: {},
   models: {}
@@ -49,8 +49,12 @@ function dependencies(overrides: Partial<L0TimingServiceDependencies> = {}): L0T
   return {
     captureTranscript: () => job,
     currentTaskId: () => taskId,
+    currentPathname: () => '/tasks/current',
     captureAudio: async () => tracks,
-    getSettings: async () => DEFAULT_SETTINGS,
+    getSettings: async () => ({ ...DEFAULT_SETTINGS, mode: 'advanced' }),
+    lookupTiming: async () => null,
+    localModelStatus: async () => ({ state: 'ready', completedBytes: 1, totalBytes: 1, tested: true }),
+    requestLocalDraft: async () => ({ rows: [], summary: {}, models: {} }),
     requestTiming: async () => response,
     publish: () => undefined,
     now: () => 1_000,
@@ -62,6 +66,7 @@ function dependencies(overrides: Partial<L0TimingServiceDependencies> = {}): L0T
 test('usable timing jobs accept transcripts with one or more speaker lanes', () => {
   assert.equal(isUsableL0TimingJob(job), true);
   assert.equal(isUsableL0TimingJob({ jobId: 'task-42', rows: [] }), false);
+  assert.equal(isUsableL0TimingJob({ jobId: 'task-42', taskScoped: true, rows: [] }), true);
   assert.equal(isUsableL0TimingJob({ ...job, rows: [job.rows[0]] }), true);
 });
 
@@ -95,6 +100,26 @@ test('timing waits for both nonempty speaker tracks without starting a model or 
   await flushAsyncWork();
   assert.equal(requested, 1);
   assert.deepEqual(getL0TimingAvailability(), { taskId, status: 'available' });
+});
+
+test('cached remote timing publishes tokens without capturing any audio', async () => {
+  const published: unknown[] = [];
+  const service = new L0TimingService(dependencies({
+    captureAudio: async () => { throw new Error('cache hit must not capture audio'); },
+    lookupTiming: async (_settings, lookedUpTaskId) => {
+      assert.equal(lookedUpTaskId, taskId);
+      return response;
+    },
+    publish: (message) => published.push(message)
+  }));
+  service.onLifecycleOpportunity();
+  await flushAsyncWork();
+  assert.deepEqual(published, [{
+    type: L0_TIMING_UPDATE_MESSAGE_TYPE,
+    version: 1,
+    taskId,
+    tracks: response.tracks.map(({ lane, tokens }) => ({ lane, tokens }))
+  }]);
 });
 
 test('an audio readiness timer cannot start timing after navigation', async () => {
@@ -136,7 +161,7 @@ test('timing lifecycle deduplicates in-flight and successful tasks and publishes
     type: L0_TIMING_UPDATE_MESSAGE_TYPE,
     version: 1,
     taskId,
-    tracks: response.tracks
+    tracks: response.tracks.map(({ lane, tokens }) => ({ lane, tokens }))
   }]);
   service.onLifecycleOpportunity();
   await flushAsyncWork();
@@ -306,11 +331,231 @@ test('timing lifecycle exposes unavailable after bounded retries and gates manua
   assert.equal(service.retryCurrentTask(), false);
 });
 
-test('timing lifecycle silently ignores transcript capture failures', () => {
+
+for (const mode of ['new-task-event', 'unmounted-route', 'stale-task-identity'] as const) {
+  test(`timing wait rejects on ${mode} and allows cleanup before the old request settles`, async () => {
+    const pending = deferred<L0TimingResponse>();
+    let current = taskId;
+    let unmounted = false;
+    let pathname = '/tasks/current';
+    let busy = true;
+    let currentChecks = 0;
+    const service = new L0TimingService(dependencies({
+      currentPathname: () => pathname,
+      captureTranscript: () => {
+        if (unmounted) throw new Error('No transcript on this route');
+        return job;
+      },
+      currentTaskId: () => {
+        currentChecks += 1;
+        if (unmounted) throw new Error('No current task');
+        return current;
+      },
+      requestTiming: async () => pending.promise,
+      getSettings: async () => ({ ...DEFAULT_SETTINGS, mode: 'advanced', localModelsEnabled: true }),
+    }));
+    publishL0TimingAvailability({ taskId, status: 'preparing' });
+    const wait = service.waitForTiming(job, { ...DEFAULT_SETTINGS, mode: 'advanced', localModelsEnabled: true })
+      .finally(() => { busy = false; });
+    const rejected = assert.rejects(wait, /task changed/);
+    await flushAsyncWork();
+    current = mode === 'stale-task-identity' ? taskId : 'next-task';
+    if (mode === 'new-task-event') {
+      publishL0TimingAvailability({ taskId: current, status: 'preparing' });
+    } else {
+      unmounted = mode === 'unmounted-route';
+      pathname = '/projects';
+      service.onLifecycleOpportunity();
+    }
+    await rejected;
+    assert.equal(busy, false);
+    const checksAfterRejection = currentChecks;
+    publishL0TimingAvailability({ taskId, status: 'available' });
+    assert.equal(currentChecks, checksAfterRejection, 'settled waits must unsubscribe');
+    pending.resolve(response);
+    await flushAsyncWork();
+    assert.equal(busy, false);
+  });
+}
+
+const simpleSettings: ExtensionSettings = {
+  ...DEFAULT_SETTINGS, mode: 'simple', openRouterApiKey: 'test-key',
+  localModelsEnabled: true, l0DontRunLlm: false, l0ReplacementPreviewEnabled: false
+};
+
+test('Simple page lifecycle only looks up cached timing and never captures, uploads or starts transcription', async () => {
+  let lookups = 0;
+  let captures = 0;
+  let paidRequests = 0;
+  let cached: L0TimingResponse | null = null;
+  const published: unknown[] = [];
   const service = new L0TimingService(dependencies({
-    captureTranscript: () => {
-      throw new Error('transcript is not mounted yet');
+    getSettings: async () => simpleSettings,
+    lookupTiming: async () => { lookups += 1; return cached; },
+    captureAudio: async () => { captures += 1; return tracks; },
+    requestTiming: async () => { paidRequests += 1; return response; },
+    publish: (message) => published.push(message)
+  }));
+  service.onLifecycleOpportunity();
+  await flushAsyncWork();
+  assert.deepEqual(getL0TimingAvailability(), { taskId, status: 'unavailable' });
+  cached = response;
+  service.onLifecycleOpportunity();
+  await flushAsyncWork();
+  assert.equal(lookups, 2);
+  assert.equal(captures, 0);
+  assert.equal(paidRequests, 0);
+  assert.deepEqual(published, [{
+    type: L0_TIMING_UPDATE_MESSAGE_TYPE, version: 1, taskId,
+    tracks: response.tracks.map(({ lane, tokens }) => ({ lane, tokens }))
+  }]);
+});
+
+test('Simple explicit actions deduplicate transcription and await real completion rather than the running event', async () => {
+  const pending = deferred<L0TimingResponse>();
+  let paidRequests = 0;
+  let finished = false;
+  let cached: L0TimingResponse | null = null;
+  const service = new L0TimingService(dependencies({
+    getSettings: async () => simpleSettings,
+    lookupTiming: async () => cached,
+    requestTiming: async (_settings, _job, _tracks, callbacks) => {
+      paidRequests += 1;
+      callbacks.onQueueStatus?.({ requestId: 'mai-1', status: 'running', position: 0, queuedCount: 0 });
+      cached = await pending.promise;
+      return cached;
     }
   }));
-  assert.doesNotThrow(() => service.onLifecycleOpportunity());
+  const first = service.waitForTiming(job, simpleSettings).then(() => { finished = true; });
+  const concurrent = service.waitForTiming(job, simpleSettings);
+  await flushAsyncWork();
+  assert.equal(paidRequests, 1);
+  assert.equal(finished, false);
+  pending.resolve(response);
+  await Promise.all([first, concurrent]);
+  assert.equal(finished, true);
+  assert.deepEqual(getL0TimingAvailability(), { taskId, status: 'available' });
+  await service.waitForTiming(job, simpleSettings);
+  assert.equal(paidRequests, 1, 'repeated explicit actions reuse durable timing');
+});
+
+test('Simple failures surface to the explicit caller and never schedule automatic paid retries', async () => {
+  let paidRequests = 0;
+  let timers = 0;
+  const failure = new Error('OpenRouter rejected the key');
+  const service = new L0TimingService(dependencies({
+    getSettings: async () => simpleSettings,
+    requestTiming: async () => { paidRequests += 1; throw failure; },
+    schedule: () => { timers += 1; }
+  }));
+  await assert.rejects(service.waitForTiming(job, simpleSettings), (error) => error === failure);
+  for (let index = 0; index < 3; index += 1) {
+    service.onLifecycleOpportunity();
+    await flushAsyncWork();
+  }
+  assert.equal(paidRequests, 1);
+  assert.equal(timers, 0);
+});
+
+test('Simple requires a key before audio capture or a paid request even with legacy local settings enabled', async () => {
+  const settings = { ...simpleSettings, openRouterApiKey: '' };
+  const service = new L0TimingService(dependencies({
+    getSettings: async () => settings,
+    captureAudio: async () => { assert.fail('missing key must not capture audio'); },
+    requestTiming: async () => { assert.fail('missing key must not start paid transcription'); }
+  }));
+  await assert.rejects(service.waitForTiming(job, settings), /OpenRouter API key.*extension options/i);
+});
+
+test('lost Simple session timing is regenerated only by an explicit action, not a stale completed flag', async () => {
+  let cached: L0TimingResponse | null = response;
+  let paidRequests = 0;
+  const service = new L0TimingService(dependencies({
+    getSettings: async () => simpleSettings,
+    lookupTiming: async () => cached,
+    requestTiming: async () => { paidRequests += 1; cached = response; return response; }
+  }));
+  await service.waitForTiming(job, simpleSettings);
+  cached = null;
+  service.onLifecycleOpportunity();
+  await flushAsyncWork();
+  assert.equal(paidRequests, 0);
+  assert.deepEqual(getL0TimingAvailability(), { taskId, status: 'unavailable' });
+  await service.waitForTiming(job, simpleSettings);
+  assert.equal(paidRequests, 1);
+  assert.deepEqual(getL0TimingAvailability(), { taskId, status: 'available' });
+});
+
+test('mode changes on the same task invalidate in-flight ownership and do not reuse Advanced timing as Simple timing', async () => {
+  let settings: ExtensionSettings = { ...DEFAULT_SETTINGS, mode: 'advanced', localModelsEnabled: true };
+  const oldResult = deferred<L0TimingResponse>();
+  const published: unknown[] = [];
+  let paidSimple = 0;
+  const service = new L0TimingService(dependencies({
+    getSettings: async () => settings,
+    requestTiming: async (requestedSettings) => {
+      if (requestedSettings.mode === 'advanced') return oldResult.promise;
+      paidSimple += 1;
+      return response;
+    },
+    publish: (message) => published.push(message)
+  }));
+  const oldWait = service.waitForTiming(job, settings);
+  const rejected = assert.rejects(oldWait, /mode changed/);
+  await flushAsyncWork();
+  settings = simpleSettings;
+  service.onLifecycleOpportunity();
+  await rejected;
+  await flushAsyncWork();
+  assert.equal(paidSimple, 0);
+  assert.deepEqual(getL0TimingAvailability(), { taskId, status: 'unavailable' });
+  oldResult.resolve(response);
+  await flushAsyncWork();
+  assert.deepEqual(published, []);
+  await service.waitForTiming(job, settings);
+  assert.equal(paidSimple, 1);
+  assert.equal(published.length, 1);
+});
+
+test('Simple stale-task completion cannot publish timing or keep an explicit action waiting', async () => {
+  let current = taskId;
+  const pending = deferred<L0TimingResponse>();
+  const published: unknown[] = [];
+  const service = new L0TimingService(dependencies({
+    getSettings: async () => simpleSettings,
+    currentTaskId: () => current,
+    requestTiming: async () => pending.promise,
+    publish: (message) => published.push(message)
+  }));
+  const waiting = service.waitForTiming(job, simpleSettings);
+  const rejected = assert.rejects(waiting, /task changed/);
+  await flushAsyncWork();
+  current = 'new-task';
+  service.onLifecycleOpportunity();
+  await rejected;
+  pending.resolve(response);
+  await flushAsyncWork();
+  assert.deepEqual(published, []);
+});
+
+test('switching modes away and back cannot revive an earlier Simple in-flight result', async () => {
+  let settings: ExtensionSettings = simpleSettings;
+  const pending = deferred<L0TimingResponse>();
+  const published: unknown[] = [];
+  const service = new L0TimingService(dependencies({
+    getSettings: async () => settings,
+    requestTiming: async () => pending.promise,
+    publish: (message) => published.push(message)
+  }));
+  const waiting = service.waitForTiming(job, settings);
+  const rejected = assert.rejects(waiting, /mode changed/);
+  await flushAsyncWork();
+  settings = { ...DEFAULT_SETTINGS, mode: 'advanced' };
+  service.onSettingsChanged(settings);
+  settings = simpleSettings;
+  service.onSettingsChanged(settings);
+  await rejected;
+  pending.resolve(response);
+  await flushAsyncWork();
+  assert.deepEqual(published, []);
 });

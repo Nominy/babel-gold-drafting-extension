@@ -1,5 +1,5 @@
 import { ensureUiStyles, themeRoot, applyComponent } from '@nominy/babel-extension-frontend';
-import { loadSettings } from '../core/settings';
+import { isBrowserLocalMode, loadSettings } from '../core/settings';
 import type { ExtensionSettings } from '../core/types';
 import { OPEN_LOCAL_MODEL_OPTIONS_MESSAGE_TYPE } from '../core/local-model-suggestion-protocol';
 
@@ -123,7 +123,7 @@ export async function maybeShowLocalModelSuggestion(
   try {
     if (await dependencies.wasShown()) return false;
     const settings = await dependencies.loadSettings();
-    if (settings.localModelsEnabled) return false;
+    if (settings.mode === 'simple' || isBrowserLocalMode(settings)) return false;
     const adapter = await dependencies.requestGpuAdapter();
     if (!isSuitableLocalModelGpu(adapter)) return false;
     await dependencies.markShown();
