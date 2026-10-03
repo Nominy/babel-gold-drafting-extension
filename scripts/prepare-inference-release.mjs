@@ -83,7 +83,7 @@ await cp(path.join(engine, 'l0_draft_engine'), path.join(backend, 'l0_draft_engi
 for (const name of ['requirements-webgpu.txt', 'requirements-webgpu.lock', 'pyproject.toml']) await copyFile(path.join(engine, name), path.join(backend, name));
 await copyFile(path.join(engine, 'requirements-webgpu.txt'), path.join(backend, 'requirements.txt'));
 await mkdir(path.join(backend, 'scripts'), { recursive: true });
-for (const name of ['Preflight-WebGPU.py', 'Smoke-WebGPU.py', 'Smoke-Coordinator-WebGPU.py']) await copyFile(path.join(engine, 'scripts', name), path.join(backend, 'scripts', name));
+for (const name of ['Preflight-WebGPU.py', 'Smoke-WebGPU.py', 'Smoke-Coordinator-WebGPU.py', 'Start-WebGPU.ps1', 'Run-Durable.ps1', 'Install-DurableService.ps1', 'run-hidden.vbs']) await copyFile(path.join(engine, 'scripts', name), path.join(backend, 'scripts', name));
 for (const name of ['LICENSE', 'COPYING.LGPLv2.1']) await copyFile(path.join(root, name), path.join(backend, name));
 await cp(path.join(root, 'src/core'), path.join(backend, 'source/core'), { recursive: true });
 await cp(path.join(root, 'deploy/inference-release'), path.join(output, 'deployment'), { recursive: true });
