@@ -63,6 +63,20 @@ function dependencies(overrides: Partial<L0TimingServiceDependencies> = {}): L0T
   };
 }
 
+test('Local timing failures retain the cause in the popup and Draft rejection', async () => {
+  const settings: ExtensionSettings = { ...DEFAULT_SETTINGS, mode: 'local' };
+  const failure = new Error('Local WebGPU C-denoise bundle has not been tested.');
+  const service = new L0TimingService(dependencies({
+    getSettings: async () => settings,
+    requestTiming: async () => { throw failure; }
+  }));
+  await assert.rejects(service.waitForTiming(job, settings), error => error === failure);
+  assert.deepEqual(getL0TimingAvailability(), { taskId, status: 'unavailable', error: failure.message });
+  service.onLifecycleOpportunity();
+  await flushAsyncWork();
+  assert.deepEqual(getL0TimingAvailability(), { taskId, status: 'unavailable', error: failure.message });
+});
+
 test('usable timing jobs accept transcripts with one or more speaker lanes', () => {
   assert.equal(isUsableL0TimingJob(job), true);
   assert.equal(isUsableL0TimingJob({ jobId: 'task-42', rows: [] }), false);
@@ -317,11 +331,11 @@ test('timing lifecycle exposes unavailable after bounded retries and gates manua
   }
 
   assert.equal(requestCount, 4);
-  assert.deepEqual(getL0TimingAvailability(), { taskId, status: 'unavailable' });
+  assert.deepEqual(getL0TimingAvailability(), { taskId, status: 'unavailable', error: 'background ASR unavailable' });
   service.onLifecycleOpportunity();
   await flushAsyncWork();
   assert.equal(requestCount, 4);
-  assert.deepEqual(getL0TimingAvailability(), { taskId, status: 'unavailable' });
+  assert.deepEqual(getL0TimingAvailability(), { taskId, status: 'unavailable', error: 'background ASR unavailable' });
   assert.equal(service.retryCurrentTask(), true);
   assert.equal(service.retryCurrentTask(), false);
   assert.deepEqual(getL0TimingAvailability(), { taskId, status: 'preparing' });

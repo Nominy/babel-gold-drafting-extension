@@ -112,7 +112,7 @@ test('punctuation lease uses cached timing without downloading audio and complet
     '/v1/workers/register', '/v1/workers/lease', '/v1/jobs/job-1/complete'
   ]);
   assert.deepEqual(JSON.parse(String(harness.requests[0].init.body)), {
-    modelBundleSchema: 'babel-browser-model-bundle-v3', protocolVersion: 3, modelRelease: 'c-denoise-v3-2026-10-03'
+    modelBundleSchema: 'babel-browser-model-bundle-v3', protocolVersion: 3, modelRelease: 'c-denoise-v3-2026-10-03-r2'
   });
   worker.stop();
   assert.equal(worker.getStatus().state, 'disabled');

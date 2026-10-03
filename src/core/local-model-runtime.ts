@@ -4,7 +4,7 @@ import * as ort from 'onnxruntime-web/webgpu';
 
 import { CHECKPOINT_FRONTEND_BF16 } from './gigaam-frontend-buffers';
 import { denoiseForActivity } from './ffmpeg-audio-denoise';
-import { buildActivityRows } from './local-audio-segmentation';
+import { buildActivityRows, segmentSamplesByActivity, type ActivitySegment } from './local-audio-segmentation';
 import { prepareRawPcm16, highpassSource, resampleToPcm16 } from './ffmpeg-audio-raw';
 import {
   boundaryCenters, extractProsody, float16ToFloat32, float32ToFloat16, resamplePoly,
@@ -968,6 +968,21 @@ function firstWordAtOrAfterMidpoint(words: readonly LocalWord[], seconds: number
   return left;
 }
 
+async function recognizeActivitySegments(samples: Float32Array, segments: readonly ActivitySegment[], recognizer: SampleRecognizer = recognizeSampleChunk): Promise<SampleRecognition & { ranges: ReturnType<typeof buildActivityRows> }> {
+  const tokens: LocalWord[] = [], ranges: ReturnType<typeof buildActivityRows> = [];
+  for (const segment of segments) {
+    const wordStart = tokens.length;
+    const recognized = await recognizeSamplesInChunks(samples.subarray(segment.startSample, segment.endSample),
+      (chunk, localStart) => recognizer(chunk, segment.startSample + localStart));
+    for (const word of recognized.tokens) {
+      tokens.push({ ...word, startSeconds: word.startSeconds + segment.startSample / SAMPLE_RATE,
+        endSeconds: word.endSeconds + segment.startSample / SAMPLE_RATE });
+    }
+    if (tokens.length > wordStart) ranges.push({ ...segment, wordStart, wordEnd: tokens.length });
+  }
+  return { durationSeconds: samples.length / SAMPLE_RATE, tokens, ranges };
+}
+
 export class LocalTimingUnavailableError extends Error {
   constructor(taskId: string) {
     super(`Full-stream C-denoise timing/labels for task ${taskId} are unavailable or belong to an older model. Capture the complete speaker lanes again.`);
@@ -1060,8 +1075,8 @@ async function extractAcousticFrames(audio: PreparedLocalAudio): Promise<Acousti
 }
 
 async function recognizeAndLabelAudio(audio: PreparedLocalAudio): Promise<SampleRecognition & { labelIds: Uint8Array; ranges: ReturnType<typeof buildActivityRows> }> {
-  const recognized = await recognizeSamplesInChunks(audio.raw);
-  const ranges = buildActivityRows(recognized.tokens, audio.activity);
+  const recognized = await recognizeActivitySegments(audio.raw, segmentSamplesByActivity(audio.activity));
+  const ranges = recognized.ranges;
   if (!recognized.tokens.length) return { ...recognized, labelIds: new Uint8Array(), ranges };
   const frames = await extractAcousticFrames(audio), resources = await getPunctuationResources();
   const localAudio = sampleLocalAudio(boundaryCenters(recognized.tokens), [frames], resources.config.frame_stride_samples / SAMPLE_RATE, resources.config.local_offsets_seconds);
@@ -1238,6 +1253,7 @@ export const __localModelRuntimeTesting = {
     return tensorNumericValue(data as ort.Tensor['data'], index, 'float16');
   },
   recognizeSamplesInChunks,
+  recognizeActivitySegments,
   silenceChunkBoundaries,
   renderBoundaryLabels,
   resolveMaxDurationSeconds,

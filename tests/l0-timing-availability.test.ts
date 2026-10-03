@@ -39,6 +39,19 @@ test('timing availability suppresses duplicate DOM-facing updates', () => {
   assert.deepEqual(positions, [3, 2]);
 });
 
+test('changed failure causes are published even when status stays unavailable', () => {
+  publishL0TimingAvailability({ taskId: 'failure', status: 'unavailable' });
+  const received: string[] = [];
+  const dispose = subscribeL0TimingAvailability(state => {
+    if (state.status === 'unavailable' && state.error) received.push(state.error);
+  });
+  publishL0TimingAvailability({ taskId: 'failure', status: 'unavailable', error: 'GPU failed' });
+  publishL0TimingAvailability({ taskId: 'failure', status: 'unavailable', error: 'GPU failed' });
+  publishL0TimingAvailability({ taskId: 'failure', status: 'unavailable', error: 'Bundle missing' });
+  dispose();
+  assert.deepEqual(received, ['GPU failed', 'Bundle missing']);
+});
+
 test('manual regeneration delegates only to the active retry handler', () => {
   let attempts = 0;
   setL0TimingRetryHandler(() => {
