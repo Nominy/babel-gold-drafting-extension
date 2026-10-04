@@ -116,6 +116,54 @@ test('timing waits for both nonempty speaker tracks without starting a model or 
   assert.deepEqual(getL0TimingAvailability(), { taskId, status: 'available' });
 });
 
+test('transcript redraw cannot invalidate a running shared timing request', async () => {
+  const scopedJob = { ...job, taskScoped: true };
+  let captured = scopedJob;
+  const pending = deferred<L0TimingResponse>();
+  const settings: ExtensionSettings = { ...DEFAULT_SETTINGS, mode: 'advanced', localModelsEnabled: false };
+  const service = new L0TimingService(dependencies({
+    captureTranscript: () => captured,
+    currentTaskId: () => buildCanonicalTaskIdentity(scopedJob),
+    getSettings: async () => settings,
+    requestTiming: async () => pending.promise
+  }));
+  let failure: unknown;
+  let finished = false;
+  const wait = service.waitForTiming(scopedJob, settings).then(() => { finished = true; }, error => { failure = error; });
+  await flushAsyncWork();
+  captured = { ...scopedJob, rows: [{ ...job.rows[0], speakerKey: '' }] };
+  service.onLifecycleOpportunity();
+  await flushAsyncWork();
+  assert.equal(failure, undefined, 'temporary rows must not reject a valid in-flight request');
+  assert.equal(finished, false);
+  captured = scopedJob;
+  pending.resolve({ ...response, taskId: buildCanonicalTaskIdentity(scopedJob) });
+  await wait;
+  assert.equal(finished, true);
+  captured = { ...scopedJob, rows: [{ ...job.rows[0], speakerKey: '' }] };
+  service.onLifecycleOpportunity();
+  await flushAsyncWork();
+  assert.equal(getL0TimingAvailability()?.status, 'available', 'redraw must also retain completed timing');
+});
+
+test('shared timing reports the server cause after retries rather than a generic task error', async () => {
+  const settings: ExtensionSettings = { ...DEFAULT_SETTINGS, mode: 'advanced', localModelsEnabled: false };
+  const timers: Array<() => void> = [];
+  const failure = new Error('L0 transcription failed: trusted backend unavailable');
+  const service = new L0TimingService(dependencies({
+    getSettings: async () => settings,
+    schedule: callback => timers.push(callback),
+    requestTiming: async () => { throw failure; }
+  }));
+  const wait = assert.rejects(service.waitForTiming(job, settings), error => error === failure);
+  await flushAsyncWork();
+  for (let attempt = 0; attempt < 3; attempt++) {
+    timers.shift()!();
+    await flushAsyncWork();
+  }
+  await wait;
+});
+
 test('cached remote timing publishes tokens without capturing any audio', async () => {
   const published: unknown[] = [];
   const service = new L0TimingService(dependencies({

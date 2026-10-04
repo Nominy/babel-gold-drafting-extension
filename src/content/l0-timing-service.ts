@@ -131,12 +131,14 @@ export class L0TimingService {
     const settings = await this.dependencies.getSettings();
     this.activateSettings(settings);
     if (!this.isTaskCurrent(taskId)) return;
-    if (!isUsableL0TimingJob(job)) {
+    const state = this.getTaskState(taskId, settings);
+    // Babel temporarily redraws rows without speaker labels. The canonical task
+    // remains the same; its valid request/cache must survive that DOM transition.
+    if (state.inFlight) return;
+    if (!isUsableL0TimingJob(job) && !(state.completed && settings.mode !== 'simple')) {
       publishL0TimingAvailability({ taskId, status: 'unavailable' });
       return;
     }
-    const state = this.getTaskState(taskId, settings);
-    if (state.inFlight) return;
     // Simple lifecycle only inspects the durable background cache. Even a previously
     // completed content state is not evidence that the session cache still exists.
     if (settings.mode === 'simple') {
