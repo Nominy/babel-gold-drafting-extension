@@ -8,15 +8,16 @@ import {
   type AiBrokerPortMessage,
   type AiBrokerResponse
 } from '../core/ai-broker-protocol';
-import { captureAudioTracksForDrafting } from '../core/audio-cues';
+import { captureAudioTracksForDrafting, captureOriginalAudioTracksForEnhancement } from '../core/audio-cues';
 import { redistributeTextWithBroker, transcribeSegmentWithBroker } from '../core/backend-client';
 import { generateL0SegmentDraft } from '../core/l0-client';
-import { generateLocalL0SegmentDraft, LocalModelBridgeError } from '../core/local-model-client';
+import { enhanceLocalAudio, generateLocalL0SegmentDraft, LocalModelBridgeError } from '../core/local-model-client';
 import { generateMaiL0SegmentDraft, redistributeMaiText, MaiBridgeError } from '../core/mai-client';
 import { getCurrentL0TimingGeneration, recoverCurrentLocalL0Timing, waitForCurrentL0Timing } from './l0-timing-service';
 import { isBrowserLocalMode, loadSettings } from '../core/settings';
 import { buildCanonicalTaskIdentity, captureTranscriptJob } from '../core/transcript';
 import type { ExtensionSettings, TranscriptRow } from '../core/types';
+import { reviewGraderAccess } from '../core/review-grader-access';
 
 const AI_BROKER_CONTENT_BUILD = 'port-stream-postmortem-2026-06-23';
 const AI_BROKER_CONTENT_BUILD_ATTR = 'data-babel-gold-drafting-ai-broker-build';
@@ -43,6 +44,7 @@ function formatElapsedSeconds(elapsedMs: number): string {
 }
 
 function allowsBrokerFallback(message: AiBrokerInternalRequest, settings: ExtensionSettings | null): boolean {
+  if (message.operation === 'enhanceAudio') return false;
   if (settings && settings.mode !== 'advanced') return false;
   if (message.operation === 'transcribeSegmentL0' && settings && isBrowserLocalMode(settings)) {
     return false;
@@ -178,8 +180,41 @@ export async function generateConfiguredL0SegmentText(
 
 async function handleBrokerRequest(
   message: AiBrokerInternalRequest,
-  emit?: (message: AiBrokerPortMessage) => void
+  emit?: (message: AiBrokerPortMessage) => void,
+  isConnected: () => boolean = () => true
 ): Promise<AiBrokerResponse> {
+  if (message.operation === 'enhanceAudio') {
+    const access = await reviewGraderAccess().acquire();
+    if (!access) return brokerError('unsupported-operation', 'This operation is unavailable.', false);
+    if (!emit || typeof message.taskId !== 'string' || !message.taskId.trim() ||
+      Object.keys(message).some((key) => !['type', 'version', 'operation', 'requestId', 'taskId'].includes(key))) {
+      return brokerError('invalid-request', 'Audio enhancement requires a streamed request with only the native taskId.', false);
+    }
+    const isCurrent = () => {
+      if (access.aborted || !isConnected()) return false;
+      try {
+        const job = captureTranscriptJob();
+        return job.taskScoped === true && job.jobId === message.taskId;
+      } catch { return false; }
+    };
+    if (!isCurrent()) return brokerError('stale-task', 'The requested native audio task is no longer current.', false);
+    try {
+      emit({ type: 'event', event: 'capturing-audio', operation: 'enhanceAudio', message: 'Capturing both original native audio tracks.' });
+      const tracks = await captureOriginalAudioTracksForEnhancement();
+      if (!isCurrent()) return brokerError('stale-task', 'The native audio task changed during capture.', false);
+      emit({ type: 'event', event: 'calling-backend', operation: 'enhanceAudio', message: 'Checking the pair cache and GPU: without usable WebGPU, Original audio is sent to a remote swarm worker.' });
+      const result = await enhanceLocalAudio(message.taskId, tracks, {
+        isCurrent,
+        onAudioChunk: (chunk) => emit(chunk),
+        onProgress: (progress) => emit({ type: 'event', event: 'enhancement-progress', operation: 'enhanceAudio', progress })
+      });
+      if (!isCurrent()) return brokerError('stale-task', 'The native audio task changed before enhancement completed.', false);
+      return result;
+    } catch (error) {
+      if (error instanceof LocalModelBridgeError && error.code === 'stale-task') return brokerError('stale-task', error.message, false);
+      throw new NoFallbackBrokerError(error);
+    }
+  }
   const settings = await loadSettings();
 
   if (settings.mode === 'local') {
@@ -403,6 +438,10 @@ async function brokerFailureResponse(
   message: AiBrokerInternalRequest,
   error: unknown
 ): Promise<Extract<AiBrokerResponse, { ok: false }>> {
+  if (message.operation === 'enhanceAudio') {
+    logBrokerRequestFailure(message, null, error, false);
+    return brokerError('broker-error', error instanceof Error ? error.message : String(error), false);
+  }
   let settings: ExtensionSettings | null = null;
   try {
     settings = await loadSettings();
@@ -425,6 +464,8 @@ export function registerAiBrokerContentHandler(): void {
       if (port.name !== AI_BROKER_INTERNAL_PORT_NAME) {
         return;
       }
+      let connected = true;
+      port.onDisconnect.addListener(() => { connected = false; });
 
       port.onMessage.addListener((message: unknown) => {
         if (!isBrokerRequest(message)) {
@@ -435,14 +476,17 @@ export function registerAiBrokerContentHandler(): void {
           return;
         }
 
-        const emit = (event: AiBrokerPortMessage) => port.postMessage(event);
-        void handleBrokerRequest(message, emit)
+        const emit = (event: AiBrokerPortMessage) => {
+          if (!connected) throw new NoFallbackBrokerError(new Error('The Helper audio stream disconnected.'));
+          port.postMessage(event);
+        };
+        void handleBrokerRequest(message, emit, () => connected)
           .then((response) => {
-            port.postMessage({ type: 'result', response });
+            if (connected) port.postMessage({ type: 'result', response });
           })
           .catch(async (error) => {
             const response = await brokerFailureResponse(message, error);
-            port.postMessage({ type: 'error', response });
+            if (connected) port.postMessage({ type: 'error', response });
           });
       });
     });

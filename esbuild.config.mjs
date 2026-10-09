@@ -1,8 +1,9 @@
-import { copyFile, mkdir } from 'node:fs/promises';
+import { copyFile, mkdir, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildExtension, defineExtensionBuild } from '@nominy/babel-extension-build';
 import { ortJsepBuildOptions } from './scripts/ort-jsep-options.mjs';
+import { prepareZipWebGpuArtifact, zipWebGpuAssets } from './scripts/zip-webgpu-artifact.mjs';
 
 const watch = process.argv.includes('--watch');
 const rootDir = path.dirname(fileURLToPath(import.meta.url));
@@ -21,6 +22,7 @@ if (requestedDevModelUrl) {
   devModelUrl = url.toString().replace(/\/+$/, '');
 }
 const ortRuntimeOutputDir = path.join(rootDir, 'dist/vendor/ort');
+const zipModelOutputDir = path.join(rootDir, 'dist/models');
 const offscreenPageSourcePath = path.join(rootDir, 'src/offscreen/offscreen.html');
 const offscreenPageOutputPath = path.join(rootDir, 'offscreen.html');
 const ortRuntimeAssetNames = [
@@ -35,13 +37,20 @@ const ortRuntimeAssetNames = [
 ];
 
 async function prepareExtensionAssets() {
+  await prepareZipWebGpuArtifact(rootDir);
   await mkdir(ortRuntimeOutputDir, { recursive: true });
+  await mkdir(zipModelOutputDir, { recursive: true });
   await Promise.all([
     copyFile(offscreenPageSourcePath, offscreenPageOutputPath),
+    ...zipWebGpuAssets.map((name) =>
+      copyFile(path.join(rootDir, 'models', name), path.join(zipModelOutputDir, name))
+    ),
     ...ortRuntimeAssetNames.map((assetName) =>
       copyFile(fileURLToPath(import.meta.resolve(`onnxruntime-web/${assetName}`)), path.join(ortRuntimeOutputDir, assetName))
     )
   ]);
+  await Promise.all(['models/zipenhancer.onnx', 'models/zipenhancer-cpu.onnx', 'workers/zipenhancer-wasm.js', 'workers/zipenhancer-wasm.js.map']
+    .map(name => rm(path.join(rootDir, 'dist', name), { force: true })));
 }
 
 const config = defineExtensionBuild({
@@ -79,6 +88,10 @@ const config = defineExtensionBuild({
     {
       entryPoints: ['src/offscreen/local-model-host.ts'],
       outfile: 'dist/offscreen/local-model-host.js'
+    },
+    {
+      entryPoints: ['src/workers/audio-enhancement.ts'],
+      outfile: 'dist/workers/audio-enhancement.js'
     }
   ],
   watchMessage: 'Watching gold drafting extension bundles...'

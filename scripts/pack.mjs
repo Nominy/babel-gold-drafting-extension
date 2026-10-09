@@ -3,6 +3,7 @@
 import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { collectFiles, packExtension } from '@nominy/babel-extension-build';
+import { zipWebGpuAssets } from './zip-webgpu-artifact.mjs';
 
 const ROOT = resolve(import.meta.dirname, '..');
 if (process.env.BABEL_DEV_C_DENOISE_MODEL_URL?.trim()) {
@@ -37,7 +38,10 @@ try {
         { full: join(ROOT, 'LICENSE'), rel: 'LICENSE' },
         { full: join(ROOT, 'COPYING.LGPLv2.1'), rel: 'COPYING.LGPLv2.1' },
         { full: join(ROOT, 'src/core/ffmpeg-audio-raw.ts'), rel: 'source/ffmpeg-audio-raw.ts' },
-        { full: join(ROOT, 'src/core/ffmpeg-audio-denoise.ts'), rel: 'source/ffmpeg-audio-denoise.ts' }
+        { full: join(ROOT, 'src/core/ffmpeg-audio-denoise.ts'), rel: 'source/ffmpeg-audio-denoise.ts' },
+        ...zipWebGpuAssets.map((name) => ({
+          full: join(ROOT, 'dist/models', name), rel: `dist/models/${name}`
+        }))
       ];
 
       for (const entry of collectFiles(join(ROOT, 'icons'), 'icons')) {

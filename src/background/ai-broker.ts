@@ -18,17 +18,21 @@ import { assertReleasedGraphs } from '../core/inference-release';
 import { isBrowserLocalMode, LOCAL_MODEL_BASE_URL, loadSettings } from '../core/settings';
 import { isOpenLocalModelOptionsMessage } from '../core/local-model-suggestion-protocol';
 import type { ExtensionSettings } from '../core/types';
+import { hasReviewGraderAccess } from '../core/review-grader-access';
 
 export async function resolveBrokerCapabilities(
   settings: ExtensionSettings,
-  getStatus: (baseUrl: string) => Promise<LocalModelStatus> = getLocalModelStatus
+  getStatus: (baseUrl: string) => Promise<LocalModelStatus> = getLocalModelStatus,
+  enhancementAllowed: () => Promise<boolean> = hasReviewGraderAccess
 ) {
+  const enhanceAudio = await enhancementAllowed();
   if (settings.mode === 'simple') {
     const configured = Boolean(settings.openRouterApiKey.trim());
     return {
       transcribeSegment: configured,
       transcribeSegmentL0: configured,
-      redistributeText: configured
+      redistributeText: configured,
+      enhanceAudio
     };
   }
   let transcribeSegmentL0 = true;
@@ -45,7 +49,8 @@ export async function resolveBrokerCapabilities(
   return {
     transcribeSegment: settings.mode === 'local' ? transcribeSegmentL0 : remoteBrokerAvailable,
     transcribeSegmentL0,
-    redistributeText: settings.mode === 'local' ? remoteConfigured : remoteBrokerAvailable
+    redistributeText: settings.mode === 'local' ? remoteConfigured : remoteBrokerAvailable,
+    enhanceAudio
   };
 }
 
@@ -203,6 +208,18 @@ async function admitBrokerRequest(
   sender: chrome.runtime.MessageSender | undefined,
   onAccepted?: () => void
 ): Promise<BrokerAdmission> {
+  if (request.operation === 'enhanceAudio') {
+    if (!await hasReviewGraderAccess()) return { response: unavailable('unsupported-operation', 'This operation is unavailable.', false) };
+    onAccepted?.();
+    if (typeof request.taskId !== 'string' || !request.taskId.trim() ||
+      Object.keys(request).some((key) => !['type', 'version', 'operation', 'requestId', 'taskId'].includes(key))) {
+      return { response: unavailable('invalid-request', 'Enhancement accepts only a native taskId; Gold captures original task audio.', false) };
+    }
+    const tabId = Number(sender?.tab?.id);
+    return Number.isSafeInteger(tabId) && tabId >= 0
+      ? { tabId, fallbackAllowed: false }
+      : { response: unavailable('missing-tab', 'Audio enhancement must originate from the current Babel tab.', false) };
+  }
   const settings = await loadSettings();
   const fallbackAllowed = settings.mode !== 'advanced' || request.operation === 'transcribeSegmentL0'
     ? false
@@ -245,6 +262,7 @@ async function admitBrokerRequest(
 }
 
 async function requestFailure(request: AiBrokerExternalRequest, error: unknown): Promise<Extract<AiBrokerResponse, { ok: false }>> {
+  if (request.operation === 'enhanceAudio') return unavailable('broker-error', error instanceof Error ? error.message : String(error), false);
   let fallbackAllowed = false;
   try {
     const settings = await loadSettings();
@@ -261,6 +279,9 @@ async function handleBrokerRequest(
   request: AiBrokerExternalRequest,
   sender: chrome.runtime.MessageSender
 ): Promise<AiBrokerResponse> {
+  if (request.operation === 'enhanceAudio') return await hasReviewGraderAccess()
+    ? unavailable('invalid-request', 'Audio enhancement requires the streamed AI broker port.', false)
+    : unavailable('unsupported-operation', 'This operation is unavailable.', false);
   const admission = await admitBrokerRequest(request, sender);
   return 'response' in admission
     ? admission.response

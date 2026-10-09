@@ -1,0 +1,42 @@
+ZipEnhancer original 2.044436M model
+
+Copyright (c) 2024 Alibaba, Inc. and its affiliates.
+Zipformer/scaling implementation: Copyright 2022-2023 Xiaomi Corp.
+(authors: Daniel Povey); Copyright (c) 2024 Alibaba, Inc. and its affiliates.
+Generator implementation incorporates work from MP-SENet:
+https://github.com/yxlu-0102/MP-SENet
+
+Original model: iic/speech_zipenhancer_ans_multiloss_16k_base
+https://modelscope.cn/models/iic/speech_zipenhancer_ans_multiloss_16k_base
+Original checkpoint/configuration revision:
+bed374bb53e4a5ffc62093676bab408a56b0db48
+Original pytorch_model.bin SHA-256:
+b18896915e27a821585584221d0c0820f35e12145315ae3f1e73ccd5a68d195f
+Model implementation: ModelScope 1.22.0
+https://github.com/modelscope/modelscope/tree/v1.22.0/modelscope/models/audio/ans
+
+Licensed under the Apache License, Version 2.0. See zipenhancer.LICENSE.
+
+Babel modifications (2026-10-08/09): strict-loaded original FP32 weights exported
+into standard ONNX with fixed 641-frame spectral windows and two inference outputs.
+Inference lowerings replace exporter-unsupported representations with numerically equivalent
+standard operators. Query-partitioned all-key attention bounds intermediary
+buffers without changing context, learned weights, or softmax rows. InstanceNorm
+uses equivalent anchored two-pass mean/biased-variance reductions, retaining the
+original epsilon and affine tensors to avoid near-constant FP32 cancellation.
+Oversized Concat operations become ordered groups with at most seven inputs,
+preserving values while fitting eight storage bindings per WebGPU shader.
+Exact offline shape/index folding specializes the existing four-second runtime
+contract. Compact shared row-major Gather indices replace replicated attention
+GatherElements indices with identical tensor values and bounded constant storage.
+No weights were trained, randomized, or taken from the publisher's separately
+distributed ONNX. The original FP32 export and operator inventory remain in
+models/zipenhancer.onnx and src/core/audio-enhancement-model.json for reproduction.
+The packaged browser runtime uses a derived static plan and mixed-FP16 weight
+storage, with FP32 sensitive nonlinearities, statistics, and matrix accumulation.
+WGSL tiled all-key relative attention and exact source-DAG pointwise fusion
+replace materialized intermediate operators; four-second context is unchanged.
+Reproduction: scripts/export-zipenhancer.py and scripts/export-zipenhancer-webgpu.py.
+Packaged assets and implementation identity: src/core/audio-enhancement-webgpu-model.json.
+
+This notice is informational and does not modify the license.

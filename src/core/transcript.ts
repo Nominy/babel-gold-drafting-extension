@@ -1,4 +1,4 @@
-import { getReactFiber, normalizeText, setEditableValue } from '@nominy/babel-babel-runtime';
+import { getReactFiber, normalizeText, setEditableValue, readAudioEnhancementState } from '@nominy/babel-babel-runtime';
 import { PAGE_RECORDING_LANES_ATTRIBUTE, PAGE_TASK_ID_ATTRIBUTE } from './audio-intercept-protocol';
 import type { ApplyDraftResult, DiffPreviewItem, DraftRowResult, TranscriptJob, TranscriptRow } from './types';
 
@@ -224,7 +224,7 @@ export function buildJobId(locationLike: Pick<Location, 'pathname' | 'search'> =
 }
 
 export function buildCanonicalTaskIdentity(
-  job: Pick<TranscriptJob, 'jobId' | 'rows' | 'taskScoped'>
+  job: Pick<TranscriptJob, 'jobId' | 'rows' | 'taskScoped' | 'audioVariantKey'>
 ): string {
   const processedRecordingIds = job.rows
     .map((row) => row.processedRecordingId?.trim() || '')
@@ -236,7 +236,8 @@ export function buildCanonicalTaskIdentity(
   return JSON.stringify({
     version: 1,
     baseTaskId: job.jobId.trim(),
-    stableLaneIds
+    stableLaneIds,
+    ...(job.audioVariantKey ? { audioVariantKey: job.audioVariantKey } : {})
   });
 }
 
@@ -265,9 +266,14 @@ export function captureTranscriptJob(
     readPublishedReviewActionId(root)
     || rowElements.map(readReviewActionId).find(Boolean)
     || '';
+  const documentRef = 'documentElement' in root ? root as Document : (root as Node).ownerDocument;
+  const audioState = readAudioEnhancementState(documentRef);
+  const audioVariantKey = audioState?.taskId === reviewActionId && audioState.strength > 0
+    ? audioState.variantKey : '';
   return {
     jobId: reviewActionId || buildJobId(locationLike),
     ...(reviewActionId ? { taskScoped: true } : {}),
+    ...(audioVariantKey ? { audioVariantKey } : {}),
     rows
   };
 }

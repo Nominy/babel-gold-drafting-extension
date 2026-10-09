@@ -1,3 +1,7 @@
+import {
+  AUDIO_ENHANCEMENT_ACTIVE_REQUEST, AUDIO_ENHANCEMENT_ACTIVE_RESPONSE,
+  AUDIO_ENHANCEMENT_PROTOCOL_VERSION, readAudioEnhancementState, type ActiveAudioRequest, type AudioEnhancementState
+} from '@nominy/babel-babel-runtime';
 import type { CapturedAudioTrack } from './types';
 import {
   AUDIO_FLUSH_REQUEST_MESSAGE_TYPE,
@@ -343,7 +347,99 @@ async function appendDiscoveredSourceTracks(
   }
 }
 
+function isPendingAudioSelection(state: AudioEnhancementState): boolean {
+  return state.status === 'switching' || (state.desiredStrength !== state.strength && state.status !== 'error');
+}
+
+export function isAudioSelectionReady(root: ParentNode = document): boolean {
+  const documentRef = 'documentElement' in root ? root as Document : (root as Node).ownerDocument;
+  const state = readAudioEnhancementState(documentRef);
+  return !state || state.taskId !== captureTranscriptJob(root).jobId || !isPendingAudioSelection(state);
+}
+
+function captureHelperSelectedAudio(root: ParentNode, selection: 'active' | 'original'): Promise<CapturedAudioTrack[]> | null {
+  const documentRef = 'documentElement' in root ? root as Document : (root as Node).ownerDocument;
+  const state = readAudioEnhancementState(documentRef);
+  const job = captureTranscriptJob(root);
+  if (!state || state.taskId !== job.jobId) return null;
+  if (selection === 'active' && isPendingAudioSelection(state)) {
+    return Promise.reject(new Error('The selected audio is preparing or switching. Wait for its paired source commit.'));
+  }
+  const requestId = crypto.randomUUID();
+  const { promise, resolve, reject } = Promise.withResolvers<CapturedAudioTrack[]>();
+  const finish = (result: CapturedAudioTrack[] | Error) => {
+    window.clearTimeout(timeout);
+    window.removeEventListener('message', receive);
+    if (result instanceof Error) reject(result); else resolve(result);
+  };
+  const receive = (event: MessageEvent) => {
+    const data = event.data;
+    if (event.source !== window || !isObject(data) || data.type !== AUDIO_ENHANCEMENT_ACTIVE_RESPONSE || data.requestId !== requestId) return;
+    const current = readAudioEnhancementState(documentRef);
+    if (data.version !== AUDIO_ENHANCEMENT_PROTOCOL_VERSION || data.taskId !== job.jobId ||
+        !current || current.taskId !== job.jobId || captureTranscriptJob(root).jobId !== job.jobId) {
+      finish(new Error('The audio task changed during selected-source capture.'));
+      return;
+    }
+    if (selection === 'active' && (isPendingAudioSelection(current) || current.strength !== data.strength ||
+        current.variantKey !== data.variantKey || current.strength !== state.strength || current.variantKey !== state.variantKey)) {
+      finish(new Error('The selected audio changed during capture.'));
+      return;
+    }
+    if (selection === 'original' && (data.strength !== 0 || data.variantKey !== '')) {
+      finish(new Error('Original audio capture must not return enhanced or mixed audio.'));
+      return;
+    }
+    if (data.available !== true) {
+      finish(new Error('The selected native audio buffers are not ready. No original-source substitution was used.'));
+      return;
+    }
+    if (!Array.isArray(data.tracks) || data.tracks.length !== 2) {
+      finish(new Error('Selected audio must contain both native recording lanes.'));
+      return;
+    }
+    const ids = new Set<string>();
+    const tracks: CapturedAudioTrack[] = [];
+    for (const track of data.tracks) {
+      if (!isObject(track) || typeof track.trackId !== 'string' || !track.trackId ||
+          typeof track.speakerKey !== 'string' || !track.speakerKey || typeof track.trackLabel !== 'string' ||
+          track.mimeType !== 'audio/wav' || !(track.bytes instanceof ArrayBuffer) ||
+          track.bytes.byteLength === 0 || track.bytes.byteLength > MAX_CAPTURE_BYTES || ids.has(track.speakerKey)) {
+        finish(new Error('Selected native audio contains an invalid or duplicated lane.'));
+        return;
+      }
+      ids.add(track.speakerKey);
+      tracks.push({ trackId: track.trackId, speakerKey: track.speakerKey, trackLabel: track.trackLabel,
+        source: data.strength === 0 ? `helper-selected:original:${track.trackId}`
+          : `helper-selected:${data.strength}:${data.variantKey}:${track.trackId}`, mimeType: 'audio/wav',
+        blob: new Blob([track.bytes], { type: 'audio/wav' }) });
+    }
+    finish(tracks);
+  };
+  const timeout = window.setTimeout(() => finish(new Error('Helper selected-audio capture timed out.')), 5000);
+  window.addEventListener('message', receive);
+  try {
+    window.postMessage({ type: AUDIO_ENHANCEMENT_ACTIVE_REQUEST, version: AUDIO_ENHANCEMENT_PROTOCOL_VERSION,
+      requestId, taskId: job.jobId, selection } satisfies ActiveAudioRequest, '*');
+  } catch (error) {
+    finish(error instanceof Error ? error : new Error(String(error)));
+  }
+  return promise;
+}
+
 export async function captureAudioTracksForDrafting(root: ParentNode = document): Promise<CapturedAudioTrack[]> {
+  ensureAudioRequestCaptureInstalled();
+  const selected = captureHelperSelectedAudio(root, 'active');
+  return selected ?? captureNetworkAudio(root);
+}
+
+export async function captureOriginalAudioTracksForEnhancement(root: ParentNode = document): Promise<CapturedAudioTrack[]> {
+  ensureAudioRequestCaptureInstalled();
+  const original = captureHelperSelectedAudio(root, 'original');
+  return original ?? captureNetworkAudio(root);
+}
+
+async function captureNetworkAudio(root: ParentNode): Promise<CapturedAudioTrack[]> {
   ensureAudioRequestCaptureInstalled();
   const session = getAudioCaptureSession();
   session.activeCaptures += 1;

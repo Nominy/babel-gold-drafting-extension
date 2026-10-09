@@ -1,11 +1,19 @@
 import { assertL0WavAudio, type PreparedL0Track } from '../core/l0-client';
 import { INFERENCE_RELEASE, INFERENCE_HEADERS, assertReleasedGraphs } from '../core/inference-release';
-import { IS_DEV_C_DENOISE, isBrowserLocalMode, LOCAL_MODEL_BASE_URL, PUBLIC_L0_BASE_URL, normalizeSettings } from '../core/settings';
+import { IS_DEV_C_DENOISE, isBrowserLocalMode, LOCAL_MODEL_BASE_URL, normalizeL0CustomBaseUrl, normalizeSettings } from '../core/settings';
 import { getCachedBundleDescriptor } from '../core/local-model-bundle';
 import type { CapturedAudioTrack, ExtensionSettings, L0DraftResponse, L0TimingResponse, TranscriptJob, TranscriptRow } from '../core/types';
 import type { VolunteerStatus } from '../core/volunteer-protocol';
 import { generateLocalL0DraftFromTiming, generateLocalL0Timing } from '../core/local-model-runtime';
 import { parseL0TimingResponse } from '../core/l0-timing-client';
+import { selectZipEnhancementBackend } from '../core/audio-enhancement-backend';
+import { enhanceAudioTracks, getAudioEnhancementModel, type EnhancedAudioBatch } from '../core/audio-enhancement-runtime';
+import { hasReviewGraderAccess, requireReviewGraderAccess } from '../core/review-grader-access';
+import {
+  ENHANCEMENT_MAX_TRACK_BYTES, parseEnhancementModel, parseEnhancementPayload, parseEnhancementTrackMetadata,
+  parseEnhancementWorkerProgress, readBoundedSwarmBlob, readBoundedSwarmJson, sameEnhancementModel, verifyEnhancementWav,
+  type EnhancementModelDescriptor, type EnhancementSwarmPayload, type EnhancementWorkerProgress
+} from '../core/audio-enhancement-swarm-protocol';
 
 const SCHEMA = INFERENCE_RELEASE.bundleSchema;
 const CONTROL_REQUEST_TIMEOUT_MS = 45_000;
@@ -25,15 +33,28 @@ type DraftLease = LeaseBase & {
   payload: { taskId: string; timing: L0TimingResponse; options?: Record<string, unknown> };
   audio: [];
 };
-type Lease = TranscribeLease | DraftLease;
+type EnhanceLease = LeaseBase & {
+  operation: 'enhance';
+  payload: EnhancementSwarmPayload;
+  audio: Array<{ fieldName: string; url: string }>;
+};
+type Lease = TranscribeLease | DraftLease | EnhanceLease;
+
+export interface VolunteerReadiness {
+  transcribe: boolean;
+  draft: boolean;
+  enhancementModel?: EnhancementModelDescriptor;
+}
 
 export interface VolunteerDependencies {
   fetch: (url: string, init: RequestInit) => Promise<Response>;
   settings: () => Promise<ExtensionSettings>;
-  ready: () => Promise<boolean>;
+  ready: () => Promise<VolunteerReadiness>;
   runExclusive: <T>(action: () => Promise<T>) => Promise<T>;
   draft: typeof generateLocalL0DraftFromTiming;
   transcribe: typeof generateLocalL0Timing;
+  enhance: typeof enhanceAudioTracks;
+  authorizeEnhancement: () => Promise<AbortSignal>;
   wait: (ms: number, signal: AbortSignal) => Promise<void>;
 }
 
@@ -51,13 +72,22 @@ export const defaultVolunteerDependencies: VolunteerDependencies = {
   fetch: (url, init) => fetch(url, init),
   settings: loadVolunteerSettings,
   ready: async () => {
-    const bundle = await getCachedBundleDescriptor(LOCAL_MODEL_BASE_URL);
-    if (!bundle?.tested) return false;
-    try { assertReleasedGraphs(bundle.files); return true; } catch { return false; }
+    let asr = false;
+    try {
+      const bundle = await getCachedBundleDescriptor(LOCAL_MODEL_BASE_URL);
+      if (bundle?.tested) { assertReleasedGraphs(bundle.files); asr = true; }
+    } catch { /* An unavailable ASR bundle must not prevent packaged enhancement admission. */ }
+    let enhancementModel: EnhancementModelDescriptor | undefined;
+    try {
+      if (await hasReviewGraderAccess() && (await selectZipEnhancementBackend()).backend === 'webgpu') enhancementModel = getAudioEnhancementModel();
+    } catch { /* Enhancement admission is independent of the verified ASR bundle. */ }
+    return { transcribe: asr, draft: asr, ...(enhancementModel ? { enhancementModel } : {}) };
   },
   runExclusive: (action) => action(),
   draft: generateLocalL0DraftFromTiming,
   transcribe: generateLocalL0Timing,
+  enhance: enhanceAudioTracks,
+  authorizeEnhancement: requireReviewGraderAccess,
   wait: (ms, signal) => new Promise<void>((resolve) => {
     if (signal.aborted) { resolve(); return; }
     const finish = () => {
@@ -83,9 +113,17 @@ function parseCredentials(value: unknown): Credentials {
 export function parseLease(value: unknown): Lease {
   if (!record(value) || typeof value.jobId !== 'string' || !value.jobId ||
       typeof value.leaseToken !== 'string' || !value.leaseToken ||
-      (value.operation !== 'draft' && value.operation !== 'transcribe') ||
+      (value.operation !== 'draft' && value.operation !== 'transcribe' && value.operation !== 'enhance') ||
       !record(value.payload) || typeof value.payload.taskId !== 'string' || !value.payload.taskId ||
       !Array.isArray(value.audio)) throw new Error('Invalid volunteer lease.');
+  if (value.operation === 'enhance') {
+    const payload = parseEnhancementPayload(value.payload);
+    if (value.audio.length !== 2 || !value.audio.every(entry => record(entry) &&
+        typeof entry.fieldName === 'string' && payload.tracks.some(track => track.fieldName === entry.fieldName) &&
+        entry.url === `/v1/jobs/${encodeURIComponent(value.jobId as string)}/audio/${encodeURIComponent(entry.fieldName)}`) ||
+        new Set(value.audio.map(entry => entry.fieldName)).size !== 2) throw new Error('Invalid enhancement lease audio URLs.');
+    return value as EnhanceLease;
+  }
   if (value.operation === 'draft') {
     if (value.audio.length || (value.payload.options !== undefined && !record(value.payload.options))) {
       throw new Error('A punctuation lease cannot include audio.');
@@ -128,19 +166,58 @@ function preserveRows(lease: DraftLease): TranscriptRow[] | undefined {
   }
   return options.preserveRows as TranscriptRow[];
 }
-async function request(dependencies: VolunteerDependencies, path: string, init: RequestInit, signal: AbortSignal): Promise<Response> {
-  return dependencies.fetch(`${PUBLIC_L0_BASE_URL}${path}`, {
+async function request(dependencies: VolunteerDependencies, baseUrl: string, path: string, init: RequestInit, signal: AbortSignal): Promise<Response> {
+  return dependencies.fetch(`${baseUrl}${path}`, {
     ...init,
     headers: { ...INFERENCE_HEADERS, ...init.headers },
     redirect: 'error',
     signal: AbortSignal.any([
       signal,
-      AbortSignal.timeout(path.includes('/audio/') ? AUDIO_REQUEST_TIMEOUT_MS : CONTROL_REQUEST_TIMEOUT_MS)
+      AbortSignal.timeout(path.includes('/audio/') || init.body instanceof FormData ? AUDIO_REQUEST_TIMEOUT_MS : CONTROL_REQUEST_TIMEOUT_MS)
     ])
   });
 }
 
-async function executeLease(lease: Lease, settings: ExtensionSettings, dependencies: VolunteerDependencies, signal: AbortSignal): Promise<L0DraftResponse | L0TimingResponse> {
+async function executeLease(lease: Lease, settings: ExtensionSettings, readiness: VolunteerReadiness, credentials: Credentials,
+  dependencies: VolunteerDependencies, baseUrl: string, signal: AbortSignal): Promise<L0DraftResponse | L0TimingResponse | EnhancedAudioBatch> {
+  if (lease.operation === 'enhance') {
+    signal = AbortSignal.any([signal, await dependencies.authorizeEnhancement()]);
+    signal.throwIfAborted();
+    if (!readiness.enhancementModel || !sameEnhancementModel(readiness.enhancementModel, lease.payload.model)) {
+      throw new Error('This worker is not admitted for the leased enhancement model.');
+    }
+    const tracks: CapturedAudioTrack[] = [];
+    for (const track of lease.payload.tracks) {
+      signal.throwIfAborted();
+      const entry = lease.audio.find(audio => audio.fieldName === track.fieldName)!;
+      const response = await request(dependencies, baseUrl, entry.url, { headers: { Authorization: `Bearer ${lease.leaseToken}` } }, signal);
+      if (!response.ok) { await response.body?.cancel(); throw new Error(`Leased audio fetch failed: HTTP ${response.status}`); }
+      const blob = await readBoundedSwarmBlob(response, ENHANCEMENT_MAX_TRACK_BYTES, signal);
+      await verifyEnhancementWav(await blob.arrayBuffer(), track, track.sourceSha256);
+      tracks.push({ trackId: track.trackId, speakerKey: track.speakerKey, trackLabel: track.trackLabel,
+        source: 'volunteer-lease', mimeType: 'audio/wav', blob });
+    }
+    let previous: EnhancementWorkerProgress | undefined;
+    return dependencies.runExclusive(async () => {
+      signal.throwIfAborted();
+      return dependencies.enhance(tracks, async progress => {
+        if (!['loading-model', 'enhancing', 'encoding'].includes(progress.phase)) return;
+        const next = parseEnhancementWorkerProgress({
+          phase: progress.phase, trackId: progress.trackId, trackIndex: progress.trackIndex,
+          trackCount: progress.trackCount, completedChunks: progress.completedChunks, totalChunks: progress.totalChunks
+        }, lease.payload, previous);
+        signal.throwIfAborted();
+        const response = await request(dependencies, baseUrl, `/v1/jobs/${encodeURIComponent(lease.jobId)}/progress`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${lease.leaseToken}` },
+          body: JSON.stringify({ ...credentials, leaseToken: lease.leaseToken, progress: next })
+        }, signal);
+        await response.body?.cancel();
+        if (!response.ok) throw new Error(`Enhancement lease progress rejected: HTTP ${response.status}`);
+        previous = next;
+      }, { localOnly: true, cache: false, taskId: lease.payload.taskId, signal });
+    });
+  }
+  if (!readiness[lease.operation]) throw new Error('The verified ASR bundle is unavailable for this lease.');
   if (lease.operation === 'draft') {
     return dependencies.runExclusive(async () => {
       if (signal.aborted) throw new Error('Volunteer participation stopped.');
@@ -149,9 +226,9 @@ async function executeLease(lease: Lease, settings: ExtensionSettings, dependenc
   }
   const prepared = await Promise.all(lease.payload.tracks.map(async (track): Promise<PreparedL0Track> => {
     const entry = lease.audio.find((audio) => audio.fieldName === track.fieldName)!;
-    const response = await request(dependencies, entry.url, { headers: { Authorization: `Bearer ${lease.leaseToken}` } }, signal);
+    const response = await request(dependencies, baseUrl, entry.url, { headers: { Authorization: `Bearer ${lease.leaseToken}` } }, signal);
     if (!response.ok) throw new Error(`Leased audio fetch failed: HTTP ${response.status}`);
-    const blob = await response.blob();
+    const blob = await readBoundedSwarmBlob(response, ENHANCEMENT_MAX_TRACK_BYTES, signal);
     const audio: CapturedAudioTrack = {
       trackId: track.fieldName, speakerKey: track.lane, trackLabel: track.lane,
       source: 'volunteer-lease', blob, mimeType: 'audio/wav'
@@ -185,6 +262,7 @@ export function createVolunteer(dependencies: VolunteerDependencies = defaultVol
   async function run(signal: AbortSignal): Promise<void> {
     let credentials: Credentials | null = null;
     let backoff = 2_000;
+    let registrationKey = '';
     while (!signal.aborted) {
       try {
         const settings = await dependencies.settings();
@@ -198,21 +276,31 @@ export function createVolunteer(dependencies: VolunteerDependencies = defaultVol
           status = { state: 'disabled', detail: 'Swarm participation is off; local models remain available for your own tasks.' };
           return;
         }
-        if (!(await dependencies.ready())) {
-          status = { state: 'disabled', detail: 'The verified model bundle is unavailable in the worker.' };
+        const readiness = await dependencies.ready();
+        const operations: string[] = [];
+        if (readiness.transcribe) operations.push('transcribe');
+        if (readiness.draft) operations.push('draft');
+        if (readiness.enhancementModel) { parseEnhancementModel(readiness.enhancementModel); operations.push('enhance'); }
+        if (!operations.length) {
+          status = { state: 'disabled', detail: 'No verified local inference capability is available.' };
           return;
         }
+        const baseUrl = normalizeL0CustomBaseUrl(settings.l0CustomBaseUrl);
+        const registration = { modelBundleSchema: SCHEMA, protocolVersion: INFERENCE_RELEASE.protocolVersion, modelRelease: INFERENCE_RELEASE.id,
+          operations, ...(readiness.enhancementModel ? { enhancementModel: readiness.enhancementModel } : {}) };
+        const nextKey = JSON.stringify([baseUrl, registration]);
+        if (nextKey !== registrationKey) { credentials = null; registrationKey = nextKey; }
         if (!credentials) {
           status = { state: 'connecting' };
-          const response = await request(dependencies, '/v1/workers/register', {
+          const response = await request(dependencies, baseUrl, '/v1/workers/register', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ modelBundleSchema: SCHEMA, protocolVersion: INFERENCE_RELEASE.protocolVersion, modelRelease: INFERENCE_RELEASE.id })
+            body: JSON.stringify(registration)
           }, signal);
           if (!response.ok) throw new Error(`Worker registration failed: HTTP ${response.status}`);
-          credentials = parseCredentials(await response.json());
+          credentials = parseCredentials(await readBoundedSwarmJson(response, signal));
         }
         if (signal.aborted) return;
-        const response = await request(dependencies, '/v1/workers/lease', {
+        const response = await request(dependencies, baseUrl, '/v1/workers/lease', {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(credentials)
         }, signal);
         if (response.status === 401 || response.status === 403 || response.status === 404) {
@@ -228,20 +316,44 @@ export function createVolunteer(dependencies: VolunteerDependencies = defaultVol
           continue;
         }
         if (!response.ok) throw new Error(`Worker lease failed: HTTP ${response.status}`);
-        const lease = parseLease(await response.json());
+        const lease = parseLease(await readBoundedSwarmJson(response, signal));
         status = { state: 'busy' };
-        let completion: { result: L0DraftResponse | L0TimingResponse } | { error: string };
+        let completion: RequestInit;
+        const leaseSignal = AbortSignal.any([signal, AbortSignal.timeout(8 * 60_000)]);
         try {
-          const result = await executeLease(lease, settings, dependencies, signal);
-          completion = { result };
+          const result = await executeLease(lease, settings, readiness, credentials, dependencies, baseUrl, leaseSignal);
+          leaseSignal.throwIfAborted();
+          if (lease.operation === 'enhance') {
+            const batch = result as EnhancedAudioBatch;
+            if (batch.provider !== 'browser-local' || batch.model !== lease.payload.model.id || batch.modelSha256 !== lease.payload.model.sha256 ||
+                batch.tracks.length !== 2) throw new Error('The GPU worker returned a different enhancement model or incomplete pair.');
+            const form = new FormData();
+            for (let index = 0; index < batch.tracks.length; index++) {
+              const track = batch.tracks[index], source = lease.payload.tracks[index];
+              parseEnhancementTrackMetadata(track.metadata, source);
+              const bytes = track.bytes.byteOffset === 0 && track.bytes.byteLength === track.bytes.buffer.byteLength
+                ? track.bytes.buffer : track.bytes.slice().buffer;
+              await verifyEnhancementWav(bytes, source, track.metadata.wavSha256, true);
+              leaseSignal.throwIfAborted();
+              form.append(source.fieldName, new Blob([bytes], { type: 'audio/wav' }), `enhanced-${index + 1}.wav`);
+            }
+            form.append('payload', JSON.stringify({ ...credentials, leaseToken: lease.leaseToken,
+              result: { model: batch.model, modelSha256: batch.modelSha256, tracks: batch.tracks.map(track => track.metadata) } }));
+            completion = { headers: { Authorization: `Bearer ${lease.leaseToken}` }, body: form };
+          } else {
+            completion = { headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ ...credentials, leaseToken: lease.leaseToken, result }) };
+          }
         } catch (error) {
-          completion = { error: error instanceof Error ? error.message : String(error) };
+          completion = { headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ...credentials, leaseToken: lease.leaseToken,
+              error: (error instanceof Error ? error.message : String(error)).slice(0, 1000) }) };
         }
         if (signal.aborted) return;
-        const completed = await request(dependencies, `/v1/jobs/${encodeURIComponent(lease.jobId)}/complete`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ...credentials, leaseToken: lease.leaseToken, ...completion })
+        const completed = await request(dependencies, baseUrl, `/v1/jobs/${encodeURIComponent(lease.jobId)}/complete`, {
+          method: 'POST', ...completion
         }, signal);
+        await completed.body?.cancel();
         if (completed.status === 401 || completed.status === 403 || completed.status === 404) {
           credentials = null;
           throw new Error(`Worker lease expired: HTTP ${completed.status}`);

@@ -42,6 +42,7 @@ export interface TranscriptRow {
 export interface TranscriptJob {
   jobId: string;
   taskScoped?: boolean;
+  audioVariantKey?: string;
   rows: TranscriptRow[];
 }
 

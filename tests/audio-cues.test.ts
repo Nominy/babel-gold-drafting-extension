@@ -1,7 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
-import { captureAudioTracksForDrafting, installAudioRequestCapture } from '../src/core/audio-cues';
+import { captureAudioTracksForDrafting, captureOriginalAudioTracksForEnhancement, installAudioRequestCapture, isAudioSelectionReady } from '../src/core/audio-cues';
+import {
+  AUDIO_ENHANCEMENT_ACTIVE_REQUEST,
+  AUDIO_ENHANCEMENT_ACTIVE_RESPONSE,
+  AUDIO_ENHANCEMENT_PROTOCOL_VERSION,
+  AUDIO_ENHANCEMENT_STATE_ATTRIBUTE,
+  type ActiveAudioRequest,
+  type ActiveAudioResponse,
+  type AudioEnhancementState
+} from '@nominy/babel-babel-runtime';
 import { AUDIO_RESPONSE_MESSAGE_TYPE, AUDIO_SOURCE_MESSAGE_TYPE, PAGE_TASK_ID_ATTRIBUTE } from '../src/core/audio-intercept-protocol';
 
 function installDom(html: string) {
@@ -799,4 +808,230 @@ test('unavailable lanes are reported with their reason instead of vanishing sile
     `[babel-gold-drafting] Audio lane unavailable (HTTP 403): ${missingUrl}`,
     `[babel-gold-drafting] Audio lane unavailable (Failed to fetch): ${revokedUrl}`
   ]);
+});
+
+function installSelectedAudioFixture(strength = 35) {
+  const dom = installDom('<audio src="https://dashboard.babel.audio/original.wav"></audio>');
+  const fetches = recordFetches(dom);
+  const root = dom.window.document.documentElement;
+  root.setAttribute(PAGE_TASK_ID_ATTRIBUTE, 'review-action-42');
+  const variantKey = strength === 0 ? '' : strength === 100
+    ? `zipenhancer:${'a'.repeat(64)}:${'b'.repeat(64)}` : 'c'.repeat(64);
+  const state: AudioEnhancementState = {
+    version: AUDIO_ENHANCEMENT_PROTOCOL_VERSION,
+    taskId: 'review-action-42',
+    status: 'ready',
+    strength,
+    desiredStrength: strength,
+    revision: 1,
+    variantKey,
+    pairedVariantKey: 'b'.repeat(64)
+  };
+  const publish = (changes: Partial<AudioEnhancementState> = {}) => {
+    Object.assign(state, changes);
+    root.setAttribute(AUDIO_ENHANCEMENT_STATE_ATTRIBUTE, JSON.stringify(state));
+  };
+  publish();
+  installAudioRequestCapture();
+  window.dispatchEvent(new dom.window.MessageEvent('message', {
+    source: window,
+    data: {
+      type: AUDIO_RESPONSE_MESSAGE_TYPE,
+      url: 'https://dashboard.babel.audio/original.wav',
+      mimeType: 'audio/wav',
+      trackId: 'raw-network',
+      speakerKey: 'speaker-1',
+      source: 'fetch',
+      capturedAt: 1,
+      bytes: new Uint8Array([1, 2, 3]).buffer
+    }
+  }));
+  const request = Promise.withResolvers<ActiveAudioRequest>();
+  const requests: ActiveAudioRequest[] = [];
+  dom.window.postMessage = ((data: unknown) => {
+    if ((data as ActiveAudioRequest)?.type === AUDIO_ENHANCEMENT_ACTIVE_REQUEST) {
+      requests.push(data as ActiveAudioRequest);
+      request.resolve(data as ActiveAudioRequest);
+    }
+  }) as typeof dom.window.postMessage;
+  const respond = (requestId: string, changes: Partial<ActiveAudioResponse> = {}, source: Window = window) => {
+    const response: ActiveAudioResponse = {
+      type: AUDIO_ENHANCEMENT_ACTIVE_RESPONSE,
+      version: AUDIO_ENHANCEMENT_PROTOCOL_VERSION,
+      requestId,
+      taskId: 'review-action-42',
+      available: true,
+      strength,
+      variantKey,
+      tracks: [
+        { trackId: 'lane-a', speakerKey: 'speaker-1', trackLabel: 'Speaker 1', mimeType: 'audio/wav', bytes: new Uint8Array([91, 92, 93, 94]).buffer },
+        { trackId: 'lane-b', speakerKey: 'speaker-2', trackLabel: 'Speaker 2', mimeType: 'audio/wav', bytes: new Uint8Array([81, 82, 83, 84]).buffer }
+      ],
+      ...changes
+    };
+    window.dispatchEvent(new dom.window.MessageEvent('message', { source, data: response }));
+  };
+  return { dom, fetches, root, publish, requests, request: request.promise, respond };
+}
+
+function readCapturedBytes(dom: JSDOM, blob: Blob): Promise<number[]> {
+  const result = Promise.withResolvers<number[]>();
+  const reader = new dom.window.FileReader();
+  reader.onload = () => result.resolve(Array.from(new Uint8Array(reader.result as ArrayBuffer)));
+  reader.onerror = () => result.reject(reader.error);
+  reader.readAsArrayBuffer(blob);
+  return result.promise;
+}
+
+for (const strength of [0, 35, 100]) {
+  test(`drafting consumes committed ${strength} percent WAV lanes instead of network audio`, async (t) => {
+    const fixture = installSelectedAudioFixture(strength);
+    t.after(() => fixture.dom.window.close());
+    const capture = captureAudioTracksForDrafting();
+    const request = await fixture.request;
+    assert.equal(request.selection, 'active');
+    assert.equal(request.taskId, 'review-action-42');
+    fixture.respond(request.requestId);
+    const tracks = await capture;
+    assert.deepEqual(tracks.map((track) => [track.trackId, track.speakerKey, track.mimeType]), [
+      ['lane-a', 'speaker-1', 'audio/wav'],
+      ['lane-b', 'speaker-2', 'audio/wav']
+    ]);
+    assert.deepEqual(await Promise.all(tracks.map((track) => readCapturedBytes(fixture.dom, track.blob))), [
+      [91, 92, 93, 94], [81, 82, 83, 84]
+    ]);
+    assert.deepEqual(fixture.fetches, []);
+  });
+}
+
+test('enhancement input captures exact retained Originals during a pending blend commit', async (t) => {
+  const fixture = installSelectedAudioFixture();
+  t.after(() => fixture.dom.window.close());
+  fixture.publish({ status: 'switching', desiredStrength: 65 });
+  const capture = captureOriginalAudioTracksForEnhancement();
+  const request = await fixture.request;
+  assert.equal(request.selection, 'original');
+  fixture.respond(request.requestId, {
+    strength: 0,
+    variantKey: '',
+    tracks: [
+      { trackId: 'lane-a', speakerKey: 'speaker-1', trackLabel: 'Speaker 1', mimeType: 'audio/wav', bytes: new Uint8Array([11, 12]).buffer },
+      { trackId: 'lane-b', speakerKey: 'speaker-2', trackLabel: 'Speaker 2', mimeType: 'audio/wav', bytes: new Uint8Array([21, 22]).buffer }
+    ]
+  });
+  const tracks = await capture;
+  assert.deepEqual(await Promise.all(tracks.map((track) => readCapturedBytes(fixture.dom, track.blob))), [
+    [11, 12], [21, 22]
+  ]);
+  assert.deepEqual(fixture.fetches, []);
+});
+
+test('selection readiness distinguishes a pending strength from a terminal failure or another task', (t) => {
+  const fixture = installSelectedAudioFixture();
+  t.after(() => fixture.dom.window.close());
+  const scenarios: Array<{ state: Partial<AudioEnhancementState>; ready: boolean }> = [
+    { state: { status: 'ready', strength: 0, desiredStrength: 100, variantKey: '' }, ready: false },
+    { state: { status: 'ready', strength: 35, desiredStrength: 65, variantKey: 'c'.repeat(64) }, ready: false },
+    { state: { status: 'switching', desiredStrength: 35 }, ready: false },
+    { state: { status: 'error', desiredStrength: 65 }, ready: true },
+    { state: { status: 'ready', strength: 0, desiredStrength: 0, variantKey: '' }, ready: true },
+    { state: { status: 'error', desiredStrength: 100 }, ready: true },
+    { state: { status: 'ready', taskId: 'another-review' }, ready: true }
+  ];
+  for (const { state, ready } of scenarios) {
+    fixture.publish(state);
+    assert.equal(isAudioSelectionReady(), ready, JSON.stringify(state));
+  }
+});
+
+for (const strength of [0, 35]) {
+  test(`drafting rejects an uncommitted request from ${strength} percent without capturing Original`, async (t) => {
+    const fixture = installSelectedAudioFixture(strength);
+    t.after(() => fixture.dom.window.close());
+    fixture.publish({ desiredStrength: 65 });
+    await assert.rejects(captureAudioTracksForDrafting(), /preparing or switching/);
+    assert.deepEqual(fixture.requests, []);
+    assert.deepEqual(fixture.fetches, []);
+  });
+}
+
+test('drafting rejects a pending paired commit even when the requested strength is unchanged', async (t) => {
+  const fixture = installSelectedAudioFixture();
+  t.after(() => fixture.dom.window.close());
+  fixture.publish({ status: 'switching' });
+  await assert.rejects(captureAudioTracksForDrafting(), /paired source commit/);
+  assert.deepEqual(fixture.requests, []);
+  assert.deepEqual(fixture.fetches, []);
+});
+
+test('a failed strength request retains the committed blend for drafting', async (t) => {
+  const fixture = installSelectedAudioFixture();
+  t.after(() => fixture.dom.window.close());
+  fixture.publish({ status: 'error', desiredStrength: 65 });
+  const capture = captureAudioTracksForDrafting();
+  const request = await fixture.request;
+  fixture.respond(request.requestId);
+  const tracks = await capture;
+  assert.deepEqual(await readCapturedBytes(fixture.dom, tracks[0]!.blob), [91, 92, 93, 94]);
+  assert.deepEqual(fixture.fetches, []);
+});
+
+test('unavailable native Original buffers are not replaced with network audio', async (t) => {
+  const fixture = installSelectedAudioFixture(0);
+  t.after(() => fixture.dom.window.close());
+  const capture = captureAudioTracksForDrafting();
+  const rejection = assert.rejects(capture, /native audio buffers are not ready/);
+  const request = await fixture.request;
+  fixture.respond(request.requestId, { available: false, tracks: [] });
+  await rejection;
+  assert.deepEqual(fixture.fetches, []);
+});
+
+for (const change of ['selected-strength', 'selected-original', 'selected-variant', 'pending-strength', 'pending-pair',
+  'state-task', 'page-task', 'response-task', 'response-strength', 'response-variant', 'unavailable'] as const) {
+  test(`selected blend capture rejects ${change} without substituting original audio`, async (t) => {
+    const fixture = installSelectedAudioFixture();
+    t.after(() => fixture.dom.window.close());
+    const capture = captureAudioTracksForDrafting();
+    const rejection = assert.rejects(capture, Error);
+    const request = await fixture.request;
+    if (change === 'selected-strength') fixture.publish({ strength: 65, desiredStrength: 65 });
+    if (change === 'selected-original') fixture.publish({ strength: 0, desiredStrength: 0, variantKey: '' });
+    if (change === 'pending-strength') fixture.publish({ desiredStrength: 65 });
+    if (change === 'pending-pair') fixture.publish({ status: 'switching' });
+    if (change === 'selected-variant') fixture.publish({ variantKey: 'different-model-source' });
+    if (change === 'state-task') fixture.publish({ taskId: 'review-action-next' });
+    if (change === 'page-task') fixture.root.setAttribute(PAGE_TASK_ID_ATTRIBUTE, 'review-action-next');
+    fixture.respond(request.requestId,
+      change === 'response-task' ? { taskId: 'review-action-next' } :
+      change === 'response-strength' ? { strength: 65 } :
+      change === 'response-variant' ? { variantKey: 'different-model-source' } :
+      change === 'unavailable' ? { available: false, tracks: [] } : {});
+    await rejection;
+    assert.deepEqual(fixture.fetches, []);
+  });
+}
+
+test('selected audio ignores responses from another window and accepts only the owning page', async (t) => {
+  const fixture = installSelectedAudioFixture();
+  const foreign = new JSDOM('<main></main>');
+  t.after(() => { fixture.dom.window.close(); foreign.window.close(); });
+  const capture = captureAudioTracksForDrafting();
+  const request = await fixture.request;
+  fixture.respond(request.requestId, { available: false, tracks: [] }, foreign.window as unknown as Window);
+  fixture.respond(request.requestId);
+  const tracks = await capture;
+  assert.deepEqual(await readCapturedBytes(fixture.dom, tracks[0]!.blob), [91, 92, 93, 94]);
+  assert.deepEqual(fixture.fetches, []);
+});
+
+test('enhancement input rejects committed blend buffers instead of treating them as Originals', async (t) => {
+  const fixture = installSelectedAudioFixture();
+  t.after(() => fixture.dom.window.close());
+  const capture = captureOriginalAudioTracksForEnhancement();
+  const rejection = assert.rejects(capture, Error);
+  const request = await fixture.request;
+  fixture.respond(request.requestId);
+  await rejection;
+  assert.deepEqual(fixture.fetches, []);
 });

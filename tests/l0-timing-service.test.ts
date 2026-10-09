@@ -63,6 +63,67 @@ function dependencies(overrides: Partial<L0TimingServiceDependencies> = {}): L0T
   };
 }
 
+test('strength commits discard stale publication and never reuse another strength timing cache', async () => {
+  let currentJob = job;
+  let ready = true;
+  const mixed35Job = { ...job, audioVariantKey: 'c'.repeat(64) };
+  const mixed65Job = { ...job, audioVariantKey: 'd'.repeat(64) };
+  const mixed35Id = buildCanonicalTaskIdentity(mixed35Job);
+  const mixed65Id = buildCanonicalTaskIdentity(mixed65Job);
+  const lookedUp: string[] = [];
+  const first = Promise.withResolvers<L0TimingResponse>();
+  const published: string[] = [];
+  const requested: string[] = [];
+  const service = new L0TimingService(dependencies({
+    captureTranscript: () => currentJob,
+    currentTaskId: () => buildCanonicalTaskIdentity(currentJob),
+    isAudioSelectionReady: () => ready,
+    lookupTiming: async (_settings, key) => {
+      lookedUp.push(key);
+      // A cache hit is usable only for the exact committed-strength identity.
+      return key === mixed65Id ? { ...response, taskId: mixed35Id } : null;
+    },
+    requestTiming: async (_settings, captured) => {
+      const key = buildCanonicalTaskIdentity(captured);
+      requested.push(key);
+      return requested.length === 1 ? first.promise : { ...response, taskId: key };
+    },
+    publish: message => published.push(message.taskId)
+  }));
+  service.onLifecycleOpportunity();
+  await flushAsyncWork();
+  ready = false;
+  first.resolve(response);
+  await flushAsyncWork();
+  assert.deepEqual(published, []);
+  service.onLifecycleOpportunity();
+  await flushAsyncWork();
+  assert.deepEqual(requested, [taskId]);
+  currentJob = mixed35Job;
+  ready = true;
+  service.onLifecycleOpportunity();
+  await flushAsyncWork();
+  assert.deepEqual(requested, [taskId, mixed35Id]);
+  assert.deepEqual(published, [mixed35Id]);
+  ready = false;
+  service.onLifecycleOpportunity();
+  await flushAsyncWork();
+  assert.deepEqual(lookedUp, [taskId, mixed35Id]);
+  currentJob = mixed65Job;
+  ready = true;
+  service.onLifecycleOpportunity();
+  await flushAsyncWork();
+  assert.deepEqual(lookedUp, [taskId, mixed35Id, mixed65Id]);
+  assert.deepEqual(requested, [taskId, mixed35Id, mixed65Id]);
+  assert.deepEqual(published, [mixed35Id, mixed65Id]);
+  currentJob = mixed35Job;
+  service.onLifecycleOpportunity();
+  await flushAsyncWork();
+  assert.deepEqual(requested, [taskId, mixed35Id, mixed65Id]);
+  assert.deepEqual(published, [mixed35Id, mixed65Id]);
+  assert.deepEqual(getL0TimingAvailability(), { taskId: mixed35Id, status: 'available' });
+});
+
 test('Local timing failures retain the cause in the popup and Draft rejection', async () => {
   const settings: ExtensionSettings = { ...DEFAULT_SETTINGS, mode: 'local' };
   const failure = new Error('Local WebGPU C-denoise bundle has not been tested.');

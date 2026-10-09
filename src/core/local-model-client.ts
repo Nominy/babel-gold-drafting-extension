@@ -1,3 +1,4 @@
+import type { AudioEnhancementChunk, AudioEnhancementProgress, AudioEnhancementResult } from '@nominy/babel-babel-runtime';
 import type { PreparedL0Track } from './l0-client';
 import type { L0TimingRequestCallbacks, L0TimingQueueStatus } from './l0-timing-client';
 import { buildCanonicalTaskIdentity } from './transcript';
@@ -6,8 +7,11 @@ import {
   LOCAL_MODEL_OFFSCREEN_MESSAGE_TYPE,
   LOCAL_MODEL_OFFSCREEN_VERSION,
   encodeAudioChunk,
+  isLocalModelEnhancementProgress,
   isLocalModelOffscreenResponse,
   type LocalModelDraftRequest,
+  type LocalModelEnhanceAudioRequest,
+  type LocalModelEnhanceAudioResult,
   type LocalModelOffscreenRequest,
   type LocalModelOperation,
   type LocalModelSegmentRequest,
@@ -27,6 +31,13 @@ import type {
 } from './types';
 
 export type LocalModelMessageSender = (message: LocalModelOffscreenRequest) => Promise<unknown>;
+
+export type LocalModelProgressSubscriber = (listener: (message: unknown) => void) => () => void;
+export interface LocalAudioEnhancementCallbacks {
+  onAudioChunk: (chunk: AudioEnhancementChunk) => void | Promise<void>;
+  onProgress?: (progress: AudioEnhancementProgress) => void;
+  isCurrent: () => boolean;
+}
 
 let requestSequence = 0;
 
@@ -62,6 +73,17 @@ function defaultMessageSender(message: LocalModelOffscreenRequest): Promise<unkn
   return sendMessage(message);
 }
 
+function defaultProgressSubscriber(listener: (message: unknown) => void): () => void {
+  const runtime = globalThis.chrome?.runtime;
+  if (!runtime?.onMessage?.addListener) return () => undefined;
+  const handleMessage = (message: unknown, sender: chrome.runtime.MessageSender): false => {
+    if (sender.id === runtime.id && sender.tab === undefined) listener(message);
+    return false;
+  };
+  runtime.onMessage.addListener(handleMessage);
+  return () => runtime.onMessage.removeListener(handleMessage);
+}
+
 function emitQueueStatus(
   callbacks: L0TimingRequestCallbacks | undefined,
   status: L0TimingQueueStatus
@@ -73,7 +95,10 @@ function emitQueueStatus(
   }
 }
 
-export function createLocalModelClient(sendMessage: LocalModelMessageSender = defaultMessageSender) {
+export function createLocalModelClient(
+  sendMessage: LocalModelMessageSender = defaultMessageSender,
+  subscribeProgress: LocalModelProgressSubscriber = defaultProgressSubscriber
+) {
   async function request<T>(message: LocalModelOffscreenRequest): Promise<T> {
     let response: unknown;
     try {
@@ -96,11 +121,12 @@ export function createLocalModelClient(sendMessage: LocalModelMessageSender = de
     return response.result as T;
   }
 
-  async function uploadAudioBlob(blob: Blob, parentOperation: LocalModelOperation): Promise<string> {
+  async function uploadAudioBlob(blob: Blob, parentOperation: LocalModelOperation, transferIds?: string[]): Promise<string> {
     if (!blob || typeof blob.type !== 'string' || typeof blob.size !== 'number' || typeof blob.slice !== 'function') {
       throw new LocalModelBridgeError(parentOperation, 'invalid-request', 'Audio payload must be a Blob.');
     }
     const transferId = nextRequestId('upload');
+    transferIds?.push(transferId);
     const chunkCount = Math.max(1, Math.ceil(blob.size / LOCAL_MODEL_AUDIO_CHUNK_BYTES));
     try {
       for (let chunkIndex = 0; chunkIndex < chunkCount; chunkIndex += 1) {
@@ -142,11 +168,12 @@ export function createLocalModelClient(sendMessage: LocalModelMessageSender = de
 
   async function uploadCapturedAudioTracks(
     tracks: CapturedAudioTrack[],
-    operation: LocalModelOperation
+    operation: LocalModelOperation,
+    transferIds?: string[]
   ): Promise<WireCapturedAudioTrack[]> {
     const wireTracks: WireCapturedAudioTrack[] = [];
     for (const track of tracks) {
-      const audioTransferId = await uploadAudioBlob(track.blob, operation);
+      const audioTransferId = await uploadAudioBlob(track.blob, operation, transferIds);
       wireTracks.push({
         trackId: track.trackId,
         ...(track.speakerKey === undefined ? {} : { speakerKey: track.speakerKey }),
@@ -171,6 +198,71 @@ export function createLocalModelClient(sendMessage: LocalModelMessageSender = de
   }
 
   return {
+    async enhanceAudio(
+      taskId: string,
+      audioTracks: CapturedAudioTrack[],
+      callbacks: LocalAudioEnhancementCallbacks
+    ): Promise<AudioEnhancementResult> {
+      const transferIds: string[] = [];
+      const assertCurrent = () => {
+        if (!callbacks.isCurrent()) throw new LocalModelBridgeError('enhanceAudio', 'stale-task', 'The native audio task changed during enhancement.');
+      };
+      try {
+        assertCurrent();
+        const message: LocalModelEnhanceAudioRequest = {
+          type: LOCAL_MODEL_OFFSCREEN_MESSAGE_TYPE, version: LOCAL_MODEL_OFFSCREEN_VERSION,
+          target: 'background', requestId: nextRequestId('enhanceAudio'), operation: 'enhanceAudio',
+          taskId, audioTracks: await uploadCapturedAudioTracks(audioTracks, 'enhanceAudio', transferIds)
+        };
+        assertCurrent();
+        let progressFailure: { error: unknown } | undefined;
+        const unsubscribe = subscribeProgress((value) => {
+          if (!isLocalModelEnhancementProgress(value, 'content', message) || !callbacks.isCurrent() || progressFailure) return;
+          try {
+            callbacks.onProgress?.(value.progress);
+          } catch (error) {
+            progressFailure = { error };
+          }
+        });
+        let enhanced: LocalModelEnhanceAudioResult;
+        try {
+          enhanced = await request<LocalModelEnhanceAudioResult>(message);
+        } finally {
+          unsubscribe();
+        }
+        transferIds.push(...enhanced.tracks.map((track) => track.audioTransferId));
+        assertCurrent();
+        if (progressFailure) throw progressFailure.error;
+        for (let trackIndex = 0; trackIndex < enhanced.tracks.length; trackIndex++) {
+          const track = enhanced.tracks[trackIndex];
+          assertCurrent();
+          callbacks.onProgress?.({
+            phase: 'transferring', trackId: track.trackId, trackIndex, trackCount: enhanced.tracks.length,
+            completedChunks: 0, totalChunks: 0
+          });
+          for (let chunkIndex = 0; chunkIndex < track.chunkCount; chunkIndex++) {
+            assertCurrent();
+            const chunk = await request<AudioEnhancementChunk>({
+              type: LOCAL_MODEL_OFFSCREEN_MESSAGE_TYPE, version: LOCAL_MODEL_OFFSCREEN_VERSION,
+              target: 'background', requestId: nextRequestId('download'), operation: 'download',
+              transferId: track.audioTransferId, chunkIndex
+            });
+            assertCurrent();
+            if (chunk.trackId !== track.trackId || chunk.chunkCount !== track.chunkCount ||
+              chunk.totalBytes !== track.totalBytes) throw new LocalModelBridgeError('enhanceAudio', 'invalid-response', 'Enhanced audio chunk metadata changed while streaming.');
+            await callbacks.onAudioChunk(chunk);
+          }
+        }
+        assertCurrent();
+        return { ...enhanced, tracks: enhanced.tracks.map(({ audioTransferId: _transferId, ...metadata }) => metadata) };
+      } finally {
+        if (transferIds.length) await request({
+          type: LOCAL_MODEL_OFFSCREEN_MESSAGE_TYPE, version: LOCAL_MODEL_OFFSCREEN_VERSION,
+          target: 'background', requestId: nextRequestId('release'), operation: 'release', transferIds
+        }).catch(() => undefined); // The host also expires retained transfers when a context disappears.
+      }
+    },
+
     async generateLocalL0Timing(
       settings: ExtensionSettings,
       job: TranscriptJob,
@@ -238,3 +330,4 @@ const localModelClient = createLocalModelClient();
 export const generateLocalL0Timing = localModelClient.generateLocalL0Timing;
 export const generateLocalL0Draft = localModelClient.generateLocalL0Draft;
 export const generateLocalL0SegmentDraft = localModelClient.generateLocalL0SegmentDraft;
+export const enhanceLocalAudio = localModelClient.enhanceAudio;

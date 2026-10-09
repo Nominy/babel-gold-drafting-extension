@@ -1,32 +1,28 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readFile } from 'node:fs/promises';
-import { createHash } from 'node:crypto';
+import { assertKernelSource, kernelSourceHashes, transformBinarySource, transformProgramManagerSource, transformBackendProfileSource } from './ort-kernel-transforms.mjs';
 
 // ORT 1.29's default WebGPU bundle uses the native EP, which does not emit
 // the public JS dispatch profiler used by the neural-placement acceptance gate.
 // Build the shipped JSEP source against its matching shipped .jsep WASM instead.
 const ortDist = path.dirname(fileURLToPath(import.meta.resolve('onnxruntime-web')));
-export const ortJsepBuildOptions = {
-  plugins: [{ name: 'babel-webgpu-fp32-accumulation', setup(build) {
-    build.onLoad({ filter: /[\\/]onnxruntime-web[\\/]lib[\\/]wasm[\\/]jsep[\\/]webgpu[\\/]program-manager\.ts$/ }, async ({ path: filename }) => {
+// Profiling hooks are compiled only into the private external harness.
+export function createOrtJsepBuildOptions({ profile = false, baseline = false } = {}) {
+  return {
+  plugins: [{ name: 'babel-webgpu-pinned-kernels', setup(build) {
+    build.onLoad({ filter: /[\\/]onnxruntime-web[\\/]lib[\\/]wasm[\\/]jsep[\\/](?:webgpu[\\/]program-manager|webgpu[\\/]ops[\\/]binary-op|backend-webgpu)\.ts$/ }, async ({ path: filename }) => {
       const source = await readFile(filename, 'utf8');
-      const pinned = {
-        'program-manager.ts': '194b4b5d5afc55402dc840c8db4570945e0fc0651f39cb2d1955208898d5e331',
-        'ops/3rd-party/matmul_packed_webgpu.ts': '78aa576c8cd162b38b30e76895453caca4870fbc2a404306ff625b2f869313f4',
-        'ops/conv-grouped.ts': '23c29bcf97313acbf010e30c85109fe8cd7d8a62fc752b153532c34eb81ef288'
-      };
-      await Promise.all(Object.entries(pinned).map(async ([relative, expected]) => {
-        const bytes = await readFile(path.resolve(path.dirname(filename), relative));
-        if (createHash('sha256').update(bytes).digest('hex') !== expected) {
-          throw new Error(`ORT 1.29 mixed precision shader source changed: ${relative}. Revalidate WebGPU kernels before building.`);
-        }
-      }));
-      const original = 'const userCode = programInfo.getShaderSource(shaderHelper);';
-      if (source.split(original).length !== 2) throw new Error('ORT JSEP shader compilation contract changed');
-      const helper = fileURLToPath(new URL('../src/core/webgpu-fp32-accumulation.ts', import.meta.url));
-      return { loader: 'ts', contents: `import { promoteFp16Accumulation } from ${JSON.stringify(helper)};\n` +
-        source.replace(original, 'const userCode = promoteFp16Accumulation(programInfo.getShaderSource(shaderHelper));') };
+      const root = path.resolve(ortDist, '../lib/wasm/jsep');
+      const relative = path.relative(root, filename).replaceAll('\\', '/');
+      assertKernelSource(relative, source);
+      if (relative === 'webgpu/program-manager.ts') {
+        await Promise.all(Object.keys(kernelSourceHashes).map(async (name) =>
+          assertKernelSource(name, await readFile(path.resolve(root, name)))));
+        return { loader: 'ts', contents: transformProgramManagerSource(source, { profile }) };
+      }
+      if (relative === 'webgpu/ops/binary-op.ts') return { loader: 'ts', contents: transformBinarySource(source, { profile, baseline }) };
+      return { loader: 'ts', contents: profile ? transformBackendProfileSource(source) : source };
     });
   } }],
   alias: { 'onnxruntime-web/webgpu': path.resolve(ortDist, '../lib/index.ts') },
@@ -45,4 +41,6 @@ export const ortJsepBuildOptions = {
     'BUILD_DEFS.ESM_IMPORT_META_URL': 'undefined',
     'BUILD_DEFS.BUNDLE_FILENAME': '""'
   }
-};
+  };
+}
+export const ortJsepBuildOptions = createOrtJsepBuildOptions();

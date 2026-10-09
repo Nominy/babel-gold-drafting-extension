@@ -1,4 +1,5 @@
-import { captureAudioTracksForDrafting } from '../core/audio-cues';
+import { AUDIO_ENHANCEMENT_STATE_ATTRIBUTE, AUDIO_ENHANCEMENT_STATE_EVENT, readAudioEnhancementState } from '@nominy/babel-babel-runtime';
+import { captureAudioTracksForDrafting, isAudioSelectionReady } from '../core/audio-cues';
 import { AUDIO_ENABLE_CAPTURE_MESSAGE_TYPE } from '../core/audio-intercept-protocol';
 import { generateL0Timing, lookupL0Timing, prepareL0TimingTracks, type L0TimingQueueStatus, type L0TimingRequestCallbacks } from '../core/l0-timing-client';
 import { generateLocalL0Draft, generateLocalL0Timing, LocalModelBridgeError } from '../core/local-model-client';
@@ -63,6 +64,7 @@ export interface L0TimingServiceDependencies {
   currentPathname: () => string;
   captureAudio: () => Promise<CapturedAudioTrack[]>;
   getSettings: () => Promise<ExtensionSettings>;
+  isAudioSelectionReady?: () => boolean;
   localModelStatus?: typeof getLocalModelStatus;
   lookupTiming: (settings: ExtensionSettings, taskId: string) => Promise<L0TimingResponse | null>;
   requestLocalDraft: typeof generateLocalL0Draft;
@@ -131,6 +133,10 @@ export class L0TimingService {
     const settings = await this.dependencies.getSettings();
     this.activateSettings(settings);
     if (!this.isTaskCurrent(taskId)) return;
+    if (this.dependencies.isAudioSelectionReady?.() === false) {
+      publishL0TimingAvailability({ taskId, status: 'preparing' });
+      return;
+    }
     const state = this.getTaskState(taskId, settings);
     // Babel temporarily redraws rows without speaker labels. The canonical task
     // remains the same; its valid request/cache must survive that DOM transition.
@@ -182,7 +188,8 @@ export class L0TimingService {
   }
 
   private isOwnerCurrent(taskId: string, state: TimingTaskState): boolean {
-    return state.generation === this.generation && this.isTaskCurrent(taskId);
+    return state.generation === this.generation && this.isTaskCurrent(taskId) &&
+      this.dependencies.isAudioSelectionReady?.() !== false;
   }
 
   private async verifyOwner(taskId: string, state: TimingTaskState): Promise<boolean> {
@@ -317,6 +324,9 @@ export class L0TimingService {
   async waitForTiming(job: TranscriptJob, settings: ExtensionSettings): Promise<void> {
     const taskId = buildCanonicalTaskIdentity(job);
     const pathname = this.dependencies.currentPathname();
+    if (this.dependencies.isAudioSelectionReady?.() === false) {
+      throw new Error('Audio enhancement is preparing or switching. Wait for the selected audio to finish loading, then generate again.');
+    }
     const saved = await this.dependencies.getSettings();
     if (this.engine(saved) !== this.engine(settings)) throw new Error('The drafting mode changed while waiting for L0 timing.');
     if (settings.mode === 'local') {
@@ -492,6 +502,7 @@ export function registerL0TimingService(): L0TimingService {
     currentPathname: () => window.location.pathname,
     captureAudio: () => captureAudioTracksForDrafting(),
     getSettings: () => loadSettings(),
+    isAudioSelectionReady: () => isAudioSelectionReady(),
     lookupTiming: (settings, taskId) => settings.mode === 'simple'
       ? lookupMaiL0Timing(settings, taskId)
       : lookupL0Timing(settings, taskId),
@@ -509,6 +520,21 @@ export function registerL0TimingService(): L0TimingService {
     }
   });
   setL0TimingRetryHandler(() => service.retryCurrentTask());
+  let lastAudioSelection = '';
+  const onAudioSelection = () => {
+    const state = readAudioEnhancementState();
+    const selection = state ? JSON.stringify([state.taskId, state.status, state.strength, state.desiredStrength, state.variantKey]) : '';
+    if (selection === lastAudioSelection) return;
+    lastAudioSelection = selection;
+    service.onLifecycleOpportunity();
+  };
+  const audioObserver = new MutationObserver(onAudioSelection);
+  audioObserver.observe(document.documentElement, { attributes: true, attributeFilter: [AUDIO_ENHANCEMENT_STATE_ATTRIBUTE] });
+  window.addEventListener(AUDIO_ENHANCEMENT_STATE_EVENT, onAudioSelection);
+  window.addEventListener('pagehide', () => {
+    audioObserver.disconnect();
+    window.removeEventListener(AUDIO_ENHANCEMENT_STATE_EVENT, onAudioSelection);
+  }, { once: true });
   activeTimingService = service;
   return service;
 }

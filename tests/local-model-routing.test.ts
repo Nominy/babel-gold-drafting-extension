@@ -160,12 +160,22 @@ test('L0 broker capability uses the fixed supplier readiness for opt-in and remo
   const ownTaskSettings = { ...DEFAULT_SETTINGS, mode: 'local' as const, openRouterApiKey: '', aiBrokerProvider: 'local-gemini-nano' as const };
   const untested = await resolveBrokerCapabilities(ownTaskSettings, async () => ({
     state: 'ready', completedBytes: 1, totalBytes: 1, tested: false
-  }));
-  assert.deepEqual(untested, { transcribeSegment: false, transcribeSegmentL0: false, redistributeText: false });
+  }), async () => true);
+  assert.deepEqual(untested, { transcribeSegment: false, transcribeSegmentL0: false, redistributeText: false, enhanceAudio: true });
   const tested = await resolveBrokerCapabilities(ownTaskSettings, async () => ({
     state: 'ready', completedBytes: 1, totalBytes: 1, tested: true
-  }));
-  assert.deepEqual(tested, { transcribeSegment: true, transcribeSegmentL0: true, redistributeText: false });
+  }), async () => true);
+  assert.deepEqual(tested, { transcribeSegment: true, transcribeSegmentL0: true, redistributeText: false, enhanceAudio: true });
+  for (const mode of ['simple', 'advanced', 'local'] as const) {
+    const capabilities = await resolveBrokerCapabilities({ ...DEFAULT_SETTINGS, mode, openRouterApiKey: '' }, async () => {
+      throw new Error('ASR is not installed');
+    }, async () => true);
+    assert.equal(capabilities.enhanceAudio, true, `Packaged enhancement is independent of ${mode} ASR setup and paid keys`);
+    const denied = await resolveBrokerCapabilities({ ...DEFAULT_SETTINGS, mode, openRouterApiKey: '' }, async () => {
+      throw new Error('ASR is not installed');
+    }, async () => false);
+    assert.equal(denied.enhanceAudio, false, 'A missing grader cannot advertise enhancement');
+  }
 });
 
 test('Simple native transcription ignores Advanced engine preferences and never falls back after a cloud failure', async () => {

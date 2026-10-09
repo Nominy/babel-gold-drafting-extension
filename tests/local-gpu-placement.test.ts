@@ -36,6 +36,27 @@ test('empty, partial, and metadata-only GPU traces cannot certify learned infere
   assert.throws(() => new GpuRunAudit(graph).finish(2), /2 required neural nodes/);
 });
 
+test('delayed timestamp readback must complete before inference is certified', async () => {
+  const graph = policy([node('embedding', 'Gather', 'gpu'), node('projection', 'MatMul', 'gpu')]).graphs.context;
+  const audit = new GpuRunAudit(graph);
+  audit.observe(dispatch('embedding', 'Gather'));
+  let settled = false;
+  const pending = audit.finishAfterDispatches(1).then(result => { settled = true; return result; });
+  await Promise.resolve();
+  assert.equal(settled, false);
+  audit.observe(dispatch('projection', 'MatMul'));
+  const result = await pending;
+  assert.equal(result.requiredGpuNodes, 2);
+  assert.equal(result.verifiedGpuNodes, 2);
+  const missing = new GpuRunAudit(graph);
+  missing.observe(dispatch('embedding', 'Gather'));
+  await assert.rejects(missing.finishAfterDispatches(1, 0), /projection/);
+  const invalid = new GpuRunAudit(graph);
+  const rejected = assert.rejects(invalid.finishAfterDispatches(1), /Invalid GPU dispatch evidence/);
+  invalid.observe(dispatch('embedding', 'MatMul'));
+  await rejected;
+});
+
 test('renamed nodes, wrong operators, and invalid timestamps fail closed', () => {
   const graph = policy([node('projection', 'MatMul', 'gpu')]).graphs.context;
   const renamed = new GpuRunAudit(graph);

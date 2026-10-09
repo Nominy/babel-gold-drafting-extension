@@ -8,3 +8,4 @@ babel-gold-drafting-extension/
 dist.zip
 babel-gold-drafting-extension-*.zip
 .tmp.store.manifest.json
+__pycache__/

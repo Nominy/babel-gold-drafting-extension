@@ -2,6 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import {
+  AUDIO_ENHANCEMENT_PROTOCOL_VERSION,
+  AUDIO_ENHANCEMENT_STATE_ATTRIBUTE,
+  type AudioEnhancementState
+} from '@nominy/babel-babel-runtime';
+import {
   applyDraftRows,
   buildCanonicalTaskIdentity,
   buildDiffPreviewItems,
@@ -144,6 +149,87 @@ test('captureTranscriptJob uses the main-world published review action in the is
   const job = captureTranscriptJob(dom.window.document, dom.window.location);
 
   assert.equal(job.jobId, 'review-action-bridged');
+});
+
+test('committed audio strengths partition cache identity and Original restores its canonical identity', (t) => {
+  const dom = installDom(`
+    <table><tbody><tr>
+      <td>1</td><td>Speaker A</td><td>00:00:01.0</td><td>00:00:03.0</td>
+      <td><textarea placeholder="What was said">privet</textarea></td>
+    </tr></tbody></table>
+  `);
+  t.after(() => dom.window.close());
+  const root = dom.window.document.documentElement;
+  root.setAttribute(PAGE_TASK_ID_ATTRIBUTE, 'review-action-42');
+  const textarea = dom.window.document.querySelector<HTMLTextAreaElement>('textarea')!;
+  attachFiber(textarea, 'annotation-a', 'recording-a');
+  const captureIdentity = () => buildCanonicalTaskIdentity(captureTranscriptJob());
+  const originalIdentity = captureIdentity();
+  assert.equal(originalIdentity, '{"version":1,"baseTaskId":"review-action-42","stableLaneIds":[]}');
+  const state: AudioEnhancementState = {
+    version: AUDIO_ENHANCEMENT_PROTOCOL_VERSION,
+    taskId: 'review-action-42',
+    status: 'idle',
+    strength: 0,
+    desiredStrength: 0,
+    revision: 1,
+    variantKey: ''
+  };
+  const publish = (changes: Partial<AudioEnhancementState>) => {
+    Object.assign(state, changes);
+    root.setAttribute(AUDIO_ENHANCEMENT_STATE_ATTRIBUTE, JSON.stringify(state));
+  };
+  publish({});
+  assert.equal(captureIdentity(), originalIdentity);
+  const cache = new Map([[originalIdentity, 'original draft']]);
+  const variant = `zipenhancer:${'a'.repeat(64)}:${'b'.repeat(64)}`;
+  publish({ status: 'ready', strength: 100, desiredStrength: 100, variantKey: variant, revision: 2 });
+  const enhancedJob = captureTranscriptJob();
+  assert.equal(enhancedJob.audioVariantKey, variant);
+  const enhancedIdentity = captureIdentity();
+  assert.notEqual(enhancedIdentity, originalIdentity);
+  assert.equal(cache.has(enhancedIdentity), false);
+  cache.set(enhancedIdentity, 'enhanced draft');
+  assert.equal(cache.get(captureIdentity()), 'enhanced draft');
+
+  // UI revisions and transcript edits do not change the selected model/source identity.
+  textarea.value = 'edited transcript';
+  publish({ revision: 3, message: 'Ready' });
+  assert.equal(captureIdentity(), enhancedIdentity);
+  // Requested strengths keep the last committed identity until the paired source commit.
+  publish({ status: 'switching', desiredStrength: 35 });
+  assert.equal(captureIdentity(), enhancedIdentity);
+  const mixedVariant = 'e'.repeat(64);
+  publish({ status: 'ready', strength: 35, variantKey: mixedVariant });
+  const mixedIdentity = captureIdentity();
+  assert.notEqual(mixedIdentity, enhancedIdentity);
+  assert.notEqual(mixedIdentity, originalIdentity);
+  assert.equal(cache.has(mixedIdentity), false);
+  cache.set(mixedIdentity, '35 percent draft');
+  publish({ status: 'switching', desiredStrength: 65 });
+  assert.equal(captureIdentity(), mixedIdentity);
+  publish({ status: 'ready', strength: 65, variantKey: 'f'.repeat(64) });
+  assert.notEqual(captureIdentity(), mixedIdentity);
+  assert.equal(cache.has(captureIdentity()), false);
+  publish({ strength: 35, desiredStrength: 35, variantKey: mixedVariant });
+  assert.equal(cache.get(captureIdentity()), '35 percent draft');
+  for (const nextVariant of [
+    `zipenhancer:${'c'.repeat(64)}:${'b'.repeat(64)}`,
+    `zipenhancer:${'a'.repeat(64)}:${'d'.repeat(64)}`
+  ]) {
+    publish({ variantKey: nextVariant });
+    assert.notEqual(captureIdentity(), enhancedIdentity);
+    assert.notEqual(captureIdentity(), originalIdentity);
+    assert.equal(cache.has(captureIdentity()), false);
+  }
+  publish({ strength: 0, desiredStrength: 0, variantKey: '', revision: 4 });
+  assert.equal(captureTranscriptJob().audioVariantKey, undefined);
+  assert.equal(captureIdentity(), originalIdentity);
+  assert.equal(cache.get(captureIdentity()), 'original draft');
+
+  // A Helper state left behind by another review must not partition this task's cache.
+  publish({ taskId: 'review-action-other', strength: 100, desiredStrength: 100, variantKey: variant });
+  assert.equal(captureIdentity(), originalIdentity);
 });
 
 test('isolated-world rows match recording lanes and remain editable after an empty transcript is populated', (t) => {

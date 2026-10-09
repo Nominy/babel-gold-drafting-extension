@@ -1,3 +1,4 @@
+import type { AudioEnhancementChunk, AudioEnhancementProgress, AudioEnhancementResult } from '@nominy/babel-babel-runtime';
 import type {
   AiBrokerProvider,
   BrokerRedistributionGroup,
@@ -12,7 +13,7 @@ export const AI_BROKER_PORT_NAME = 'babel-gold-drafting:ai-broker-port';
 export const AI_BROKER_INTERNAL_PORT_NAME = 'babel-gold-drafting:ai-broker-tab-port';
 export const AI_BROKER_EXTENSION_ID_ATTR = 'data-babel-gold-drafting-extension-id';
 
-export type AiBrokerOperation = 'ping' | 'transcribeSegment' | 'transcribeSegmentL0' | 'redistributeText';
+export type AiBrokerOperation = 'ping' | 'transcribeSegment' | 'transcribeSegmentL0' | 'redistributeText' | 'enhanceAudio';
 
 export interface AiBrokerBaseRequest {
   type: typeof AI_BROKER_EXTERNAL_MESSAGE_TYPE;
@@ -41,11 +42,18 @@ export interface AiBrokerRedistributeTextRequest extends AiBrokerBaseRequest {
   groups: BrokerRedistributionGroup[];
 }
 
+
+export interface AiBrokerEnhanceAudioRequest extends AiBrokerBaseRequest {
+  operation: 'enhanceAudio';
+  /** Native reviewActionId; audio is captured by Gold, never accepted from Helper. */
+  taskId: string;
+}
 export type AiBrokerExternalRequest =
   | AiBrokerPingRequest
   | AiBrokerTranscribeSegmentRequest
   | AiBrokerTranscribeSegmentL0Request
-  | AiBrokerRedistributeTextRequest;
+  | AiBrokerRedistributeTextRequest
+  | AiBrokerEnhanceAudioRequest;
 
 type AiBrokerInternalRequestFor<T extends AiBrokerExternalRequest> = Omit<T, 'type'> & {
   type: typeof AI_BROKER_INTERNAL_MESSAGE_TYPE;
@@ -55,7 +63,8 @@ export type AiBrokerInternalRequest =
   | AiBrokerInternalRequestFor<AiBrokerPingRequest>
   | AiBrokerInternalRequestFor<AiBrokerTranscribeSegmentRequest>
   | AiBrokerInternalRequestFor<AiBrokerTranscribeSegmentL0Request>
-  | AiBrokerInternalRequestFor<AiBrokerRedistributeTextRequest>;
+  | AiBrokerInternalRequestFor<AiBrokerRedistributeTextRequest>
+  | AiBrokerInternalRequestFor<AiBrokerEnhanceAudioRequest>;
 
 export interface AiBrokerPingResponse {
   ok: true;
@@ -65,6 +74,7 @@ export interface AiBrokerPingResponse {
     transcribeSegment: boolean;
     transcribeSegmentL0: boolean;
     redistributeText: boolean;
+    enhanceAudio: boolean;
   };
 }
 
@@ -94,6 +104,7 @@ export interface AiBrokerUnavailableResponse {
   ok: false;
   reason:
     | 'invalid-request'
+    | 'unsupported-operation'
     | 'provider-local-gemini-nano'
     | 'remote-not-configured'
     | 'local-models-unavailable'
@@ -110,6 +121,7 @@ export type AiBrokerResponse =
   | AiBrokerTranscribeSegmentResponse
   | AiBrokerTranscribeSegmentL0Response
   | AiBrokerRedistributeTextResponse
+  | AudioEnhancementResult
   | AiBrokerUnavailableResponse;
 
 export interface AiBrokerPortEventMessage {
@@ -118,6 +130,14 @@ export interface AiBrokerPortEventMessage {
   operation: AiBrokerOperation;
   message?: string;
   elapsedMs?: number;
+}
+
+export interface AiBrokerEnhancementProgressEventMessage {
+  type: 'event';
+  event: 'enhancement-progress';
+  operation: 'enhanceAudio';
+  progress: AudioEnhancementProgress;
+  message?: string;
 }
 
 export interface AiBrokerPortResultMessage {
@@ -132,6 +152,8 @@ export interface AiBrokerPortErrorMessage {
 
 export type AiBrokerPortMessage =
   | AiBrokerPortEventMessage
+  | AiBrokerEnhancementProgressEventMessage
+  | AudioEnhancementChunk
   | AiBrokerPortResultMessage
   | AiBrokerPortErrorMessage;
 

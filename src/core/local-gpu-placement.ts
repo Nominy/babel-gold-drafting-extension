@@ -109,6 +109,7 @@ export class GpuRunAudit {
   private readonly observed = new Set<string>();
   private programs = 0;
   private error: Error | null = null;
+  private notifyDispatch: (() => void) | null = null;
 
   constructor(private readonly graph: PlacementGraph) {
     this.required = new Map(graph.nodes.filter((node) => node.placement === 'gpu').map((node) => [node.name, node]));
@@ -121,10 +122,27 @@ export class GpuRunAudit {
       !Number.isSafeInteger(data.startTime) || !Number.isSafeInteger(data.endTime) ||
       data.endTime < data.startTime) {
       this.error = new Error(`Invalid GPU dispatch evidence for ${node.name}.`);
+      this.notifyDispatch?.();
       return;
     }
     this.observed.add(node.name);
     this.programs += 1;
+    this.notifyDispatch?.();
+  }
+
+  async finishAfterDispatches(verifiedRuns: number, timeoutMs = 5000): Promise<GraphPlacementDiagnostic> {
+    // ORT submits timestamp-buffer mapAsync callbacks separately from queue completion.
+    // Keep this run's observer installed until every required dispatch is read back.
+    if (!this.error && this.observed.size !== this.required.size) {
+      const { promise, resolve } = Promise.withResolvers<void>();
+      const timeout = setTimeout(resolve, timeoutMs);
+      this.notifyDispatch = () => {
+        if (this.error || this.observed.size === this.required.size) resolve();
+      };
+      try { await promise; }
+      finally { clearTimeout(timeout); this.notifyDispatch = null; }
+    }
+    return this.finish(verifiedRuns);
   }
 
   finish(verifiedRuns: number): GraphPlacementDiagnostic {

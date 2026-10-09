@@ -1,6 +1,7 @@
 import { BertTokenizer } from '@huggingface/transformers';
 import { INFERENCE_RELEASE, assertReleasedGraphs } from './inference-release';
 import * as ort from 'onnxruntime-web/webgpu';
+import { runExclusiveGpuInference } from './local-gpu-run-queue';
 
 import { CHECKPOINT_FRONTEND_BF16 } from './gigaam-frontend-buffers';
 import { denoiseForActivity } from './ffmpeg-audio-denoise';
@@ -145,16 +146,7 @@ interface HardwareGpuDevice {
   queue: { onSubmittedWorkDone: () => Promise<void> };
   lost: Promise<{ message: string }>;
 }
-interface HardwareGpuAdapter {
-  isFallbackAdapter?: boolean;
-  features: { has: (feature: string) => boolean };
-  limits: GpuLimits;
-  info: { vendor: string; architecture: string; device: string; description: string; isFallbackAdapter?: boolean };
-  requestDevice: (options: { requiredFeatures: string[]; requiredLimits: GpuLimits }) => Promise<HardwareGpuDevice>;
-}
-interface HardwareGpu {
-  requestAdapter: (options: { powerPreference: string; forceFallbackAdapter: boolean }) => Promise<HardwareGpuAdapter | null>;
-}
+type HardwareGpuAdapter = GPUAdapter & { readonly isFallbackAdapter?: boolean };
 type CachedLane = { pcmSha256: string; tokens: LocalWord[]; labelIds: Uint8Array; ranges: ReturnType<typeof buildActivityRows> };
 type CachedTask = { identity: string; timing: L0TimingResponse; lanes: Map<string, CachedLane> };
 const taskCache = new Map<string, CachedTask>();
@@ -164,8 +156,6 @@ let adapterDiagnostic: LocalAdapterDiagnostic | null = null;
 let cDenoiseConfigPromise: Promise<CDenoiseConfig> | null = null;
 let placementPolicyPromise: Promise<PlacementPolicy> | null = null;
 let gpuDevice: HardwareGpuDevice | null = null;
-let activeGpuAudit: GpuRunAudit | null = null;
-let inferenceQueue: Promise<void> = Promise.resolve();
 const placementDiagnostics = new Map<string, GraphPlacementDiagnostic>();
 
 let asrSessionPromise: Promise<Session> | null = null;
@@ -570,10 +560,9 @@ function configureOrtRuntime(): void {
   // every required source compute node has actual GPU dispatch evidence.
   ort.env.wasm.numThreads = 1;
   ort.env.wasm.wasmPaths = runtime.getURL('dist/vendor/ort/');
-  ort.env.webgpu.profiling = {
-    mode: 'default',
-    ondata: (data) => activeGpuAudit?.observe(data)
-  };
+  // Initialization must not replace another model's in-flight observer.
+  ort.env.webgpu.profiling ??= { mode: 'default' };
+  ort.env.webgpu.profiling.mode = 'default';
   ortConfigured = true;
 }
 
@@ -633,21 +622,21 @@ async function getPlacementPolicy(): Promise<PlacementPolicy> {
 function auditSession(session: Session, graph: PlacementGraph): Session {
   const run = session.run;
   session.run = ((...args: Parameters<Session['run']>) => {
-    const audited = inferenceQueue.then(async () => {
+    const audited = runExclusiveGpuInference(async () => {
       if (!gpuDevice) throw new Error('The hardware WebGPU audit device is unavailable.');
       const device = gpuDevice;
-      // ORT registers profiling-buffer mapAsync() calls in flush() before run()
-      // resolves. WebGPU #promise-ordering guarantees these settle before a
-      // subsequently requested onSubmittedWorkDone(): no timers or log hooks.
+      // Drain prior GPU work before installing this run's profiling observer.
+      // Dispatch readback is awaited separately before accepting its outputs.
       await device.queue.onSubmittedWorkDone();
       const audit = new GpuRunAudit(graph);
-      activeGpuAudit = audit;
+      const profiling = ort.env.webgpu.profiling!, previousObserver = profiling.ondata;
+      profiling.ondata = data => audit.observe(data);
       let outputs: ort.InferenceSession.ReturnType | undefined;
       try {
         outputs = await run.apply(session, args);
         await device.queue.onSubmittedWorkDone();
         const previous = placementDiagnostics.get(graph.path);
-        placementDiagnostics.set(graph.path, audit.finish((previous?.verifiedRuns ?? 0) + 1));
+        placementDiagnostics.set(graph.path, await audit.finishAfterDispatches((previous?.verifiedRuns ?? 0) + 1));
         return outputs;
       } catch (error) {
         placementDiagnostics.delete(graph.path);
@@ -655,10 +644,9 @@ function auditSession(session: Session, graph: PlacementGraph): Session {
         throw error;
       } finally {
         try { await device.queue.onSubmittedWorkDone(); }
-        finally { activeGpuAudit = null; }
+        finally { profiling.ondata = previousObserver; }
       }
     });
-    inferenceQueue = audited.then(() => undefined, () => undefined);
     return audited;
   }) as Session['run'];
   return session;
@@ -667,9 +655,10 @@ function auditSession(session: Session, graph: PlacementGraph): Session {
 async function requireHardwareGpu(): Promise<void> {
   if (!gpuPromise) gpuPromise = (async () => {
     const config = await getCDenoiseConfig();
-    const gpu = (navigator as Navigator & { gpu?: HardwareGpu }).gpu;
+    const gpu = navigator.gpu;
     if (!gpu) throw new Error('WebGPU is unavailable. Enable hardware acceleration and use a supported Chrome GPU; Local has no CPU/cloud fallback.');
-    const adapter = await gpu.requestAdapter({ powerPreference: 'high-performance', forceFallbackAdapter: false });
+    const existingAdapter = ort.env.webgpu.adapter as HardwareGpuAdapter | undefined;
+    const adapter = (existingAdapter ?? await gpu.requestAdapter({ powerPreference: 'high-performance', forceFallbackAdapter: false })) as HardwareGpuAdapter | null;
     if (!adapter || (adapter.info.isFallbackAdapter ?? adapter.isFallbackAdapter) !== false || !adapter.features.has('shader-f16')) throw new Error('Local C-denoise needs a confirmed hardware WebGPU adapter with shader-f16. No CPU/cloud fallback is allowed.');
     if (!adapter.features.has('timestamp-query')) throw new Error('Strict neural WebGPU placement requires hardware timestamp-query profiling. This GPU cannot prove dispatch placement; no CPU neural results are accepted.');
     const required = config.required_gpu_buffer_bytes;
@@ -678,7 +667,7 @@ async function requireHardwareGpu(): Promise<void> {
     }
     // The pinned JSEP backend owns its device. Supplying this confirmed adapter
     // keeps hardware selection exact without allocating an unused second device.
-    ort.env.webgpu.adapter = adapter;
+    if (!existingAdapter) ort.env.webgpu.adapter = adapter;
     const info = adapter.info;
     adapterDiagnostic = Object.freeze({ vendor: info.vendor, architecture: info.architecture, device: info.device, description: info.description,
       isFallbackAdapter: false, shaderF16: true, maxBufferSize: adapter.limits.maxBufferSize, maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize });

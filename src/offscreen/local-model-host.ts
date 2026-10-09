@@ -1,3 +1,5 @@
+import { enhanceAudioTracks } from '../core/audio-enhancement-runtime';
+import { requireReviewGraderAccess } from '../core/review-grader-access';
 import type { PreparedL0Track } from '../core/l0-client';
 import { IS_DEV_C_DENOISE, isBrowserLocalMode } from '../core/settings';
 import { buildCanonicalTaskIdentity } from '../core/transcript';
@@ -11,14 +13,22 @@ import {
 import { createVolunteer, defaultVolunteerDependencies, loadVolunteerSettings } from './volunteer';
 import { isVolunteerMessage } from '../core/volunteer-protocol';
 import {
+  LOCAL_MODEL_AUDIO_CHUNK_BYTES,
   LOCAL_MODEL_AUDIO_TRANSFER_STALE_MS,
   LOCAL_MODEL_MAX_BUFFERED_AUDIO_BYTES,
   LOCAL_MODEL_OFFSCREEN_MESSAGE_TYPE,
   LOCAL_MODEL_OFFSCREEN_VERSION,
   createLocalModelFailure,
   decodeAudioChunk,
+  encodeAudioChunk,
   isLocalModelOffscreenRequest,
   type LocalModelDraftSuccessResponse,
+  type LocalModelDownloadRequest,
+  type LocalModelDownloadSuccessResponse,
+  type LocalModelEnhanceAudioSuccessResponse,
+  type LocalModelEnhancementProgressMessage,
+  type LocalModelReleaseRequest,
+  type LocalModelReleaseSuccessResponse,
   type LocalModelOffscreenRequest,
   type LocalModelOffscreenResponse,
   type LocalModelSegmentSuccessResponse,
@@ -59,6 +69,9 @@ export interface LocalModelHostOptions {
   now?: () => number;
   maxBufferedBytes?: number;
   staleTransferMs?: number;
+  enhanceAudio?: typeof enhanceAudioTracks;
+  authorizeEnhancement?: () => Promise<AbortSignal>;
+  onProgress?: (message: LocalModelEnhancementProgressMessage) => void | Promise<void>;
 }
 
 export interface LocalModelHost {
@@ -86,6 +99,14 @@ type CompleteAudioTransfer = {
 
 type AudioTransfer = PendingAudioTransfer | CompleteAudioTransfer;
 
+type OutputAudioTransfer = {
+  bytes: Uint8Array<ArrayBuffer>;
+  trackId: string;
+  chunkCount: number;
+  nextChunkIndex: number;
+  expires: ReturnType<typeof setTimeout>;
+};
+
 class InvalidAudioTransferError extends Error {
   constructor(message: string) {
     super(message);
@@ -105,14 +126,46 @@ export function createLocalModelHost(
   const maxBufferedBytes = options.maxBufferedBytes ?? LOCAL_MODEL_MAX_BUFFERED_AUDIO_BYTES;
   const staleTransferMs = options.staleTransferMs ?? LOCAL_MODEL_AUDIO_TRANSFER_STALE_MS;
   const transfers = new Map<string, AudioTransfer>();
+  const outputs = new Map<string, OutputAudioTransfer>();
   const timings = new Map<string, L0TimingResponse>();
   let bufferedBytes = 0;
   let inferenceTail: Promise<void> = Promise.resolve();
+  let observedEnhancementGrant: AbortSignal | undefined;
 
+  function discardOutput(transferId: string): void {
+    const output = outputs.get(transferId);
+    if (!output) return;
+    clearTimeout(output.expires);
+    bufferedBytes -= output.bytes.byteLength;
+    outputs.delete(transferId);
+  }
+
+  function handleDownload(request: LocalModelDownloadRequest): LocalModelDownloadSuccessResponse {
+    const output = outputs.get(request.transferId);
+    if (!output || request.chunkIndex !== output.nextChunkIndex || request.chunkIndex >= output.chunkCount) {
+      throw new InvalidAudioTransferError(`Enhanced audio transfer ${request.transferId} is missing, expired, or requested out of order.`);
+    }
+    const start = request.chunkIndex * LOCAL_MODEL_AUDIO_CHUNK_BYTES;
+    const dataBase64 = encodeAudioChunk(output.bytes.subarray(start, Math.min(start + LOCAL_MODEL_AUDIO_CHUNK_BYTES, output.bytes.length)));
+    output.nextChunkIndex++;
+    const result = { type: 'audio-chunk' as const, trackId: output.trackId, chunkIndex: request.chunkIndex,
+      chunkCount: output.chunkCount, totalBytes: output.bytes.byteLength, dataBase64 };
+    if (output.nextChunkIndex === output.chunkCount) discardOutput(request.transferId);
+    return { type: LOCAL_MODEL_OFFSCREEN_MESSAGE_TYPE, version: LOCAL_MODEL_OFFSCREEN_VERSION,
+      requestId: request.requestId, operation: 'download', ok: true, result };
+  }
+
+  function handleRelease(request: LocalModelReleaseRequest): LocalModelReleaseSuccessResponse {
+    consumeTransfers(request.transferIds);
+    for (const transferId of request.transferIds) discardOutput(transferId);
+    return { type: LOCAL_MODEL_OFFSCREEN_MESSAGE_TYPE, version: LOCAL_MODEL_OFFSCREEN_VERSION,
+      requestId: request.requestId, operation: 'release', ok: true, result: { released: true } };
+  }
   function discardTransfer(transferId: string, transfer: AudioTransfer): void {
     bufferedBytes -= transfer.state === 'pending' ? transfer.receivedBytes : transfer.bufferedBytes;
     transfers.delete(transferId);
   }
+
 
   function cleanStaleTransfers(timestamp: number): void {
     for (const [transferId, transfer] of transfers) {
@@ -247,10 +300,49 @@ export function createLocalModelHost(
   }
 
   async function execute(
-    request: Exclude<LocalModelOffscreenRequest, LocalModelUploadRequest>
+    request: Exclude<LocalModelOffscreenRequest, LocalModelUploadRequest | LocalModelDownloadRequest | LocalModelReleaseRequest>,
+    enhancementAccess?: AbortSignal
   ): Promise<LocalModelOffscreenResponse> {
     cleanStaleTransfers(now());
     try {
+      if (request.operation === 'enhanceAudio') {
+        if (!enhancementAccess) throw new Error('This operation is unavailable.');
+        enhancementAccess.throwIfAborted();
+        const tracks = resolveCapturedAudioTracks(request.audioTracks);
+        const batch = await (options.enhanceAudio ?? enhanceAudioTracks)(tracks, progress => {
+          enhancementAccess.throwIfAborted();
+          return options.onProgress?.({
+            type: LOCAL_MODEL_OFFSCREEN_MESSAGE_TYPE, version: LOCAL_MODEL_OFFSCREEN_VERSION,
+            target: 'background', event: 'enhancement-progress', operation: 'enhanceAudio',
+            requestId: request.requestId, taskId: request.taskId, progress
+          });
+        }, { taskId: request.taskId, signal: enhancementAccess });
+        enhancementAccess.throwIfAborted();
+        consumeTransfers(request.audioTracks.map((track) => track.audioTransferId));
+        const totalBytes = batch.tracks.reduce((sum, track) => sum + track.bytes.byteLength, 0);
+        if (bufferedBytes + totalBytes > maxBufferedBytes) throw new InvalidAudioTransferError('Enhanced audio exceeds the bounded transfer buffer.');
+        const resultTracks = batch.tracks.map((track, index) => {
+          const audioTransferId = `enhanced:${request.requestId}:${index}`;
+          if (outputs.has(audioTransferId)) throw new InvalidAudioTransferError('An enhanced audio transfer ID is already in use.');
+          return { ...track.metadata, audioTransferId };
+        });
+        for (let index = 0; index < batch.tracks.length; index++) {
+          const track = batch.tracks[index], transferId = resultTracks[index].audioTransferId;
+          outputs.set(transferId, { bytes: track.bytes, trackId: track.metadata.trackId,
+            chunkCount: track.metadata.chunkCount, nextChunkIndex: 0,
+            expires: setTimeout(() => discardOutput(transferId), staleTransferMs) });
+          bufferedBytes += track.bytes.byteLength;
+        }
+        const response: LocalModelEnhanceAudioSuccessResponse = {
+          type: LOCAL_MODEL_OFFSCREEN_MESSAGE_TYPE, version: LOCAL_MODEL_OFFSCREEN_VERSION,
+          requestId: request.requestId, operation: 'enhanceAudio', ok: true,
+          result: { ok: true, provider: batch.provider, taskId: request.taskId,
+            model: batch.model, modelSha256: batch.modelSha256, tracks: resultTracks,
+            ...(batch.cacheStatus === undefined ? {} : { cacheStatus: batch.cacheStatus }),
+            ...(batch.cacheMessage === undefined ? {} : { cacheMessage: batch.cacheMessage }) }
+        };
+        return response;
+      }
       if (request.operation === 'timing') {
         let result = timings.get(buildCanonicalTaskIdentity(request.job));
         if (result && !(await (await loadRuntime()).isLocalTimingCurrent(result))) {
@@ -315,6 +407,7 @@ export function createLocalModelHost(
       return createLocalModelFailure(request, code, error);
     } finally {
       if (request.operation === 'timing') consumeTransfers(request.audioTracks.map((track) => track.audioTransferId));
+      if (request.operation === 'enhanceAudio') consumeTransfers(request.audioTracks.map((track) => track.audioTransferId));
       if (request.operation === 'segment') consumeTransfers(request.tracks.map((track) => track.audio.audioTransferId));
     }
   }
@@ -328,7 +421,18 @@ export function createLocalModelHost(
     return result;
   }
 
-  function handleRequest(request: LocalModelOffscreenRequest): Promise<LocalModelOffscreenResponse> {
+  async function handleRequest(request: LocalModelOffscreenRequest): Promise<LocalModelOffscreenResponse> {
+    if (request.operation === 'download' || request.operation === 'release') {
+      try {
+        if (request.operation === 'download') {
+          const grant = await (options.authorizeEnhancement ?? requireReviewGraderAccess)();
+          grant.throwIfAborted();
+        }
+        return Promise.resolve(request.operation === 'download' ? handleDownload(request) : handleRelease(request));
+      } catch (error) {
+        return Promise.resolve(createLocalModelFailure(request, 'invalid-request', error));
+      }
+    }
     if (request.operation === 'upload') {
       try {
         return Promise.resolve(handleUpload(request));
@@ -336,7 +440,31 @@ export function createLocalModelHost(
         return Promise.resolve(createLocalModelFailure(request, 'invalid-request', error));
       }
     }
-    return runExclusive(() => execute(request));
+    let enhancementAccess: AbortSignal | undefined;
+    if (request.operation === 'enhanceAudio') {
+      try {
+        enhancementAccess = await (options.authorizeEnhancement ?? requireReviewGraderAccess)();
+        enhancementAccess.throwIfAborted();
+        if (enhancementAccess !== observedEnhancementGrant) {
+          observedEnhancementGrant = enhancementAccess;
+          enhancementAccess.addEventListener('abort', () => {
+            for (const id of outputs.keys()) discardOutput(id);
+            observedEnhancementGrant = undefined;
+          }, { once: true });
+        }
+        await options.onProgress?.({
+          type: LOCAL_MODEL_OFFSCREEN_MESSAGE_TYPE, version: LOCAL_MODEL_OFFSCREEN_VERSION,
+          target: 'background', event: 'enhancement-progress', operation: 'enhanceAudio',
+          requestId: request.requestId, taskId: request.taskId,
+          progress: { phase: 'queued', trackId: request.audioTracks[0].trackId,
+            trackIndex: 0, trackCount: request.audioTracks.length, completedChunks: 0, totalChunks: 0 }
+        });
+      } catch (error) {
+        consumeTransfers(request.audioTracks.map((track) => track.audioTransferId));
+        return createLocalModelFailure(request, 'offscreen-unavailable', error);
+      }
+    }
+    return runExclusive(() => execute(request, enhancementAccess));
   }
 
   return { handleRequest, runExclusive };
@@ -344,7 +472,17 @@ export function createLocalModelHost(
 
 const runtimeMessages = globalThis.chrome?.runtime?.onMessage;
 if (runtimeMessages && typeof runtimeMessages.addListener === 'function') {
-  const host = createLocalModelHost();
+  const host = createLocalModelHost(loadLocalModelRuntime, {
+    onProgress: async (message) => {
+      const acknowledgement: unknown = await chrome.runtime.sendMessage(message);
+      if (acknowledgement !== true) {
+        const detail = acknowledgement && typeof acknowledgement === 'object' &&
+          'message' in acknowledgement && typeof acknowledgement.message === 'string'
+          ? acknowledgement.message : 'The owning content tab rejected enhancement progress.';
+        throw new Error(detail);
+      }
+    }
+  });
   const volunteer = createVolunteer({ ...defaultVolunteerDependencies, runExclusive: host.runExclusive });
   // A recovered document must resume polling even if the service worker did not restart.
   void loadVolunteerSettings().then((settings) => {

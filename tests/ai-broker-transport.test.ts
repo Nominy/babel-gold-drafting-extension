@@ -11,9 +11,13 @@ import {
 import type { AiBrokerPortMessage, AiBrokerResponse } from '../src/core/ai-broker-protocol';
 import type { ExtensionSettings } from '../src/core/types';
 import { registerAiBrokerContentHandler } from '../src/content/ai-broker-content';
+import { REVIEW_GRADER_EXTENSION_ID, REVIEW_GRADER_ACCESS_PORT, isReviewGraderAccessRequest } from '@nominy/babel-babel-runtime';
+import type { ReviewGraderPort } from '@nominy/babel-babel-runtime';
+import { reviewGraderAccess } from '../src/core/review-grader-access';
 
 interface TestEvent<Args extends unknown[]> {
   addListener(listener: (...args: Args) => unknown): void;
+  removeListener(listener: (...args: Args) => unknown): void;
   emit(...args: Args): unknown[];
 }
 
@@ -32,6 +36,7 @@ function event<Args extends unknown[]>(): TestEvent<Args> {
   const listeners: Array<(...args: Args) => unknown> = [];
   return {
     addListener(listener: (...args: Args) => unknown) { listeners.push(listener); },
+    removeListener(listener: (...args: Args) => unknown) { const index = listeners.indexOf(listener); if (index >= 0) listeners.splice(index, 1); },
     emit(...args: Args) { return listeners.map((listener) => listener(...args)); }
   };
 }
@@ -71,9 +76,27 @@ test('broker transports preserve admission, failure policy and disconnect framin
   const onMessage = event<[unknown, chrome.runtime.MessageSender, (response: AiBrokerResponse) => void]>();
   const onConnect = event<[TestPort]>();
   let tabPort = port(AI_BROKER_INTERNAL_PORT_NAME);
+  let graderAvailable = true;
+  const graderPorts: ReviewGraderPort[] = [];
+  const connectGrader = (id: string, info: { name: string }): ReviewGraderPort => {
+    assert.equal(id, REVIEW_GRADER_EXTENSION_ID);
+    assert.equal(info.name, REVIEW_GRADER_ACCESS_PORT);
+    const messages = event<[unknown]>(), disconnect = event<[]>();
+    const grader: ReviewGraderPort = {
+      name: info.name, onMessage: messages, onDisconnect: disconnect,
+      postMessage(message) {
+        if (graderAvailable && isReviewGraderAccessRequest(message)) queueMicrotask(() => messages.emit({ ...message, type: 'grant' }));
+      },
+      disconnect() { disconnect.emit(); },
+    };
+    graderPorts.push(grader);
+    if (!graderAvailable) queueMicrotask(() => disconnect.emit());
+    return grader;
+  };
+  t.after(() => reviewGraderAccess().dispose());
   Object.assign(globalThis, {
     chrome: {
-      runtime: { onMessageExternal, onConnectExternal, onMessage, onConnect },
+      runtime: { onMessageExternal, onConnectExternal, onMessage, onConnect, connect: connectGrader },
       storage: { local: { get(_key: string, callback: (items: object) => void) {
         if (storageFailure) throw new Error('Storage unavailable');
         callback({ [SETTINGS_STORAGE_KEY]: settings });
@@ -102,7 +125,7 @@ test('broker transports preserve admission, failure policy and disconnect framin
   };
   const terminal = (connection: TestPort) => {
     const message = connection.messages.at(-1);
-    assert.ok(message && message.type !== 'event');
+    assert.ok(message && (message.type === 'result' || message.type === 'error'));
     return message;
   };
 
@@ -130,7 +153,7 @@ test('broker transports preserve admission, failure policy and disconnect framin
       } else {
         assert.deepEqual(response, {
           ok: true, provider: 'auto', remoteConfigured: false,
-          capabilities: { transcribeSegment: false, transcribeSegmentL0: true, redistributeText: false }
+          capabilities: { transcribeSegment: false, transcribeSegmentL0: true, redistributeText: false, enhanceAudio: true }
         });
       }
     }
@@ -179,6 +202,38 @@ test('broker transports preserve admission, failure policy and disconnect framin
     closed.disconnect();
     assert.equal(tabPort.disconnected, true);
     assert.equal(closed.messages.length, 1);
+  });
+
+  await t.test('enhancement bypasses ASR/provider/key setup and relays bounded audio chunks over the port only', async () => {
+    const enhancement = { type: AI_BROKER_EXTERNAL_MESSAGE_TYPE, version: 1, operation: 'enhanceAudio', taskId: 'native-review-1' };
+    for (const mode of ['simple', 'advanced', 'local'] as const) {
+      settings = { ...DEFAULT_SETTINGS, mode, openRouterApiKey: '', aiBrokerProvider: 'local-gemini-nano' };
+      const nonStreaming = await sendMessage(enhancement);
+      assert.equal(nonStreaming.ok, false);
+      if (nonStreaming.ok) throw new Error('Enhancement must use the audio stream');
+      assert.equal(nonStreaming.fallbackAllowed, false);
+      tabPort = port(AI_BROKER_INTERNAL_PORT_NAME);
+      const connection = await sendPort(enhancement);
+      assert.deepEqual(tabPort.messages, [{ ...enhancement, type: AI_BROKER_INTERNAL_MESSAGE_TYPE }]);
+      const chunk = { type: 'audio-chunk', trackId: 'track-1', chunkIndex: 0, chunkCount: 1, totalBytes: 2, dataBase64: 'AAA=' } as const;
+      tabPort.onMessage.emit(chunk);
+      assert.deepEqual(connection.messages.at(-1), chunk);
+      assert.equal(tabPort.disconnected, false, 'An audio chunk is not a terminal broker result');
+      tabPort.onMessage.emit({ type: 'error', response: { ok: false, reason: 'stale-task', fallbackAllowed: false } });
+      assert.equal(tabPort.disconnected, true);
+    }
+    storageFailure = true;
+    tabPort = port(AI_BROKER_INTERNAL_PORT_NAME);
+    const connection = await sendPort(enhancement);
+    assert.deepEqual(tabPort.messages, [{ ...enhancement, type: AI_BROKER_INTERNAL_MESSAGE_TYPE }]);
+    connection.disconnect();
+    storageFailure = false;
+    const invalid = await sendPort({ ...enhancement, audioTracks: [{ dataBase64: 'AAA=' }] });
+    const rejection = terminal(invalid).response;
+    assert.equal(rejection.ok, false);
+    if (rejection.ok) throw new Error('Helper must not supply enhancement audio to the external broker');
+    assert.equal(rejection.reason, 'invalid-request');
+    assert.equal(rejection.fallbackAllowed, false);
   });
 
   await t.test('content reloads policy after backend failure and logs once for either transport', async () => {
@@ -247,5 +302,21 @@ test('broker transports preserve admission, failure policy and disconnect framin
     if (response.ok) throw new Error('Expected Simple cloud failure');
     assert.equal(response.reason, 'broker-error');
     assert.equal(response.fallbackAllowed, false);
+  });
+
+  await t.test('revoked grader removes enhancement admission before any tab capture', async () => {
+    graderAvailable = false;
+    for (const connection of [...graderPorts]) connection.disconnect();
+    tabPort = port(AI_BROKER_INTERNAL_PORT_NAME);
+    const denied = terminal(await sendPort({ type: AI_BROKER_EXTERNAL_MESSAGE_TYPE, version: 1, operation: 'enhanceAudio', taskId: 'native-review-1' })).response;
+    assert.equal(denied.ok, false);
+    if (denied.ok) throw new Error('A missing grader must deny enhancement');
+    assert.equal(denied.reason, 'unsupported-operation');
+    assert.equal(denied.fallbackAllowed, false);
+    assert.deepEqual(tabPort.messages, []);
+    const ping = await sendMessage({ ...request, operation: 'ping' });
+    assert.equal(ping.ok, true);
+    if (!ping.ok || !('capabilities' in ping)) throw new Error('Missing broker capabilities');
+    assert.equal(ping.capabilities?.enhanceAudio, false);
   });
 });

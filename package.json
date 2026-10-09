@@ -1,6 +1,6 @@
 {
   "name": "babel-gold-drafting-extension",
-  "version": "0.2.43",
+  "version": "0.2.44",
   "private": true,
   "license": "Apache-2.0 AND LGPL-2.1-or-later",
   "type": "module",
@@ -25,7 +25,9 @@
     "@types/chrome": "^0.1.24",
     "@types/jsdom": "^21.1.7",
     "@types/node": "^24.6.0",
+    "@webgpu/types": "0.1.74",
     "esbuild": "^0.25.10",
+    "fake-indexeddb": "^6.2.5",
     "jsdom": "^26.1.0",
     "playwright": "1.63.0",
     "tsx": "^4.20.5",

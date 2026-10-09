@@ -1,3 +1,4 @@
+import { isAudioEnhancementProgress, type AudioEnhancementChunk, type AudioEnhancementProgress, type AudioEnhancementResult, type AudioEnhancementTrackMetadata } from '@nominy/babel-babel-runtime';
 import type {
   ExtensionSettings,
   L0DraftResponse,
@@ -7,12 +8,12 @@ import type {
 } from './types';
 
 export const LOCAL_MODEL_OFFSCREEN_MESSAGE_TYPE = 'babel-gold-drafting:local-model-offscreen';
-export const LOCAL_MODEL_OFFSCREEN_VERSION = 4 as const;
+export const LOCAL_MODEL_OFFSCREEN_VERSION = 5 as const;
 export const LOCAL_MODEL_AUDIO_CHUNK_BYTES = 512 * 1024;
 export const LOCAL_MODEL_MAX_BUFFERED_AUDIO_BYTES = 512 * 1024 * 1024;
 export const LOCAL_MODEL_AUDIO_TRANSFER_STALE_MS = 10 * 60 * 1000;
 
-export type LocalModelOperation = 'upload' | 'timing' | 'draft' | 'segment';
+export type LocalModelOperation = 'upload' | 'timing' | 'draft' | 'segment' | 'enhanceAudio' | 'download' | 'release';
 export type LocalModelMessageTarget = 'background' | 'offscreen';
 
 export interface WireCapturedAudioTrack {
@@ -122,11 +123,42 @@ export interface LocalModelSegmentRequest extends LocalModelRequestBase {
   tracks: WirePreparedL0Track[];
 }
 
+export interface LocalModelEnhanceAudioRequest extends LocalModelRequestBase {
+  operation: 'enhanceAudio';
+  taskId: string;
+  audioTracks: WireCapturedAudioTrack[];
+}
+
+export interface LocalModelDownloadRequest extends LocalModelRequestBase {
+  operation: 'download';
+  transferId: string;
+  chunkIndex: number;
+}
+
+export interface LocalModelReleaseRequest extends LocalModelRequestBase {
+  operation: 'release';
+  transferIds: string[];
+}
+
 export type LocalModelOffscreenRequest =
   | LocalModelUploadRequest
   | LocalModelTimingRequest
   | LocalModelDraftRequest
-  | LocalModelSegmentRequest;
+  | LocalModelSegmentRequest
+  | LocalModelEnhanceAudioRequest
+  | LocalModelDownloadRequest
+  | LocalModelReleaseRequest;
+
+export interface LocalModelEnhancementProgressMessage {
+  type: typeof LOCAL_MODEL_OFFSCREEN_MESSAGE_TYPE;
+  version: typeof LOCAL_MODEL_OFFSCREEN_VERSION;
+  target: 'background' | 'content';
+  event: 'enhancement-progress';
+  operation: 'enhanceAudio';
+  requestId: string;
+  taskId: string;
+  progress: AudioEnhancementProgress;
+}
 
 interface LocalModelResponseBase {
   type: typeof LOCAL_MODEL_OFFSCREEN_MESSAGE_TYPE;
@@ -165,11 +197,40 @@ export interface LocalModelSegmentSuccessResponse extends LocalModelResponseBase
   result: string;
 }
 
+export interface LocalModelEnhancedTrack extends AudioEnhancementTrackMetadata {
+  audioTransferId: string;
+}
+
+export interface LocalModelEnhanceAudioResult extends Omit<AudioEnhancementResult, 'tracks'> {
+  tracks: LocalModelEnhancedTrack[];
+}
+
+export interface LocalModelEnhanceAudioSuccessResponse extends LocalModelResponseBase {
+  ok: true;
+  operation: 'enhanceAudio';
+  result: LocalModelEnhanceAudioResult;
+}
+
+export interface LocalModelDownloadSuccessResponse extends LocalModelResponseBase {
+  ok: true;
+  operation: 'download';
+  result: AudioEnhancementChunk;
+}
+
+export interface LocalModelReleaseSuccessResponse extends LocalModelResponseBase {
+  ok: true;
+  operation: 'release';
+  result: { released: true };
+}
+
 export type LocalModelSuccessResponse =
   | LocalModelUploadSuccessResponse
   | LocalModelTimingSuccessResponse
   | LocalModelDraftSuccessResponse
-  | LocalModelSegmentSuccessResponse;
+  | LocalModelSegmentSuccessResponse
+  | LocalModelEnhanceAudioSuccessResponse
+  | LocalModelDownloadSuccessResponse
+  | LocalModelReleaseSuccessResponse;
 
 export type LocalModelErrorCode = 'invalid-request' | 'offscreen-unavailable' | 'inference-failed' | 'timing-unavailable';
 
@@ -218,7 +279,7 @@ function isWireCapturedAudioTrack(value: unknown): value is WireCapturedAudioTra
     isRecord(value) &&
     !('blob' in value) &&
     !('audioDataUrl' in value) &&
-    typeof value.trackId === 'string' &&
+    typeof value.trackId === 'string' && value.trackId.length > 0 &&
     (value.speakerKey === undefined || typeof value.speakerKey === 'string') &&
     (value.trackLabel === undefined || typeof value.trackLabel === 'string') &&
     typeof value.source === 'string' &&
@@ -251,7 +312,10 @@ function hasValidEnvelope(value: Record<string, unknown>): boolean {
     (value.operation === 'upload' ||
       value.operation === 'timing' ||
       value.operation === 'draft' ||
-      value.operation === 'segment')
+      value.operation === 'segment' ||
+      value.operation === 'enhanceAudio' ||
+      value.operation === 'download' ||
+      value.operation === 'release')
   );
 }
 
@@ -290,6 +354,14 @@ export function isLocalModelOffscreenRequest(
     return false;
   }
   if (value.operation === 'upload') return isUploadRequest(value);
+  if (value.operation === 'release') return Array.isArray(value.transferIds) &&
+    value.transferIds.length <= 64 && value.transferIds.every((id) => typeof id === 'string' && id.length > 0);
+  if (value.operation === 'download') return typeof value.transferId === 'string' && value.transferId.length > 0 &&
+    Number.isSafeInteger(value.chunkIndex) && (value.chunkIndex as number) >= 0;
+  if (value.operation === 'enhanceAudio') return typeof value.taskId === 'string' && value.taskId.length > 0 &&
+    Array.isArray(value.audioTracks) && value.audioTracks.length > 0 && value.audioTracks.length <= 2 &&
+    value.audioTracks.every(isWireCapturedAudioTrack) &&
+    new Set(value.audioTracks.map((track) => track.trackId)).size === value.audioTracks.length;
   if (!isSettings(value.settings)) return false;
   if (value.operation === 'segment') {
     return (
@@ -307,6 +379,29 @@ export function isLocalModelOffscreenRequest(
     isTranscriptJob(value.job) &&
     Array.isArray(value.audioTracks) &&
     value.audioTracks.every(isWireCapturedAudioTrack)
+  );
+}
+
+export function isLocalModelEnhancementProgress(
+  value: unknown,
+  target?: LocalModelEnhancementProgressMessage['target'],
+  request?: LocalModelEnhanceAudioRequest
+): value is LocalModelEnhancementProgressMessage {
+  if (!isRecord(value) || value.type !== LOCAL_MODEL_OFFSCREEN_MESSAGE_TYPE ||
+    value.version !== LOCAL_MODEL_OFFSCREEN_VERSION || value.event !== 'enhancement-progress' ||
+    value.operation !== 'enhanceAudio' || (value.target !== 'background' && value.target !== 'content') ||
+    (target !== undefined && value.target !== target) ||
+    typeof value.requestId !== 'string' || !value.requestId ||
+    typeof value.taskId !== 'string' || !value.taskId ||
+    Object.keys(value).some((key) => !['type', 'version', 'target', 'event', 'operation', 'requestId', 'taskId', 'progress'].includes(key)) ||
+    !isAudioEnhancementProgress(value.progress) ||
+    Object.keys(value.progress).some((key) => !['phase', 'trackId', 'trackIndex', 'trackCount', 'completedChunks', 'totalChunks', 'backend', 'backendReason'].includes(key))) {
+    return false;
+  }
+  return request === undefined || (
+    value.requestId === request.requestId && value.taskId === request.taskId &&
+    value.progress.trackCount === request.audioTracks.length &&
+    value.progress.trackId === request.audioTracks[value.progress.trackIndex]?.trackId
   );
 }
 
@@ -409,6 +504,40 @@ export function isLocalModelOffscreenResponse(
       value.result.nextChunkIndex === request.chunkIndex + 1 &&
       value.result.complete === (request.chunkIndex === request.chunkCount - 1)
     );
+  }
+  if (request.operation === 'release') return isRecord(value.result) && value.result.released === true;
+  if (request.operation === 'download') {
+    const chunk = value.result;
+    return isRecord(chunk) && chunk.type === 'audio-chunk' && typeof chunk.trackId === 'string' &&
+      chunk.chunkIndex === request.chunkIndex && Number.isSafeInteger(chunk.chunkCount) &&
+      Number.isSafeInteger(chunk.totalBytes) && (chunk.totalBytes as number) > 0 &&
+      chunk.chunkCount === Math.ceil((chunk.totalBytes as number) / LOCAL_MODEL_AUDIO_CHUNK_BYTES) &&
+      (chunk.chunkCount as number) > request.chunkIndex && isBoundedBase64Chunk(chunk.dataBase64) &&
+      base64DecodedLength(chunk.dataBase64) === Math.min(LOCAL_MODEL_AUDIO_CHUNK_BYTES,
+        (chunk.totalBytes as number) - request.chunkIndex * LOCAL_MODEL_AUDIO_CHUNK_BYTES);
+  }
+  if (request.operation === 'enhanceAudio') {
+    const result = value.result;
+    return isRecord(result) && result.ok === true && (result.provider === 'browser-local' || result.provider === 'swarm') &&
+      Object.keys(value).every((key) => ['type', 'version', 'requestId', 'operation', 'ok', 'result'].includes(key)) &&
+      result.taskId === request.taskId && typeof result.model === 'string' && result.model.length > 0 &&
+      typeof result.modelSha256 === 'string' && /^[a-f0-9]{64}$/.test(result.modelSha256) &&
+      Object.keys(result).every((key) => ['ok', 'provider', 'taskId', 'model', 'modelSha256', 'tracks', 'cacheStatus', 'cacheMessage'].includes(key)) &&
+      (result.cacheStatus === undefined || result.cacheStatus === 'hit' || result.cacheStatus === 'stored' || result.cacheStatus === 'unavailable') &&
+      (result.cacheMessage === undefined || typeof result.cacheMessage === 'string' && result.cacheMessage.trim().length > 0) &&
+      (result.cacheMessage === undefined || result.cacheStatus === 'unavailable') &&
+      (result.cacheStatus !== 'unavailable' || typeof result.cacheMessage === 'string' && result.cacheMessage.trim().length > 0) &&
+      Array.isArray(result.tracks) && result.tracks.length === request.audioTracks.length &&
+      result.tracks.every((track, index) => isRecord(track) && track.trackId === request.audioTracks[index].trackId &&
+        Object.keys(track).every((key) => ['trackId', 'speakerKey', 'trackLabel', 'mimeType', 'sampleRate', 'frameCount', 'sourceSha256', 'wavSha256', 'totalBytes', 'chunkCount', 'audioTransferId'].includes(key)) &&
+        typeof track.speakerKey === 'string' && typeof track.trackLabel === 'string' && track.mimeType === 'audio/wav' &&
+        Number.isSafeInteger(track.sampleRate) && (track.sampleRate as number) > 0 &&
+        Number.isSafeInteger(track.frameCount) && (track.frameCount as number) > 0 &&
+        typeof track.sourceSha256 === 'string' && /^[a-f0-9]{64}$/.test(track.sourceSha256) &&
+        typeof track.wavSha256 === 'string' && /^[a-f0-9]{64}$/.test(track.wavSha256) &&
+        track.totalBytes === 44 + (track.frameCount as number) * 2 &&
+        track.chunkCount === Math.ceil((track.totalBytes as number) / LOCAL_MODEL_AUDIO_CHUNK_BYTES) &&
+        typeof track.audioTransferId === 'string' && track.audioTransferId.length > 0);
   }
   if (request.operation === 'timing') return isTimingResult(value.result);
   if (request.operation === 'draft') return isDraftResult(value.result);

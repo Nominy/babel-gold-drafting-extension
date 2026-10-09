@@ -156,8 +156,8 @@
           <label class="checkbox-row bui-label bui-card bui-setting-toggle" for="volunteerInferenceEnabled">
             <input id="volunteerInferenceEnabled" name="volunteerInferenceEnabled" type="checkbox" class="bui-checkbox">
             <span>
-              Volunteer to process other users' L0 audio
-              <span class="field-help bui-hint">Off for new installs. This explicitly permits downloading other users' audio from the coordinator and using your compute and network. Save Settings to apply your choice; own-task local inference does not require volunteering.</span>
+              <span data-role="volunteer-label">Volunteer to process other users' L0 audio</span>
+              <span class="field-help bui-hint" data-role="volunteer-description">Off for new installs. This permits downloading other users' audio and using your compute/network. L0 volunteering requires its verified downloaded bundle. Save Settings to apply.</span>
             </span>
           </label>
           <button type="button" data-role="local-model-remove" disabled="" class="bui-button">Remove downloaded models</button>

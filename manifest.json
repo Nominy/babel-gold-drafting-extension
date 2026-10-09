@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Babel Gold Drafting",
-  "version": "0.2.43",
+  "version": "0.2.44",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA7v7I/gJvISotAPfxIUjPRo2W67lqy9ghf7s7rQ7jk6pXGIma8eYp7jmJJNZ2WaAZNxlKSgpB7C5oXE8onTXehhqCA0NPifsL/tpENfIvGO3C1xcFGBWqxpGLv0XN3/lnI05a5cV8J4n+K5RtwMehyNrYnIMmk2jiWBru5tm7M96ISgE+jAr4UsNYipGZuBR/44wt3O4RY5vlAmnIhz4G2DeGqIcXiFMSmeUdthKWvlelYfasCoiNWuD1qpu3A1Xf2qcyjr85+kTiJGaPzfK7IWQ28iGTyANOx6p84dILp5rPlBObKwSen0RNCJ5OhU0/Trq76PRgGmQ7+XkMezLPFQIDAQAB",
   "description": "Standalone Silver-to-Gold drafting assistant for Babel transcription jobs.",
   "icons": {

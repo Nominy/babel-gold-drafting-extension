@@ -1,10 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setImmediate } from 'node:timers/promises';
-import { createVolunteer, parseLease, type VolunteerDependencies } from '../src/offscreen/volunteer';
+import { createVolunteer, defaultVolunteerDependencies, parseLease, type VolunteerDependencies } from '../src/offscreen/volunteer';
 import { createVolunteerLifecycle } from '../src/background/local-model-offscreen';
 import { DEFAULT_SETTINGS, PUBLIC_L0_BASE_URL } from '../src/core/settings';
 import type { L0DraftResponse, L0TimingResponse } from '../src/core/types';
+import { encodeEnhancementWav } from '../src/core/audio-enhancement-dsp';
+import { enhancementSha256 } from '../src/core/audio-enhancement-cache';
+import { ENHANCEMENT_MAX_TRACK_BYTES, ENHANCEMENT_MODEL_ID, ENHANCEMENT_SOURCE_GRAPH_SHA256 } from '../src/core/audio-enhancement-swarm-protocol';
+import type { EnhancedAudioBatch } from '../src/core/audio-enhancement-runtime';
 
 const wav = new Blob([new Uint8Array([82, 73, 70, 70, 0, 0, 0, 0, 87, 65, 86, 69, 0])], { type: 'audio/wav' });
 const lease = (operation: 'draft' | 'transcribe', options?: Record<string, unknown>) => ({
@@ -48,7 +52,7 @@ function fixture(jobs: unknown[], ready = true) {
   let idle = false;
   const dependencies: VolunteerDependencies = {
     settings: async () => ({ ...DEFAULT_SETTINGS, mode: 'advanced', localModelsEnabled: true, volunteerInferenceEnabled: true }),
-    ready: async () => ready,
+    ready: async () => ({ transcribe: ready, draft: ready }),
     runExclusive: async (action) => { calls.push('exclusive'); return action(); },
     draft: async (timing, preserveRows) => {
       assert.deepEqual(timing, timingResult);
@@ -68,6 +72,8 @@ function fixture(jobs: unknown[], ready = true) {
       calls.push('transcribe');
       return timingResult;
     },
+    enhance: async () => { assert.fail('ASR-only fixture must not enhance.'); },
+    authorizeEnhancement: async () => new AbortController().signal,
     wait: async (_ms, signal) => {
       idle = true;
       if (signal.aborted) return;
@@ -112,7 +118,8 @@ test('punctuation lease uses cached timing without downloading audio and complet
     '/v1/workers/register', '/v1/workers/lease', '/v1/jobs/job-1/complete'
   ]);
   assert.deepEqual(JSON.parse(String(harness.requests[0].init.body)), {
-    modelBundleSchema: 'babel-browser-model-bundle-v3', protocolVersion: 3, modelRelease: 'c-denoise-v3-2026-10-03-r2'
+    modelBundleSchema: 'babel-browser-model-bundle-v3', protocolVersion: 3, modelRelease: 'c-denoise-v3-2026-10-03-r2',
+    operations: ['transcribe', 'draft']
   });
   worker.stop();
   assert.equal(worker.getStatus().state, 'disabled');
@@ -230,17 +237,16 @@ test('a busy volunteer does not request a second lease before finishing the firs
   worker.stop();
 });
 
-test('service worker starts a ready worker and stops on disable or missing bundle', async () => {
+test('service worker defers capability admission to offscreen and stops on disable', async () => {
   let enabled = true;
   let volunteerEnabled = true;
-  let ready = true;
   let exists = false;
   const sent: string[] = [];
   const lifecycle = createVolunteerLifecycle({
     loadSettings: async () => ({
       ...DEFAULT_SETTINGS, mode: 'advanced', localModelsEnabled: enabled, volunteerInferenceEnabled: volunteerEnabled
     }),
-    ready: async () => ready,
+    ready: async () => true,
     hasDocument: async () => exists,
     ensureDocument: async () => { exists = true; },
     sendMessage: async (message) => {
@@ -264,12 +270,11 @@ test('service worker starts a ready worker and stops on disable or missing bundl
   enabled = false;
   await lifecycle.reconcile();
   assert.deepEqual(sent, ['start', 'start', 'status', 'stop', 'start', 'status', 'stop']);
-  assert.deepEqual(await lifecycle.status(), { state: 'disabled', detail: undefined });
-  enabled = true;
-  ready = false;
-  await lifecycle.reconcile();
-  assert.equal(sent.at(-1), 'stop');
   assert.equal((await lifecycle.status()).state, 'disabled');
+  enabled = true;
+  await lifecycle.reconcile();
+  assert.equal(sent.at(-1), 'start');
+  assert.equal((await lifecycle.status()).state, 'connected');
 });
 
 test('Simple mode does not register a volunteer despite retained Advanced local settings', async () => {
@@ -286,14 +291,13 @@ test('Simple mode does not register a volunteer despite retained Advanced local 
 
 test('switching to Simple stops volunteering without checking or deleting the retained bundle', async () => {
   let simple = false;
-  let bundleChecks = 0;
   const actions: string[] = [];
   const lifecycle = createVolunteerLifecycle({
     loadSettings: async () => ({
       ...DEFAULT_SETTINGS, mode: simple ? 'simple' : 'advanced',
       localModelsEnabled: true, volunteerInferenceEnabled: true
     }),
-    ready: async () => { bundleChecks += 1; return true; },
+    ready: async () => true,
     hasDocument: async () => true,
     ensureDocument: async () => undefined,
     sendMessage: async (message) => {
@@ -304,10 +308,215 @@ test('switching to Simple stops volunteering without checking or deleting the re
   await lifecycle.reconcile();
   simple = true;
   await lifecycle.reconcile();
-  assert.equal(bundleChecks, 1);
   assert.deepEqual(actions, ['start', 'stop']);
   assert.equal((await lifecycle.status()).state, 'disabled');
   simple = false;
   await lifecycle.reconcile();
   assert.deepEqual(actions, ['start', 'stop', 'start']);
+});
+
+const enhancementModel = { id: ENHANCEMENT_MODEL_ID, sha256: 'e'.repeat(64), sourceGraphSha256: ENHANCEMENT_SOURCE_GRAPH_SHA256 };
+
+async function enhancementFixture() {
+  const bytes = encodeEnhancementWav(new Float32Array([0, 0.25, -0.25, 0]), 16000, 4);
+  const sha256 = await enhancementSha256(bytes.buffer);
+  const tracks = ['Original A', 'Original B'].map((trackId, index) => ({
+    trackId, speakerKey: `speaker:${index}`, trackLabel: `Lane ${index + 1}`, fieldName: `audio:${index + 1}`,
+    sourceSha256: sha256, sampleRate: 16000, frameCount: 4
+  }));
+  const enhancementLease = { jobId: 'job-1', leaseToken: 'lease-secret', operation: 'enhance',
+    payload: { taskId: 'remote-task', model: enhancementModel, tracks }, audio: lease('transcribe').audio };
+  const result: EnhancedAudioBatch = { provider: 'browser-local', model: enhancementModel.id, modelSha256: enhancementModel.sha256,
+    tracks: tracks.map(({ fieldName: _fieldName, ...track }) => ({
+      bytes, metadata: { ...track, mimeType: 'audio/wav', wavSha256: sha256, totalBytes: bytes.byteLength, chunkCount: 1 }
+    })) };
+  const harness = fixture([enhancementLease], false);
+  const progress: unknown[] = [];
+  let uploaded: FormData | undefined;
+  harness.dependencies.ready = async () => ({ transcribe: false, draft: false, enhancementModel });
+  harness.dependencies.enhance = async (audio, onProgress, options) => {
+    harness.calls.push('enhance');
+    assert.deepEqual(audio.map(track => track.trackId), tracks.map(track => track.trackId));
+    assert.equal(options?.taskId, 'remote-task');
+    assert.equal(options?.localOnly, true);
+    assert.equal(options?.cache, false);
+    assert.equal(options?.signal?.aborted, false);
+    for (let trackIndex = 0; trackIndex < 2; trackIndex++) {
+      const track = { trackId: tracks[trackIndex].trackId, trackIndex, trackCount: 2 };
+      await onProgress?.({ ...track, phase: 'enhancing', completedChunks: 0, totalChunks: 1, backend: 'webgpu' });
+      await onProgress?.({ ...track, phase: 'enhancing', completedChunks: 1, totalChunks: 1, backend: 'webgpu' });
+      await onProgress?.({ ...track, phase: 'encoding', completedChunks: 1, totalChunks: 1, backend: 'webgpu' });
+    }
+    return result;
+  };
+  const originalFetch = harness.dependencies.fetch;
+  harness.dependencies.fetch = async (url, init) => {
+    if (url.includes('/audio/')) {
+      harness.requests.push({ url, init });
+      assert.equal(new Headers(init.headers).get('Authorization'), 'Bearer lease-secret');
+      return new Response(bytes, { headers: { 'Content-Type': 'audio/wav' } });
+    }
+    if (url.endsWith('/progress')) {
+      harness.requests.push({ url, init });
+      progress.push(JSON.parse(String(init.body)));
+      return Response.json({ ok: true });
+    }
+    if (url.endsWith('/complete') && init.body instanceof FormData) {
+      harness.requests.push({ url, init });
+      assert.equal(new Headers(init.headers).get('Authorization'), 'Bearer lease-secret');
+      uploaded = init.body;
+      harness.completed.push(JSON.parse(String(init.body.get('payload'))));
+      return Response.json({ ok: true });
+    }
+    return originalFetch(url, init);
+  };
+  return { ...harness, enhancementLease, result, bytes, progress, uploaded: () => uploaded };
+}
+
+test('enhancement-only GPU volunteer registers without ASR, reports real chunks, and completes binary without persistent cache', async () => {
+  const harness = await enhancementFixture();
+  const worker = createVolunteer(harness.dependencies);
+  worker.start();
+  await until(() => harness.isIdle());
+  assert.equal(worker.getStatus().state, 'connected');
+  assert.deepEqual(JSON.parse(String(harness.requests[0].init.body)).operations, ['enhance']);
+  assert.deepEqual(JSON.parse(String(harness.requests[0].init.body)).enhancementModel, enhancementModel);
+  assert.deepEqual(harness.calls, ['exclusive', 'enhance']);
+  assert.equal(harness.progress.length, 6);
+  assert.deepEqual(harness.progress[0], { workerId: 'volunteer-1', token: 'worker-secret', leaseToken: 'lease-secret',
+    progress: { phase: 'enhancing', trackId: 'Original A', trackIndex: 0, trackCount: 2, completedChunks: 0, totalChunks: 1 } });
+  const uploaded = harness.uploaded()!;
+  assert.ok(uploaded instanceof FormData);
+  assert.deepEqual(Array.from(uploaded.keys()).sort(), ['audio:1', 'audio:2', 'payload']);
+  assert.deepEqual(new Uint8Array(await (uploaded.get('audio:1') as Blob).arrayBuffer()), harness.bytes);
+  assert.equal((harness.completed[0].result as EnhancedAudioBatch).modelSha256, enhancementModel.sha256);
+  worker.stop();
+});
+
+test('volunteer uses only the normalized saved coordinator for registration, audio, progress, and completion', async () => {
+  const harness = await enhancementFixture();
+  const originalFetch = harness.dependencies.fetch;
+  const urls: string[] = [];
+  harness.dependencies.settings = async () => ({ ...DEFAULT_SETTINGS, volunteerInferenceEnabled: true,
+    l0CustomBaseUrl: 'http://127.0.0.1:8976/private/?discard=yes#fragment' });
+  harness.dependencies.fetch = async (url, init) => {
+    urls.push(url);
+    assert.equal(init.redirect, 'error');
+    return originalFetch(url.replace('http://127.0.0.1:8976/private', PUBLIC_L0_BASE_URL), init);
+  };
+  const worker = createVolunteer(harness.dependencies);
+  worker.start();
+  await until(() => harness.isIdle());
+  assert.ok(urls.length > 5);
+  assert.ok(urls.every(url => url.startsWith('http://127.0.0.1:8976/private/v1/')));
+  worker.stop();
+});
+
+test('enhancement lease rejects mismatched model admission before fetching audio or invoking inference', async () => {
+  const harness = await enhancementFixture();
+  harness.dependencies.ready = async () => ({ transcribe: false, draft: false, enhancementModel: { ...enhancementModel, sha256: 'f'.repeat(64) } });
+  const worker = createVolunteer(harness.dependencies);
+  worker.start();
+  await until(() => harness.isIdle());
+  assert.match(String(harness.completed[0].error), /not admitted/);
+  assert.deepEqual(harness.calls, []);
+  assert.equal(harness.requests.some(request => request.url.includes('/audio/')), false);
+  worker.stop();
+});
+
+test('corrupt or oversized leased Originals fail before GPU execution and never produce output', async () => {
+  for (const oversized of [false, true]) {
+    const harness = await enhancementFixture();
+    const originalFetch = harness.dependencies.fetch;
+    harness.dependencies.fetch = async (url, init) => url.includes('/audio/')
+      ? new Response(oversized ? harness.bytes : new Uint8Array(48), { headers: oversized ? { 'Content-Length': String(ENHANCEMENT_MAX_TRACK_BYTES + 1) } : {} })
+      : originalFetch(url, init);
+    const worker = createVolunteer(harness.dependencies);
+    worker.start();
+    await until(() => harness.isIdle());
+    assert.ok(harness.completed[0].error);
+    assert.equal(harness.uploaded(), undefined);
+    assert.deepEqual(harness.calls, []);
+    worker.stop();
+  }
+});
+
+test('expired enhancement progress halts execution and reports failure rather than uploading output', async () => {
+  const harness = await enhancementFixture();
+  const originalFetch = harness.dependencies.fetch;
+  harness.dependencies.fetch = async (url, init) => url.endsWith('/progress') ? new Response(null, { status: 409 }) : originalFetch(url, init);
+  const worker = createVolunteer(harness.dependencies);
+  worker.start();
+  await until(() => harness.isIdle());
+  assert.match(String(harness.completed[0].error), /progress rejected: HTTP 409/);
+  assert.equal(harness.uploaded(), undefined);
+  worker.stop();
+});
+
+test('stop aborts enhancement execution and prevents late completion', async () => {
+  const harness = await enhancementFixture();
+  let executionSignal: AbortSignal | undefined;
+  const pending = Promise.withResolvers<EnhancedAudioBatch>();
+  harness.dependencies.enhance = async (_tracks, _progress, options) => {
+    executionSignal = options?.signal;
+    return pending.promise;
+  };
+  const worker = createVolunteer(harness.dependencies);
+  worker.start();
+  await until(() => executionSignal !== undefined);
+  worker.stop();
+  assert.equal(executionSignal!.aborted, true);
+  pending.resolve(harness.result);
+  await setImmediate();
+  assert.deepEqual(harness.completed, []);
+  assert.equal(worker.getStatus().state, 'disabled');
+});
+
+test('enhancement lease parser rejects duplicate fields, foreign URLs, and unpinned model graphs', async () => {
+  const { enhancementLease } = await enhancementFixture();
+  assert.throws(() => parseLease({ ...enhancementLease, audio: [enhancementLease.audio[0], enhancementLease.audio[0]] }), /audio URLs/);
+  assert.throws(() => parseLease({ ...enhancementLease, audio: [{ ...enhancementLease.audio[0], url: 'https://foreign.invalid/audio' }, enhancementLease.audio[1]] }), /audio URLs/);
+  assert.throws(() => parseLease({ ...enhancementLease, payload: { ...enhancementLease.payload,
+    model: { ...enhancementModel, sourceGraphSha256: '0'.repeat(64) } } }), /model descriptor/);
+  assert.throws(() => parseLease({ ...enhancementLease, payload: { ...enhancementLease.payload, transcript: 'private transcript' } }), /payload/);
+});
+
+test('without grader access a volunteer cannot probe or advertise enhancement hardware', async t => {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  let requested = 0;
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { gpu: {
+    requestAdapter: async () => { requested++; throw new Error('Enhancement hardware must remain untouched'); }
+  } } });
+  t.after(() => { if (previous) Object.defineProperty(globalThis, 'navigator', previous); else Reflect.deleteProperty(globalThis, 'navigator'); });
+  const admission = await defaultVolunteerDependencies.ready();
+  assert.equal(admission.enhancementModel, undefined);
+  assert.equal(requested, 0);
+});
+
+test('worker independently refuses corrupt or remote runtime results before multipart completion', async () => {
+  for (const remote of [false, true]) {
+    const harness = await enhancementFixture();
+    harness.dependencies.enhance = async () => remote
+      ? { ...harness.result, provider: 'swarm' }
+      : { ...harness.result, tracks: [{ ...harness.result.tracks[0],
+        metadata: { ...harness.result.tracks[0].metadata, wavSha256: '0'.repeat(64) } }, harness.result.tracks[1]] };
+    const worker = createVolunteer(harness.dependencies);
+    worker.start();
+    await until(() => harness.isIdle());
+    assert.match(String(harness.completed[0].error), remote ? /different enhancement model/ : /SHA-256 mismatch/);
+    assert.equal(harness.uploaded(), undefined);
+    worker.stop();
+  }
+});
+
+test('losing grader access after registration prevents leased audio download and inference', async () => {
+  const harness = await enhancementFixture();
+  harness.dependencies.authorizeEnhancement = async () => { throw new Error('This operation is unavailable.'); };
+  const worker = createVolunteer(harness.dependencies);
+  worker.start();
+  await until(() => harness.isIdle());
+  assert.deepEqual(harness.calls, []);
+  assert.equal(harness.requests.some(request => request.url.includes('/audio/')), false);
+  assert.match(String(harness.completed[0].error), /operation is unavailable/);
+  worker.stop();
 });

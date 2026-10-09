@@ -1,12 +1,16 @@
-import { getLocalModelStatus } from '../core/local-model-bundle';
 import { IS_DEV_C_DENOISE, isBrowserLocalMode, LOCAL_MODEL_BASE_URL, SETTINGS_STORAGE_KEY, loadSettings } from '../core/settings';
+import { getLocalModelStatus } from '../core/local-model-bundle';
+import { hasReviewGraderAccess, reviewGraderAccess } from '../core/review-grader-access';
 import { isVolunteerMessage, type VolunteerMessage, type VolunteerStatus } from '../core/volunteer-protocol';
 import {
   createLocalModelFailure,
+  isLocalModelEnhancementProgress,
   isLocalModelOffscreenRequest,
   isLocalModelOffscreenResponse,
   toOffscreenRequest,
   type LocalModelFailureResponse,
+  type LocalModelEnhanceAudioRequest,
+  type LocalModelEnhancementProgressMessage,
   type LocalModelOffscreenRequest,
   type LocalModelOffscreenResponse
 } from '../core/local-model-offscreen-protocol';
@@ -26,11 +30,19 @@ export interface LocalModelOffscreenDependencies {
   closeDocument: () => Promise<void>;
   sendMessage: (message: LocalModelOffscreenRequest) => Promise<unknown>;
   workersReason: chrome.offscreen.Reason;
+  extensionId?: string;
+  offscreenDocumentUrl?: string;
+  sendProgressToTab?: (tabId: number, message: LocalModelEnhancementProgressMessage, frameId: number) => Promise<void>;
 }
 
 export function createLocalModelOffscreenBridge(dependencies: LocalModelOffscreenDependencies) {
   let creationPromise: Promise<void> | null = null;
   let recoveryPromise: Promise<void> | null = null;
+  const enhancementOwners = new Map<string, {
+    request: LocalModelEnhanceAudioRequest;
+    tabId: number;
+    frameId: number;
+  }>();
 
   async function ensureDocument(): Promise<void> {
     if (await dependencies.hasDocument()) return;
@@ -97,15 +109,42 @@ export function createLocalModelOffscreenBridge(dependencies: LocalModelOffscree
     }
   }
 
-  async function handleRequest(request: LocalModelOffscreenRequest): Promise<LocalModelOffscreenResponse> {
+  async function handleRequest(
+    request: LocalModelOffscreenRequest,
+    sender?: chrome.runtime.MessageSender
+  ): Promise<LocalModelOffscreenResponse> {
+    if (request.operation === 'enhanceAudio' && enhancementOwners.has(request.requestId)) {
+      return createLocalModelFailure(request, 'invalid-request', new Error('An enhancement request ID is already active.'));
+    }
+    if (request.operation === 'enhanceAudio' && sender !== undefined) {
+      const tabId = sender.tab?.id, frameId = sender.frameId ?? 0;
+      if (sender.id !== dependencies.extensionId || !Number.isSafeInteger(tabId) || (tabId as number) < 0 ||
+        !Number.isSafeInteger(frameId) || frameId < 0) {
+        return createLocalModelFailure(request, 'invalid-request', new Error('Audio enhancement must belong to an extension content tab.'));
+      }
+      enhancementOwners.set(request.requestId, { request, tabId: tabId as number, frameId });
+    }
     try {
       return await forwardRequest(request);
     } catch (error) {
       return createLocalModelFailure(request, 'offscreen-unavailable', error);
+    } finally {
+      if (request.operation === 'enhanceAudio') enhancementOwners.delete(request.requestId);
     }
   }
 
-  return { ensureDocument, forwardRequest, handleRequest };
+  async function handleProgress(value: unknown, sender: chrome.runtime.MessageSender): Promise<boolean> {
+    if (!dependencies.extensionId || !dependencies.offscreenDocumentUrl ||
+      sender.id !== dependencies.extensionId || sender.url !== dependencies.offscreenDocumentUrl ||
+      sender.tab !== undefined || !isLocalModelEnhancementProgress(value, 'background')) return false;
+    const owner = enhancementOwners.get(value.requestId);
+    if (!owner || !isLocalModelEnhancementProgress(value, 'background', owner.request) ||
+      !dependencies.sendProgressToTab) return false;
+    await dependencies.sendProgressToTab(owner.tabId, { ...value, target: 'content' }, owner.frameId);
+    return true;
+  }
+
+  return { ensureDocument, forwardRequest, handleRequest, handleProgress };
 }
 export interface VolunteerLifecycleDependencies {
   loadSettings: typeof loadSettings;
@@ -125,14 +164,14 @@ export function createVolunteerLifecycle(dependencies: VolunteerLifecycleDepende
       try {
         const settings = await dependencies.loadSettings();
         enabled = !IS_DEV_C_DENOISE && isBrowserLocalMode(settings) && settings.volunteerInferenceEnabled;
-        if (!enabled || !(await dependencies.ready())) {
+        if (!enabled || !await dependencies.ready()) {
           state = { state: 'disabled', detail: IS_DEV_C_DENOISE
             ? 'Own-task C-denoise WebGPU trial; the shared coordinator is not enabled.'
             : settings.mode === 'simple'
               ? 'Simple mode uses MAI cloud transcription; local volunteering is off.'
             : isBrowserLocalMode(settings) && !settings.volunteerInferenceEnabled
               ? 'Swarm participation is off; local models remain available for your own tasks.'
-              : enabled ? 'Local model bundle is not ready.' : undefined };
+              : 'Verified local models are unavailable.' };
           if (await dependencies.hasDocument()) {
             await dependencies.sendMessage({ type: 'babel-l0-volunteer', target: 'offscreen', action: 'stop' });
           }
@@ -171,16 +210,25 @@ function getDefaultDependencies(): LocalModelOffscreenDependencies | null {
     createDocument: (options) => offscreen.createDocument(options),
     closeDocument: () => offscreen.closeDocument(),
     sendMessage: (message) => runtime.sendMessage(message),
-    workersReason: chrome.offscreen.Reason.WORKERS
+    workersReason: chrome.offscreen.Reason.WORKERS,
+    extensionId: runtime.id,
+    offscreenDocumentUrl: runtime.getURL(OFFSCREEN_DOCUMENT_PATH),
+    sendProgressToTab: (tabId, message, frameId) => chrome.tabs.sendMessage(tabId, message, { frameId }).then(() => undefined)
   };
 }
 
 const defaultDependencies = getDefaultDependencies();
 if (defaultDependencies) {
   const bridge = createLocalModelOffscreenBridge(defaultDependencies);
-  chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
+  chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
+    if (isLocalModelEnhancementProgress(message, 'background')) {
+      void bridge.handleProgress(message, sender).then(sendResponse).catch((error: unknown) => {
+        sendResponse({ ok: false, message: error instanceof Error ? error.message : String(error) });
+      });
+      return true;
+    }
     if (!isLocalModelOffscreenRequest(message, 'background')) return false;
-    void bridge.handleRequest(message).then(sendResponse).catch((error) => {
+    void bridge.handleRequest(message, sender).then(sendResponse).catch((error) => {
       const response: LocalModelFailureResponse = createLocalModelFailure(
         message,
         'offscreen-unavailable',
@@ -193,6 +241,7 @@ if (defaultDependencies) {
   const volunteer = createVolunteerLifecycle({
     loadSettings,
     ready: async () => {
+      if (await hasReviewGraderAccess()) return true;
       const status = await getLocalModelStatus(LOCAL_MODEL_BASE_URL);
       return status.state === 'ready' && status.tested === true;
     },
@@ -200,6 +249,7 @@ if (defaultDependencies) {
     ensureDocument: bridge.ensureDocument,
     sendMessage: (message) => chrome.runtime.sendMessage(message)
   });
+  reviewGraderAccess().subscribe(() => { void volunteer.reconcile(); });
   chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
     if (!isVolunteerMessage(message, 'background')) return false;
     void (message.action === 'settings' ? loadSettings() : volunteer.status())
