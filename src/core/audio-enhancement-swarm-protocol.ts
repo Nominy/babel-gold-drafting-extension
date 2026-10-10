@@ -10,6 +10,13 @@ export const ENHANCEMENT_MAX_REQUEST_BYTES = 500 * 1024 * 1024;
 export const ENHANCEMENT_MAX_SECONDS = 4 * 60 * 60;
 export const ENHANCEMENT_CONTROL_BYTES = 64 * 1024;
 const SHA256 = /^[a-f0-9]{64}$/;
+const CLIENT_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
+let enhancementClientId: string | undefined;
+
+/** Shared only by this offscreen instance; never persisted or used as authorization. */
+export function getEnhancementClientId(): string {
+  return enhancementClientId ??= crypto.randomUUID();
+}
 
 export interface EnhancementModelDescriptor { id: string; sha256: string; sourceGraphSha256: string }
 export interface EnhancementSwarmTrack {
@@ -21,7 +28,7 @@ export interface EnhancementSwarmTrack {
   sampleRate: number;
   frameCount: number;
 }
-export interface EnhancementSwarmPayload { taskId: string; model: EnhancementModelDescriptor; tracks: EnhancementSwarmTrack[] }
+export interface EnhancementSwarmPayload { taskId: string; clientId?: string; model: EnhancementModelDescriptor; tracks: EnhancementSwarmTrack[] }
 export type EnhancementWorkerProgress = Pick<AudioEnhancementProgress, 'phase' | 'trackId' | 'trackIndex' | 'trackCount' | 'completedChunks' | 'totalChunks'>;
 
 export function swarmRecord(value: unknown): value is Record<string, unknown> {
@@ -43,7 +50,8 @@ export function sameEnhancementModel(left: EnhancementModelDescriptor, right: En
   return left.id === right.id && left.sha256 === right.sha256 && left.sourceGraphSha256 === right.sourceGraphSha256;
 }
 export function parseEnhancementPayload(value: unknown): EnhancementSwarmPayload {
-  if (!swarmRecord(value) || Object.keys(value).some(key => !['taskId', 'model', 'tracks'].includes(key)) ||
+  if (!swarmRecord(value) || Object.keys(value).some(key => !['taskId', 'clientId', 'model', 'tracks'].includes(key)) ||
+      (value.clientId !== undefined && (typeof value.clientId !== 'string' || value.clientId.length !== 36 || !CLIENT_ID.test(value.clientId))) ||
       !text(value.taskId) || !Array.isArray(value.tracks) || value.tracks.length !== 2) throw new Error('Invalid swarm enhancement payload.');
   parseEnhancementModel(value.model);
   if (!value.tracks.every((track, index) => swarmRecord(track) &&

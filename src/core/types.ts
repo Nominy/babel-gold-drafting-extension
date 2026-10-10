@@ -16,6 +16,7 @@ export interface ExtensionSettings {
   l0CustomBaseUrl: string;
   l0DontRunLlm: boolean;
   audioInputEnabled: boolean;
+  audioEnhancementBackend: 'auto' | 'swarm';
   localModelsEnabled: boolean;
   volunteerInferenceEnabled: boolean;
 }

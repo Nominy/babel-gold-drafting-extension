@@ -7,6 +7,7 @@ import { JSDOM } from 'jsdom';
 
 import { boot, type OptionsDependencies } from '../src/options/options';
 import { getCachedBundleDescriptor } from '../src/core/local-model-bundle';
+import { loadSettings } from '../src/core/settings';
 
 const SETTINGS_KEY = 'babel_gold_drafting_settings';
 const POINTER_KEY = 'babel_gold_local_model_bundle_pointer';
@@ -111,12 +112,13 @@ function defaultSettings(localModelsEnabled = false): Record<string, unknown> {
       'https://reviewgen.ovh/a3f73d6cf25fa138be653daaf2d7cd0702c0b2d69c40fb9eaee4e07d4b067dd5',
     l0DontRunLlm: false,
     audioInputEnabled: true,
+    audioEnhancementBackend: 'auto',
     localModelsEnabled,
     volunteerInferenceEnabled: false,
   };
 }
 
-function installChromeStorage(storageData: Record<string, unknown>): {
+function installChromeStorage(storageData: Record<string, unknown>, permissionGranted = true): {
   getStoredSettings: () => Record<string, unknown> | undefined;
   getPermissionRequests: () => string[][];
 } {
@@ -150,7 +152,7 @@ function installChromeStorage(storageData: Record<string, unknown>): {
       permissions: {
         request(options: { origins?: string[] }) {
           permissionRequests.push(options.origins ?? []);
-          return Promise.resolve(true);
+          return Promise.resolve(permissionGranted);
         },
         remove: () => Promise.resolve(true)
       }
@@ -391,7 +393,8 @@ test('settings controls use canonical enum normalization and retain unsaved edit
       serviceTier: 'priority',
       reasoningEffort: 'high',
       aiBrokerProvider: 'remote-openrouter',
-      l0ReplacementPreviewEnabled: false
+      l0ReplacementPreviewEnabled: false,
+      audioEnhancementBackend: 'invalid'
     }
   };
   const storage = installChromeStorage(storageData);
@@ -404,6 +407,7 @@ test('settings controls use canonical enum normalization and retain unsaved edit
   const serviceTier = select('serviceTier');
   const reasoningEffort = select('reasoningEffort');
   const provider = select('aiBrokerProvider');
+  const enhancementBackend = select('audioEnhancementBackend');
   const save = dom.window.document.querySelector<HTMLButtonElement>('[data-role="save"]');
   const status = dom.window.document.querySelector<HTMLElement>('[data-role="status"]');
   assert.ok(save);
@@ -411,19 +415,23 @@ test('settings controls use canonical enum normalization and retain unsaved edit
   assert.equal(serviceTier.value, 'priority');
   assert.equal(reasoningEffort.value, 'high');
   assert.equal(provider.value, 'remote-openrouter');
+  assert.equal(enhancementBackend.value, 'auto');
 
   // An unrecognized DOM selection must use the same fallback as persisted raw input.
   serviceTier.value = 'invalid';
   reasoningEffort.value = 'invalid';
   provider.value = 'invalid';
+  enhancementBackend.value = 'invalid';
   save.click();
   await waitForImmediate();
   assert.equal(storage.getStoredSettings()?.serviceTier, 'flex');
   assert.equal(storage.getStoredSettings()?.reasoningEffort, 'low');
   assert.equal(storage.getStoredSettings()?.aiBrokerProvider, 'auto');
+  assert.equal(storage.getStoredSettings()?.audioEnhancementBackend, 'auto');
   assert.equal(serviceTier.value, 'flex');
   assert.equal(reasoningEffort.value, 'low');
   assert.equal(provider.value, 'auto');
+  assert.equal(enhancementBackend.value, 'auto');
 
   serviceTier.value = 'default';
   reasoningEffort.value = 'xhigh';
@@ -609,4 +617,100 @@ test('successful text without complete current-bundle WebGPU evidence cannot act
   assert.equal(dom.window.document.querySelector<HTMLInputElement>('#localModelsEnabled')!.disabled, true);
   assert.match(dom.window.document.querySelector<HTMLElement>('[data-role="local-model-status"]')!.textContent ?? '', /did not prove complete C-denoise WebGPU/);
   assert.equal('webgpuTestedAt' in Object(data[POINTER_KEY]), false);
+});
+
+for (const mode of ['local', 'simple', 'advanced']) {
+  test(`ZipEnhancer remote processing saves and reloads independently in ${mode} mode`, async (t) => {
+    const dom = createDom();
+    t.after(() => { dom.window.dispatchEvent(new dom.window.Event('pagehide')); dom.window.close(); });
+    const configured = {
+      ...defaultSettings(), mode, model: 'configured/model', reasoningEffort: 'xhigh',
+      l0CustomBaseUrl: 'https://coordinator.example/base', l0ReplacementPreviewEnabled: false
+    };
+    const storage = installChromeStorage({ [SETTINGS_KEY]: configured });
+    await boot(unusedDependencies());
+    const document = dom.window.document;
+    const backend = document.querySelector<HTMLSelectElement>('#audioEnhancementBackend')!;
+    const save = document.querySelector<HTMLButtonElement>('[data-role="save"]')!;
+    assert.equal(backend.value, 'auto');
+    assert.equal(backend.matches(':disabled'), false);
+    assert.equal(backend.closest('[hidden], fieldset'), null);
+    if (mode !== 'advanced') {
+      document.querySelector<HTMLInputElement>('#l0CustomBaseUrl')!.value = 'https://unsaved.example';
+      document.querySelector<HTMLInputElement>('#model')!.value = 'unsaved/model';
+    }
+    backend.value = 'swarm';
+    save.click();
+    await waitForImmediate();
+    const remote = { ...configured, audioEnhancementBackend: 'swarm' };
+    assert.deepEqual(storage.getStoredSettings(), remote);
+    assert.deepEqual(await loadSettings(), remote);
+    assert.deepEqual(storage.getPermissionRequests(), [['https://coordinator.example/*']]);
+    assert.match(document.querySelector('[data-role="status"]')!.textContent ?? '', /next enhancement.*reload the current task/);
+
+    dom.window.dispatchEvent(new dom.window.Event('pagehide'));
+    const reopened = createDom();
+    t.after(() => { reopened.window.dispatchEvent(new reopened.window.Event('pagehide')); reopened.window.close(); });
+    await boot(unusedDependencies());
+    const reloadedBackend = reopened.window.document.querySelector<HTMLSelectElement>('#audioEnhancementBackend')!;
+    assert.equal(reloadedBackend.value, 'swarm');
+    assert.equal(reopened.window.document.querySelector<HTMLSelectElement>('#mode')!.value, mode);
+    reloadedBackend.value = 'auto';
+    reopened.window.document.querySelector<HTMLButtonElement>('[data-role="save"]')!.click();
+    await waitForImmediate();
+    assert.deepEqual(await loadSettings(), configured);
+    assert.equal(storage.getPermissionRequests().length, 1);
+  });
+
+  test(`ZipEnhancer permission refusal preserves saved settings and the remote edit in ${mode} mode`, async (t) => {
+    const dom = createDom();
+    t.after(() => { dom.window.dispatchEvent(new dom.window.Event('pagehide')); dom.window.close(); });
+    const configured = {
+      ...defaultSettings(), mode, l0CustomBaseUrl: 'https://private-coordinator.example/base',
+      l0ReplacementPreviewEnabled: false
+    };
+    const storage = installChromeStorage({ [SETTINGS_KEY]: configured }, false);
+    await boot(unusedDependencies());
+    const document = dom.window.document;
+    const backend = document.querySelector<HTMLSelectElement>('#audioEnhancementBackend')!;
+    backend.value = 'swarm';
+    document.querySelector<HTMLButtonElement>('[data-role="save"]')!.click();
+    await waitForImmediate();
+    assert.equal(storage.getStoredSettings(), undefined);
+    assert.deepEqual(await loadSettings(), configured);
+    assert.equal(backend.value, 'swarm');
+    assert.equal(document.querySelector('[data-role="status"]')!.getAttribute('role'), 'alert');
+    assert.match(document.querySelector('[data-role="status"]')!.textContent ?? '', /Host access is required.*remote ZipEnhancer/);
+    assert.deepEqual(storage.getPermissionRequests(), [['https://private-coordinator.example/*']]);
+  });
+}
+
+test('remote enhancement remains selectable across mode changes with local models and volunteering preserved', async (t) => {
+  const dom = createDom();
+  t.after(() => { dom.window.dispatchEvent(new dom.window.Event('pagehide')); dom.window.close(); });
+  const previousCaches = globalThis.caches;
+  t.after(() => Object.assign(globalThis, { caches: previousCaches }));
+  const pointer = readyPointer('babel-gold-local-models:bundle:remote-options', true);
+  installReadyCache(pointer);
+  const configured = {
+    ...defaultSettings(true), mode: 'advanced', volunteerInferenceEnabled: true,
+    l0CustomBaseUrl: 'https://coordinator.example/base', audioEnhancementBackend: 'swarm'
+  };
+  const storage = installChromeStorage({ [SETTINGS_KEY]: configured, [POINTER_KEY]: pointer });
+  await boot({ ...unusedDependencies(), volunteerStatus: async () => ({ state: 'connected' }) });
+  const document = dom.window.document;
+  const modeSelect = document.querySelector<HTMLSelectElement>('#mode')!;
+  const backend = document.querySelector<HTMLSelectElement>('#audioEnhancementBackend')!;
+  for (const mode of ['local', 'simple', 'advanced']) {
+    modeSelect.value = mode;
+    modeSelect.dispatchEvent(new dom.window.Event('change'));
+    await waitForImmediate();
+    assert.equal(backend.value, 'swarm');
+    assert.equal(backend.matches(':disabled'), false);
+    assert.equal(backend.closest('[hidden], fieldset'), null);
+    document.querySelector<HTMLButtonElement>('[data-role="save"]')!.click();
+    await waitForImmediate();
+    assert.deepEqual(await loadSettings(), { ...configured, mode });
+  }
+  assert.deepEqual(storage.getPermissionRequests(), Array.from({ length: 3 }, () => ['https://coordinator.example/*']));
 });

@@ -25,6 +25,15 @@
   <option value="advanced">Advanced</option>
 </select>
 </div>
+<div class="bui-card">
+<label for="audioEnhancementBackend" class="bui-label">ZipEnhancer processing</label>
+<select id="audioEnhancementBackend" name="audioEnhancementBackend" class="bui-select" aria-describedby="audio-enhancement-description">
+  <option value="auto">Automatic (prefer local GPU)</option>
+  <option value="swarm">Remote inference (official first, then swarm)</option>
+</select>
+<p id="audio-enhancement-description" class="bui-hint">Remote inference uses official inference services first, then the GPU swarm, even when your local GPU is available. On a cache miss, original task audio is uploaded off-device to the configured L0 coordinator and remote inference worker; a cached enhancement is reused without uploading again. Automatic prefers your local GPU and can use remote inference when local enhancement is unavailable.</p>
+<p class="bui-hint">This choice affects ZipEnhancer only, not your transcription mode or GPU volunteering. Volunteering remains a separate opt-in and processes other users' audio locally. Save Settings to apply this preference to the next enhancement; reload the current task to restart it with the saved choice. The L0 Base URL in Advanced settings configures the remote coordinator for every mode.</p>
+</div>
 <div data-role="cloud-key-settings" class="bui-card" hidden>
 <label for="openRouterApiKey" class="bui-label">OpenRouter API Key</label>
 <input id="openRouterApiKey" name="openRouterApiKey" type="password" autocomplete="off" placeholder="sk-or-..." class="bui-input">
@@ -32,7 +41,7 @@
 <section data-role="local-settings" class="bui-card" aria-labelledby="local-heading">
 <h2 id="local-heading" class="bui-title">Local C-denoise transcription</h2>
 <p class="bui-hint">The accepted speech checkpoint and learned C-denoise punctuation run on this browser's WebGPU. No OpenRouter key or inference backend is needed for transcription. An optional Gold LLM pass can refine the resulting segments. Install and verify the model bundle, then pass a short audio test before using it. Downloads and tests run only when you request them.</p>
-<p class="bui-hint">Your task audio is not uploaded for local inference. There is no CPU/WASM neural inference or automatic cloud fallback. If WebGPU or the verified bundle is unavailable, Local stops with an actionable error. Cloud transcription is available only by explicitly changing Mode.</p>
+<p class="bui-hint">Local transcription does not upload task audio. There is no CPU/WASM neural transcription or automatic cloud transcription fallback. If WebGPU or the verified bundle is unavailable, Local transcription stops with an actionable error. Cloud transcription is available only by explicitly changing Mode. ZipEnhancer processing is independent: remote enhancement uploads original audio on a cache miss even in Local mode.</p>
 </section>
 <section data-role="simple-settings" class="bui-card" aria-labelledby="simple-heading">
 <h2 id="simple-heading" class="bui-title">Cloud (Simple) transcription</h2>
@@ -150,7 +159,7 @@
             <input id="localModelsEnabled" name="localModelsEnabled" type="checkbox" disabled="" class="bui-checkbox">
             <span>
               3. Enable downloaded models in Advanced mode
-              <span class="field-help bui-hint">Local mode always uses the verified, tested bundle. This preference only selects local inference inside Advanced. Both modes require the current bundle to pass its WebGPU audio test.</span>
+              <span class="field-help bui-hint">Local mode always uses the verified, tested bundle for transcription. This preference only selects local transcription inside Advanced. Both modes require the current bundle to pass its WebGPU audio test.</span>
             </span>
           </label>
           <label class="checkbox-row bui-label bui-card bui-setting-toggle" for="volunteerInferenceEnabled">

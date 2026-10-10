@@ -1,4 +1,4 @@
-import { enhanceAudioTracks } from '../core/audio-enhancement-runtime';
+import { enhanceAudioTracks, type AudioEnhancementRunOptions } from '../core/audio-enhancement-runtime';
 import type { PreparedL0Track } from '../core/l0-client';
 import { IS_DEV_C_DENOISE, isBrowserLocalMode } from '../core/settings';
 import { buildCanonicalTaskIdentity } from '../core/transcript';
@@ -69,6 +69,7 @@ export interface LocalModelHostOptions {
   maxBufferedBytes?: number;
   staleTransferMs?: number;
   enhanceAudio?: typeof enhanceAudioTracks;
+  loadSettings?: typeof loadVolunteerSettings;
   onProgress?: (message: LocalModelEnhancementProgressMessage) => void | Promise<void>;
 }
 
@@ -297,7 +298,8 @@ export function createLocalModelHost(
   }
 
   async function execute(
-    request: Exclude<LocalModelOffscreenRequest, LocalModelUploadRequest | LocalModelDownloadRequest | LocalModelReleaseRequest>
+    request: Exclude<LocalModelOffscreenRequest, LocalModelUploadRequest | LocalModelDownloadRequest | LocalModelReleaseRequest>,
+    enhancementOptions?: AudioEnhancementRunOptions
   ): Promise<LocalModelOffscreenResponse> {
     cleanStaleTransfers(now());
     try {
@@ -309,7 +311,7 @@ export function createLocalModelHost(
             target: 'background', event: 'enhancement-progress', operation: 'enhanceAudio',
             requestId: request.requestId, taskId: request.taskId, progress
           });
-        }, { taskId: request.taskId });
+        }, { ...enhancementOptions, taskId: request.taskId });
         consumeTransfers(request.audioTracks.map((track) => track.audioTransferId));
         const totalBytes = batch.tracks.reduce((sum, track) => sum + track.bytes.byteLength, 0);
         if (bufferedBytes + totalBytes > maxBufferedBytes) throw new InvalidAudioTransferError('Enhanced audio exceeds the bounded transfer buffer.');
@@ -430,6 +432,10 @@ export function createLocalModelHost(
     }
     if (request.operation === 'enhanceAudio') {
       try {
+        const settings = await (options.loadSettings ?? loadVolunteerSettings)();
+        const enhancementOptions: AudioEnhancementRunOptions = {
+          backend: settings.audioEnhancementBackend, swarmBaseUrl: settings.l0CustomBaseUrl, runLocal: runExclusive
+        };
         await options.onProgress?.({
           type: LOCAL_MODEL_OFFSCREEN_MESSAGE_TYPE, version: LOCAL_MODEL_OFFSCREEN_VERSION,
           target: 'background', event: 'enhancement-progress', operation: 'enhanceAudio',
@@ -437,6 +443,8 @@ export function createLocalModelHost(
           progress: { phase: 'queued', trackId: request.audioTracks[0].trackId,
             trackIndex: 0, trackCount: request.audioTracks.length, completedChunks: 0, totalChunks: 0 }
         });
+        // The runtime acquires host admission only on a local cache miss.
+        return execute(request, enhancementOptions);
       } catch (error) {
         consumeTransfers(request.audioTracks.map((track) => track.audioTransferId));
         return createLocalModelFailure(request, 'offscreen-unavailable', error);

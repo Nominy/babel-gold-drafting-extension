@@ -12,8 +12,8 @@ import { enhanceZipSamplesInWorker } from './audio-enhancement-pipeline';
 import { createPackagedZipDspWorker, throwIfZipCancelled, ZipDspWorkerClient } from './audio-enhancement-worker-client';
 import { runExclusiveGpuInference } from './local-gpu-run-queue';
 import { createAudioEnhancementPairCache, enhancementSha256, runWithAudioEnhancementPairCache } from './audio-enhancement-cache';
-import type { CapturedAudioTrack } from './types';
-import type { AudioEnhancementPairCache } from './audio-enhancement-cache';
+import type { CapturedAudioTrack, ExtensionSettings } from './types';
+import type { AudioEnhancementPairCache, PreparedEnhancementSource } from './audio-enhancement-cache';
 
 const CHECKPOINT_SHA256 = 'b18896915e27a821585584221d0c0820f35e12145315ae3f1e73ccd5a68d195f';
 const SOURCE_GRAPH_SHA256 = '2f18c8f7ff10a2702d6243ce1230db9e73e6804dd6cd7b20d8e191ee06924016';
@@ -57,6 +57,7 @@ interface ZipResources { engine: ZipWebGpuEngine }
 let resourcesPromise: Promise<ZipResources> | null = null;
 let idleTimer: number | NodeJS.Timeout | null = null;
 let enhancementTail: Promise<void> = Promise.resolve();
+let ownedRequestTail: Promise<void> = Promise.resolve();
 let activeRequests = 0;
 let pairCache: AudioEnhancementPairCache | undefined;
 
@@ -134,64 +135,103 @@ export interface AudioEnhancementRunOptions {
   /** Leased work must never delegate again or persist another user's recordings. */
   localOnly?: boolean;
   cache?: boolean;
+  /** Trusted saved preference/coordinator snapshot supplied by the offscreen host. */
+  backend?: ExtensionSettings['audioEnhancementBackend'];
+  swarmBaseUrl?: string;
+  /** Host admission is acquired only for local execution, never for cache or remote waits. */
+  runLocal?: <T>(action: () => Promise<T>) => Promise<T>;
 }
 
-async function enhanceAudioTracksExclusive(
-  tracks: CapturedAudioTrack[],
-  onProgress: ((progress: AudioEnhancementProgress) => void | Promise<void>) | undefined,
+async function enhanceAudioLocally(
+  sources: PreparedEnhancementSource[],
+  selection: Extract<ZipEnhancementBackend, { backend: 'webgpu' }>,
+  reportProgress: (progress: AudioEnhancementProgress) => Promise<void>,
   options: AudioEnhancementRunOptions
-): Promise<EnhancedAudioBatch> {
+): Promise<EnhancedAudioTrack[]> {
   let worker: ZipDspWorkerClient | undefined;
   try {
     throwIfZipCancelled(options.signal);
-    const metadata = artifact();
-    const selection = await selectZipEnhancementBackend();
-    if (selection.backend === 'swarm' && options.localOnly) throw new Error('This swarm worker has no usable hardware WebGPU adapter.');
-    const reportProgress = async (progress: AudioEnhancementProgress): Promise<void> => {
-      throwIfZipCancelled(options.signal);
-      await onProgress?.({ ...progress, backend: selection.backend, ...(selection.backend === 'swarm' ? { backendReason: selection.reason } : {}) });
-      throwIfZipCancelled(options.signal);
-    };
-    const batch = await runWithAudioEnhancementPairCache(tracks, metadata, options.cache === false ? null : (pairCache ??= createAudioEnhancementPairCache()), async (sources) => {
-      if (selection.backend === 'swarm') {
-        if (!options.taskId) throw new Error('Swarm enhancement requires the current native task identity.');
-        return enhanceAudioThroughSwarm(sources, getAudioEnhancementModel(), { taskId: options.taskId, signal: options.signal, onProgress: reportProgress });
+    const enhanced: EnhancedAudioTrack[] = [];
+    for (let trackIndex = 0; trackIndex < sources.length; trackIndex++) {
+      const { track, bytes: source, sourceSha256 } = sources[trackIndex];
+      const { samples, sampleRate } = decodeEnhancementWav(source);
+      const frameCount = samples.length; // Save before worker transfer detaches source PCM.
+      const trackProgress = { trackId: track.trackId, trackIndex, trackCount: sources.length };
+      if (!resourcesPromise) {
+        await reportProgress({ ...trackProgress, phase: 'loading-model', completedChunks: 0, totalChunks: 0 });
       }
-      const enhanced: EnhancedAudioTrack[] = [];
-      for (let trackIndex = 0; trackIndex < sources.length; trackIndex++) {
-        const { track, bytes: source, sourceSha256 } = sources[trackIndex];
-        const { samples, sampleRate } = decodeEnhancementWav(source);
-        const frameCount = samples.length; // Save before worker transfer detaches source PCM.
-        const trackProgress = { trackId: track.trackId, trackIndex, trackCount: tracks.length };
-        if (!resourcesPromise) {
-          await reportProgress({ ...trackProgress, phase: 'loading-model', completedChunks: 0, totalChunks: 0 });
-        }
-        const resource = await resources(selection);
-        throwIfZipCancelled(options.signal);
-        worker ??= new ZipDspWorkerClient(createPackagedZipDspWorker(), options.signal);
-        const { bytes } = await enhanceZipSamplesInWorker(samples, sampleRate, (magnitude, phase, frames) => infer(resource, magnitude, phase, frames), {
-          client: worker, signal: options.signal,
-          onChunkCompleted: (completedChunks, totalChunks) => reportProgress({ ...trackProgress, phase: 'enhancing', completedChunks, totalChunks }),
-          onChunksReady: (totalChunks) => reportProgress({ ...trackProgress, phase: 'enhancing', completedChunks: 0, totalChunks }),
-          onEncoding: (totalChunks) => reportProgress({ ...trackProgress, phase: 'encoding', completedChunks: totalChunks, totalChunks })
-        });
-        enhanced.push({ bytes, metadata: {
-          trackId: track.trackId, speakerKey: track.speakerKey ?? track.trackId,
-          trackLabel: track.trackLabel ?? track.speakerKey ?? track.trackId, mimeType: 'audio/wav',
-          sampleRate, frameCount, sourceSha256, wavSha256: await enhancementSha256(bytes.buffer),
-          totalBytes: bytes.byteLength, chunkCount: Math.ceil(bytes.byteLength / LOCAL_MODEL_AUDIO_CHUNK_BYTES)
-        } });
-      }
+      const resource = await resources(selection);
       throwIfZipCancelled(options.signal);
-      worker?.close(); worker = undefined;
-      return enhanced;
-    }, reportProgress, options.signal);
-    return { ...batch, provider: selection.backend === 'swarm' ? 'swarm' : 'browser-local' };
+      worker ??= new ZipDspWorkerClient(createPackagedZipDspWorker(), options.signal);
+      const { bytes } = await enhanceZipSamplesInWorker(samples, sampleRate, (magnitude, phase, frames) => infer(resource, magnitude, phase, frames), {
+        client: worker, signal: options.signal,
+        onChunkCompleted: (completedChunks, totalChunks) => reportProgress({ ...trackProgress, phase: 'enhancing', completedChunks, totalChunks }),
+        onChunksReady: (totalChunks) => reportProgress({ ...trackProgress, phase: 'enhancing', completedChunks: 0, totalChunks }),
+        onEncoding: (totalChunks) => reportProgress({ ...trackProgress, phase: 'encoding', completedChunks: totalChunks, totalChunks })
+      });
+      enhanced.push({ bytes, metadata: {
+        trackId: track.trackId, speakerKey: track.speakerKey ?? track.trackId,
+        trackLabel: track.trackLabel ?? track.speakerKey ?? track.trackId, mimeType: 'audio/wav',
+        sampleRate, frameCount, sourceSha256, wavSha256: await enhancementSha256(bytes.buffer),
+        totalBytes: bytes.byteLength, chunkCount: Math.ceil(bytes.byteLength / LOCAL_MODEL_AUDIO_CHUNK_BYTES)
+      } });
+    }
+    throwIfZipCancelled(options.signal);
+    return enhanced;
   } catch (error) {
     worker?.close();
     await releaseResources();
     throw error;
   } finally { worker?.close(); }
+}
+
+function runLocalEnhancement(action: () => Promise<EnhancedAudioTrack[]>): Promise<EnhancedAudioTrack[]> {
+  if (idleTimer !== null) { globalThis.clearTimeout(idleTimer); idleTimer = null; }
+  activeRequests++;
+  const result = enhancementTail.then(action);
+  enhancementTail = result.then(() => undefined, () => undefined);
+  return result.finally(() => {
+    activeRequests--;
+    if (!activeRequests && resourcesPromise) idleTimer = globalThis.setTimeout(() => {
+      idleTimer = null;
+      void releaseResources();
+    }, MODEL_IDLE_MS);
+  });
+}
+
+async function enhanceAudioTracksSelected(
+  tracks: CapturedAudioTrack[],
+  onProgress: ((progress: AudioEnhancementProgress) => void | Promise<void>) | undefined,
+  options: AudioEnhancementRunOptions
+): Promise<EnhancedAudioBatch> {
+  throwIfZipCancelled(options.signal);
+  const metadata = artifact();
+  let backend: ZipEnhancementBackend | undefined;
+  let provider: EnhancedAudioBatch['provider'] = 'browser-local';
+  const reportProgress = async (progress: AudioEnhancementProgress): Promise<void> => {
+    throwIfZipCancelled(options.signal);
+    await onProgress?.({ ...progress, ...(backend ? {
+      backend: backend.backend, ...(backend.backend === 'swarm' ? { backendReason: progress.backendReason ?? backend.reason } : {})
+    } : {}) });
+    throwIfZipCancelled(options.signal);
+  };
+  const cache = options.localOnly || options.cache === false ? null : (pairCache ??= createAudioEnhancementPairCache());
+  const batch = await runWithAudioEnhancementPairCache(tracks, metadata, cache, async sources => {
+    const selection = await selectZipEnhancementBackend(undefined, options.localOnly ? 'auto' : options.backend);
+    backend = selection;
+    throwIfZipCancelled(options.signal);
+    if (selection.backend === 'swarm') {
+      if (options.localOnly) throw new Error('This swarm worker has no usable hardware WebGPU adapter.');
+      if (!options.taskId) throw new Error('Remote enhancement requires the current native task identity.');
+      provider = 'swarm';
+      return enhanceAudioThroughSwarm(sources, getAudioEnhancementModel(), {
+        taskId: options.taskId, signal: options.signal, onProgress: reportProgress, baseUrl: options.swarmBaseUrl
+      });
+    }
+    const run = () => runLocalEnhancement(() => enhanceAudioLocally(sources, selection, reportProgress, options));
+    return options.runLocal ? options.runLocal(run) : run();
+  }, reportProgress, options.signal);
+  return { ...batch, provider };
 }
 
 export async function enhanceAudioTracks(
@@ -201,17 +241,11 @@ export async function enhanceAudioTracks(
 ): Promise<EnhancedAudioBatch> {
   throwIfZipCancelled(options.signal);
   if (!tracks.length || tracks.some((track) => !track.trackId) || new Set(tracks.map((track) => track.trackId)).size !== tracks.length) return Promise.reject(new Error('ZipEnhancer requires distinct original source tracks.'));
-  if (idleTimer !== null) { globalThis.clearTimeout(idleTimer); idleTimer = null; }
-  activeRequests++;
-  // Offscreen already admits ASR/enhancement tasks; this also covers direct callers
-  // and makes pair-cache selection/commit atomic with respect to other Zip tasks.
-  const result = enhancementTail.then(() => enhanceAudioTracksExclusive(tracks, onProgress, options));
-  enhancementTail = result.then(() => undefined, () => undefined);
-  return result.finally(() => {
-    activeRequests--;
-    if (!activeRequests && resourcesPromise) idleTimer = globalThis.setTimeout(() => {
-      idleTimer = null;
-      void releaseResources();
-    }, MODEL_IDLE_MS);
-  });
+  const run = () => enhanceAudioTracksSelected(tracks, onProgress, options);
+  // Serialize the owner's pair-cache selection/commit, not remote waits with GPU work.
+  // Volunteer leases neither touch this cache nor wait on an owner's off-device request.
+  if (options.localOnly || options.cache === false) return run();
+  const result = ownedRequestTail.then(run);
+  ownedRequestTail = result.then(() => undefined, () => undefined);
+  return result;
 }

@@ -4,7 +4,7 @@ import type { EnhancedAudioTrack } from './audio-enhancement-runtime';
 import { INFERENCE_HEADERS } from './inference-release';
 import { normalizeL0CustomBaseUrl } from './settings';
 import {
-  ENHANCEMENT_CONTROL_BYTES, ENHANCEMENT_MAX_REQUEST_BYTES, parseEnhancementPayload,
+  ENHANCEMENT_CONTROL_BYTES, ENHANCEMENT_MAX_REQUEST_BYTES, getEnhancementClientId, parseEnhancementPayload,
   parseEnhancementTrackMetadata, parseEnhancementWorkerProgress, readBoundedSwarmBlob,
   readBoundedSwarmJson, swarmRecord, verifyEnhancementWav,
   type EnhancementModelDescriptor, type EnhancementSwarmPayload, type EnhancementWorkerProgress
@@ -18,7 +18,7 @@ export interface EnhancementSwarmOptions {
   taskId: string;
   signal?: AbortSignal;
   onProgress?: (progress: AudioEnhancementProgress) => void | Promise<void>;
-  /** Internal transport override for isolated coordinators; never sourced from page operations. */
+  /** Trusted coordinator snapshot from the host, or an internal isolated coordinator. Never page-sourced. */
   baseUrl?: string;
 }
 
@@ -77,7 +77,7 @@ export async function enhanceAudioThroughSwarm(
   sources: PreparedEnhancementSource[], model: EnhancementModelDescriptor, options: EnhancementSwarmOptions
 ): Promise<EnhancedAudioTrack[]> {
   options.signal?.throwIfAborted();
-  const payload = parseEnhancementPayload({ taskId: options.taskId, model, tracks: sources.map((source, index) => ({
+  const payload = parseEnhancementPayload({ taskId: options.taskId, clientId: getEnhancementClientId(), model, tracks: sources.map((source, index) => ({
     trackId: source.trackId, speakerKey: source.track.speakerKey ?? source.trackId,
     trackLabel: source.track.trackLabel ?? source.track.speakerKey ?? source.trackId,
     fieldName: `audio:${index + 1}`, sourceSha256: source.sourceSha256, sampleRate: source.sampleRate, frameCount: source.frameCount
@@ -86,7 +86,7 @@ export async function enhanceAudioThroughSwarm(
     throw new Error('Original recordings exceed the swarm upload limit; Originals remain selected.');
   }
   const controller = new AbortController(), pollController = new AbortController();
-  const timer = setTimeout(() => controller.abort(new Error('Swarm enhancement timed out; Originals remain selected. Try again when a compatible GPU volunteer is available.')), REQUEST_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(new Error('Remote enhancement timed out; Originals remain selected. Try again when a compatible GPU inference service or volunteer is available.')), REQUEST_TIMEOUT_MS);
   const signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
   const pollSignal = AbortSignal.any([signal, pollController.signal]);
   let polling: Promise<void> | undefined;
@@ -105,7 +105,7 @@ export async function enhanceAudioThroughSwarm(
     const requestId = crypto.randomUUID();
     const ownerToken = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
     const headers = { ...INFERENCE_HEADERS, Authorization: `Bearer ${ownerToken}` };
-    await options.onProgress?.({ phase: 'uploading', backend: 'swarm', backendReason: 'Uploading both Original recordings to the configured coordinator for a volunteer GPU.',
+    await options.onProgress?.({ phase: 'uploading', backend: 'swarm', backendReason: 'Sending both Original recordings off-device to the configured coordinator: official GPU inference first, then the GPU swarm.',
       trackId: payload.tracks[0].trackId, trackIndex: 0, trackCount: 2, completedChunks: 0, totalChunks: 0 });
     signal.throwIfAborted();
     const pending = fetch(`${baseUrl}/v1/enhance`, { method: 'POST', headers: { ...headers, 'X-Babel-Local-Engine': '1', 'X-Babel-Request-Id': requestId }, body: form, redirect: 'error', signal });
@@ -129,7 +129,7 @@ export async function enhanceAudioThroughSwarm(
           await options.onProgress?.({ ...progress, backend: 'swarm' });
           previous = progress;
         } else if (!previous) {
-          await options.onProgress?.({ phase: 'queued', backend: 'swarm', backendReason: 'Waiting for a compatible volunteer GPU; Original audio has been sent to the coordinator.',
+          await options.onProgress?.({ phase: 'queued', backend: 'swarm', backendReason: 'Waiting for remote GPU inference; Original audio has been sent off-device to the coordinator.',
             trackId: payload.tracks[0].trackId, trackIndex: 0, trackCount: 2, completedChunks: 0, totalChunks: 0 });
         }
       }
@@ -142,7 +142,7 @@ export async function enhanceAudioThroughSwarm(
       const error = await readBoundedSwarmJson(response, signal).catch(() => undefined);
       const detail = swarmRecord(error) && typeof error.detail === 'string' ? error.detail.slice(0, 500)
         : swarmRecord(error) && typeof error.error === 'string' ? error.error.slice(0, 500) : `HTTP ${response.status}`;
-      throw new Error(`Swarm enhancement unavailable: ${detail}. Originals remain selected; enable a compatible GPU volunteer and try again.`);
+      throw new Error(`Remote enhancement unavailable: ${detail}. Originals remain selected; try again when a compatible GPU inference service or volunteer is available.`);
     }
     receiving = true;
     await options.onProgress?.({ phase: 'transferring', backend: 'swarm',

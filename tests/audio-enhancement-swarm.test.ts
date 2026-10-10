@@ -5,7 +5,7 @@ import { enhanceAudioThroughSwarm } from '../src/core/audio-enhancement-swarm';
 import { enhancementSha256, type PreparedEnhancementSource } from '../src/core/audio-enhancement-cache';
 import { encodeEnhancementWav } from '../src/core/audio-enhancement-dsp';
 import {
-  ENHANCEMENT_MODEL_ID, ENHANCEMENT_SOURCE_GRAPH_SHA256, parseEnhancementPayload,
+  ENHANCEMENT_MODEL_ID, ENHANCEMENT_SOURCE_GRAPH_SHA256, getEnhancementClientId, parseEnhancementPayload,
   parseEnhancementWorkerProgress, readBoundedSwarmBlob, verifyEnhancementWav,
   type EnhancementSwarmPayload
 } from '../src/core/audio-enhancement-swarm-protocol';
@@ -50,7 +50,7 @@ test('swarm client sends exact Original WAVs with owner capability and validates
     assert.match(headers.get('X-Babel-Request-Id')!, /^[a-f0-9-]{36}$/);
     assert.match(headers.get('Authorization')!, /^Bearer [A-Za-z0-9_-]{43}$/);
     const form = init.body as FormData;
-    assert.deepEqual(JSON.parse(String(form.get('payload'))), data.payload);
+    assert.deepEqual(JSON.parse(String(form.get('payload'))), { ...data.payload, clientId: getEnhancementClientId() });
     assert.deepEqual(Array.from(form.keys()), ['payload', 'audio:1', 'audio:2']);
     assert.deepEqual(await (form.get('audio:1') as Blob).arrayBuffer(), data.bytes);
     return data.response();
@@ -77,7 +77,7 @@ test('default swarm coordinator is loaded from saved background settings, not pu
 test('no matching worker is actionable and no enhanced output is accepted', async t => {
   const data = await fixture();
   t.mock.method(globalThis, 'fetch', async () => Response.json({ error: 'No matching WebGPU volunteer is registered' }, { status: 503 }));
-  await assert.rejects(enhanceAudioThroughSwarm(data.sources, model, { taskId: data.payload.taskId, baseUrl }), /Originals remain selected.*compatible GPU volunteer/);
+  await assert.rejects(enhanceAudioThroughSwarm(data.sources, model, { taskId: data.payload.taskId, baseUrl }), /Originals remain selected.*compatible GPU inference service or volunteer/);
 });
 
 test('client rejects wrong task/model/source identity, clocks, hashes, and malformed enhanced WAVs', async t => {
@@ -212,6 +212,18 @@ test('progress and payload validators reject regression, field reuse, transcript
   assert.throws(() => parseEnhancementPayload({ ...payload, tracks: [{ ...payload.tracks[0], frameCount: -1 }, payload.tracks[1]] }), /clocks/);
   const badModel: EnhancementSwarmPayload = { ...payload, model: { ...model, sha256: 'not-a-hash' } };
   assert.throws(() => parseEnhancementPayload(badModel), /model descriptor/);
+});
+
+test('enhancement client identity is a stable instance UUID and optional only for older clients', async () => {
+  const { payload } = await fixture();
+  const clientId = getEnhancementClientId();
+  assert.match(clientId, /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/);
+  assert.equal(getEnhancementClientId(), clientId);
+  assert.equal(parseEnhancementPayload({ ...payload, clientId }).clientId, clientId);
+  assert.equal(parseEnhancementPayload(payload).clientId, undefined);
+  for (const invalid of ['', 'not-a-uuid', 42, null, `${clientId}\n`]) {
+    assert.throws(() => parseEnhancementPayload({ ...payload, clientId: invalid }), /payload/);
+  }
 });
 
 test('invalid isolated coordinator override and already cancelled requests never upload to the public coordinator', async t => {

@@ -9,7 +9,7 @@ import { parseL0TimingResponse } from '../core/l0-timing-client';
 import { selectZipEnhancementBackend } from '../core/audio-enhancement-backend';
 import { enhanceAudioTracks, getAudioEnhancementModel, type EnhancedAudioBatch } from '../core/audio-enhancement-runtime';
 import {
-  ENHANCEMENT_MAX_TRACK_BYTES, parseEnhancementModel, parseEnhancementPayload, parseEnhancementTrackMetadata,
+  ENHANCEMENT_MAX_TRACK_BYTES, getEnhancementClientId, parseEnhancementModel, parseEnhancementPayload, parseEnhancementTrackMetadata,
   parseEnhancementWorkerProgress, readBoundedSwarmBlob, readBoundedSwarmJson, sameEnhancementModel, verifyEnhancementWav,
   type EnhancementModelDescriptor, type EnhancementSwarmPayload, type EnhancementWorkerProgress
 } from '../core/audio-enhancement-swarm-protocol';
@@ -286,7 +286,7 @@ export function createVolunteer(dependencies: VolunteerDependencies = defaultVol
         }
         const baseUrl = normalizeL0CustomBaseUrl(settings.l0CustomBaseUrl);
         const registration = { modelBundleSchema: SCHEMA, protocolVersion: INFERENCE_RELEASE.protocolVersion, modelRelease: INFERENCE_RELEASE.id,
-          maxLeaseBytes: LEASE_RESPONSE_BYTES, operations,
+          clientId: getEnhancementClientId(), maxLeaseBytes: LEASE_RESPONSE_BYTES, operations,
           ...(readiness.enhancementModel ? { enhancementModel: readiness.enhancementModel } : {}) };
         const nextKey = JSON.stringify([baseUrl, registration]);
         if (nextKey !== registrationKey) { credentials = null; registrationKey = nextKey; }

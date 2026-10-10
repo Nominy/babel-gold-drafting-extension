@@ -4,6 +4,7 @@ import { enhanceZipSamples } from '../src/core/audio-enhancement-dsp';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
+import { setTimeout as delay } from 'node:timers/promises';
 
 import { createLocalModelOffscreenBridge } from '../src/background/local-model-offscreen';
 import { LocalModelBridgeError, createLocalModelClient } from '../src/core/local-model-client';
@@ -617,6 +618,7 @@ test('enhancement streams two complete tracks in bounded downloads independently
   };
   let enhancements = 0;
   const host = createLocalModelHost(async () => { throw new Error('Enhancement must not initialize ASR'); }, {
+    loadSettings: async () => DEFAULT_SETTINGS,
     enhanceAudio: async (originals) => {
       enhancements++;
       assert.deepEqual(originals.map((track) => track.trackId), ['track-1', 'track-2']);
@@ -665,7 +667,9 @@ test('stale enhancement stops streaming and cleans retained output even when a c
       mimeType: 'audio/wav', sampleRate: 16000, frameCount: (bytes.length - 44) / 2,
       sourceSha256: 'a'.repeat(64), wavSha256: 'b'.repeat(64), totalBytes: bytes.length, chunkCount: 2 }
   }] };
-  const host = createLocalModelHost(async () => { throw new Error('ASR must remain unloaded'); }, { enhanceAudio: async () => batch });
+  const host = createLocalModelHost(async () => { throw new Error('ASR must remain unloaded'); }, {
+    loadSettings: async () => DEFAULT_SETTINGS, enhanceAudio: async () => batch
+  });
   let outputId = '', current = true, emitted = 0;
   const client = createLocalModelClient(async (request) => {
     const response = await host.handleRequest({ ...request, target: 'offscreen' });
@@ -821,3 +825,70 @@ test(`background routes only owned offscreen progress and forgets requests after
 });
 }
 
+test('host snapshots saved remote routing through background RPC without blocking local volunteer admission', async t => {
+  const saved = { ...DEFAULT_SETTINGS, mode: 'simple' as const, localModelsEnabled: false,
+    audioEnhancementBackend: 'swarm' as 'auto' | 'swarm', l0CustomBaseUrl: 'https://trusted.example/private/?discard=1' };
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'chrome');
+  let settingsReads = 0;
+  Object.defineProperty(globalThis, 'chrome', { configurable: true, value: { runtime: {
+    sendMessage: async (message: unknown) => {
+      assert.deepEqual(message, { type: 'babel-l0-volunteer', target: 'background', action: 'settings' });
+      settingsReads++;
+      return saved;
+    }
+  } } });
+  t.after(() => {
+    if (previous) Object.defineProperty(globalThis, 'chrome', previous);
+    else Reflect.deleteProperty(globalThis, 'chrome');
+  });
+  const started = Promise.withResolvers<void>(), finish = Promise.withResolvers<void>();
+  const host = createLocalModelHost(async () => { assert.fail('Remote enhancement must not load or change ASR'); }, {
+    onProgress: () => {
+      saved.audioEnhancementBackend = 'auto';
+      saved.l0CustomBaseUrl = 'https://changed.example';
+    },
+    enhanceAudio: async (_tracks, _progress, options) => {
+      assert.equal(options?.backend, 'swarm');
+      assert.equal(options?.swarmBaseUrl, 'https://trusted.example/private');
+      assert.equal(typeof options?.runLocal, 'function');
+      assert.equal(options?.taskId, 'snapshot-task');
+      started.resolve();
+      await finish.promise;
+      throw new Error('Remote request finished');
+    }
+  });
+  const client = createLocalModelClient(request => host.handleRequest({
+    ...request, target: 'offscreen',
+    // The host never reads page-supplied routing, even if a prior boundary were bypassed.
+    settings: { audioEnhancementBackend: 'auto', l0CustomBaseUrl: 'https://untrusted.example' },
+    backend: 'auto', swarmBaseUrl: 'https://untrusted.example'
+  } as unknown as LocalModelOffscreenRequest));
+  const rejected = assert.rejects(client.enhanceAudio('snapshot-task', audioTracks, {
+    isCurrent: () => true, onAudioChunk: () => { assert.fail('Failed remote inference cannot return audio'); }
+  }), /Remote request finished/);
+  await started.promise;
+  let admitted = false;
+  try {
+    admitted = await Promise.race([
+      host.runExclusive(async () => true), delay(2000, false)
+    ]);
+  } finally {
+    finish.resolve();
+    await rejected;
+  }
+  assert.equal(admitted, true, 'waiting for remote inference cannot hold host inferenceTail against volunteer work');
+  assert.equal(settingsReads, 1);
+  assert.equal(saved.mode, 'simple');
+  assert.equal(saved.localModelsEnabled, false);
+});
+
+test('unavailable trusted settings fail enhancement closed before runtime execution', async () => {
+  const host = createLocalModelHost(undefined, {
+    loadSettings: async () => { throw new Error('Saved routing unavailable'); },
+    enhanceAudio: async () => { assert.fail('An unavailable routing snapshot cannot default to an upload'); }
+  });
+  const client = createLocalModelClient(request => host.handleRequest({ ...request, target: 'offscreen' }));
+  await assert.rejects(client.enhanceAudio('missing-settings', audioTracks, {
+    isCurrent: () => true, onAudioChunk: () => { assert.fail('No enhanced audio exists'); }
+  }), /Saved routing unavailable/);
+});

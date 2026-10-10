@@ -26,6 +26,7 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
   l0CustomBaseUrl: PUBLIC_L0_BASE_URL,
   l0DontRunLlm: false,
   audioInputEnabled: true,
+  audioEnhancementBackend: 'auto',
   localModelsEnabled: false,
   volunteerInferenceEnabled: false,
 };
@@ -103,6 +104,7 @@ export function normalizeSettings(input: unknown): ExtensionSettings {
     typeof raw.audioInputEnabled === 'boolean'
       ? raw.audioInputEnabled
       : DEFAULT_SETTINGS.audioInputEnabled;
+  const audioEnhancementBackend = raw.audioEnhancementBackend === 'swarm' ? 'swarm' : 'auto';
   const localModelsEnabled = raw.localModelsEnabled === true;
   const volunteerInferenceEnabled =
     typeof raw.volunteerInferenceEnabled === 'boolean'
@@ -122,6 +124,7 @@ export function normalizeSettings(input: unknown): ExtensionSettings {
     l0CustomBaseUrl,
     l0DontRunLlm,
     audioInputEnabled,
+    audioEnhancementBackend,
     localModelsEnabled,
     volunteerInferenceEnabled
   };

@@ -199,7 +199,7 @@ async function handleBrokerRequest(
       emit({ type: 'event', event: 'capturing-audio', operation: 'enhanceAudio', message: 'Capturing both original native audio tracks.' });
       const tracks = await captureOriginalAudioTracksForEnhancement();
       if (!isCurrent()) return brokerError('stale-task', 'The native audio task changed during capture.', false);
-      emit({ type: 'event', event: 'calling-backend', operation: 'enhanceAudio', message: 'Checking the pair cache and GPU: without usable WebGPU, Original audio is sent to a remote swarm worker.' });
+      emit({ type: 'event', event: 'calling-backend', operation: 'enhanceAudio', message: 'Checking the pair cache and saved ZipEnhancer preference. Remote inference sends Original recordings off-device only on a cache miss, using official GPU inference first, then the GPU swarm.' });
       const result = await enhanceLocalAudio(message.taskId, tracks, {
         isCurrent,
         onAudioChunk: (chunk) => emit(chunk),

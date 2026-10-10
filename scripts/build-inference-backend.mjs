@@ -3,14 +3,23 @@ import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ortJsepBuildOptions } from './ort-jsep-options.mjs';
+import { prepareZipWebGpuArtifact, zipWebGpuAssets } from './zip-webgpu-artifact.mjs';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const { version } = JSON.parse(await readFile(path.join(root, 'manifest.json'), 'utf8'));
 const destination = path.join(root, '.artifacts/inference-backend/extension');
 await mkdir(destination, { recursive: true });
+await prepareZipWebGpuArtifact(root);
 await build({ ...ortJsepBuildOptions, entryPoints: [path.join(root, 'src/backend/inference-page.ts')], outfile: path.join(destination, 'inference.js'),
   bundle: true, platform: 'browser', format: 'esm', target: 'chrome114', conditions: ['onnxruntime-web-use-extern-wasm'],
   define: { ...ortJsepBuildOptions.define, __BABEL_DEV_C_DENOISE_MODEL_URL__: JSON.stringify(process.env.BABEL_DEV_C_DENOISE_MODEL_URL || '') }
 });
+await build({ entryPoints: [path.join(root, 'src/workers/audio-enhancement.ts')],
+  outfile: path.join(destination, 'dist/workers/audio-enhancement.js'), bundle: true,
+  platform: 'browser', format: 'iife', target: 'chrome114' });
+await mkdir(path.join(destination, 'dist/models'), { recursive: true });
+for (const name of zipWebGpuAssets) {
+  await copyFile(path.join(root, 'models', name), path.join(destination, 'dist/models', name));
+}
 await writeFile(path.join(destination, 'manifest.json'), JSON.stringify({ manifest_version: 3, name: 'Babel trusted C-denoise runtime', version,
   permissions: ['storage', 'unlimitedStorage'], host_permissions: ['https://reviewgen.ovh/*', 'http://127.0.0.1/*', 'http://localhost/*'],
   background: { service_worker: 'background.js' },

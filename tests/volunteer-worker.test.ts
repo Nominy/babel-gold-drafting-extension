@@ -7,7 +7,7 @@ import { DEFAULT_SETTINGS, PUBLIC_L0_BASE_URL } from '../src/core/settings';
 import type { L0DraftResponse, L0TimingResponse } from '../src/core/types';
 import { encodeEnhancementWav } from '../src/core/audio-enhancement-dsp';
 import { enhancementSha256 } from '../src/core/audio-enhancement-cache';
-import { ENHANCEMENT_MAX_TRACK_BYTES, ENHANCEMENT_MODEL_ID, ENHANCEMENT_SOURCE_GRAPH_SHA256 } from '../src/core/audio-enhancement-swarm-protocol';
+import { ENHANCEMENT_MAX_TRACK_BYTES, ENHANCEMENT_MODEL_ID, ENHANCEMENT_SOURCE_GRAPH_SHA256, getEnhancementClientId } from '../src/core/audio-enhancement-swarm-protocol';
 import type { EnhancedAudioBatch } from '../src/core/audio-enhancement-runtime';
 import { hydratePunctuatedTiming, __localModelRuntimeTesting } from '../src/core/local-model-runtime';
 
@@ -384,6 +384,9 @@ async function enhancementFixture() {
       bytes, metadata: { ...track, mimeType: 'audio/wav', wavSha256: sha256, totalBytes: bytes.byteLength, chunkCount: 1 }
     })) };
   const harness = fixture([enhancementLease], false);
+  harness.dependencies.settings = async () => ({
+    ...DEFAULT_SETTINGS, mode: 'advanced', localModelsEnabled: true, volunteerInferenceEnabled: true, audioEnhancementBackend: 'swarm'
+  });
   const progress: unknown[] = [];
   let uploaded: FormData | undefined;
   harness.dependencies.ready = async () => ({ transcribe: false, draft: false, enhancementModel });
@@ -434,6 +437,7 @@ test('enhancement-only GPU volunteer registers without ASR, reports real chunks,
   assert.equal(worker.getStatus().state, 'connected');
   assert.deepEqual(JSON.parse(String(harness.requests[0].init.body)).operations, ['enhance']);
   assert.deepEqual(JSON.parse(String(harness.requests[0].init.body)).enhancementModel, enhancementModel);
+  assert.equal(JSON.parse(String(harness.requests[0].init.body)).clientId, getEnhancementClientId());
   assert.deepEqual(harness.calls, ['exclusive', 'enhance']);
   assert.equal(harness.progress.length, 6);
   assert.deepEqual(harness.progress[0], { workerId: 'volunteer-1', token: 'worker-secret', leaseToken: 'lease-secret',

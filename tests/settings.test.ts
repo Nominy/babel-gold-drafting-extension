@@ -25,6 +25,21 @@ test('volunteering requires explicit opt-in and preserves stored boolean choices
   assert.equal(normalizeSettings({ volunteerInferenceEnabled: 'true' }).volunteerInferenceEnabled, false);
 });
 
+test('ZipEnhancer defaults to automatic and accepts only an explicit remote backend', () => {
+  assert.equal(DEFAULT_SETTINGS.audioEnhancementBackend, 'auto');
+  for (const value of [undefined, null, '', 'remote', 'SWARM', true, 1, {}, []]) {
+    assert.equal(normalizeSettings({ audioEnhancementBackend: value }).audioEnhancementBackend, 'auto');
+  }
+  for (const mode of ['local', 'simple', 'advanced']) {
+    for (const audioEnhancementBackend of ['auto', 'swarm']) {
+      const settings = normalizeSettings({ mode, audioEnhancementBackend });
+      assert.equal(settings.audioEnhancementBackend, audioEnhancementBackend);
+      assert.equal(settings.mode, mode);
+      assert.equal(settings.volunteerInferenceEnabled, false);
+    }
+  }
+});
+
 
 test('local model normalization keeps existing settings fields intact while dropping legacy source URLs', () => {
   const settings = normalizeSettings({
@@ -57,6 +72,7 @@ test('local model normalization keeps existing settings fields intact while drop
     l0CustomBaseUrl: 'https://l0.example.test',
     l0DontRunLlm: true,
     audioInputEnabled: false,
+    audioEnhancementBackend: 'auto',
     localModelsEnabled: true,
     volunteerInferenceEnabled: false
   });
@@ -214,14 +230,48 @@ test('loading raw storage distinguishes missing settings from a legacy object an
     }
   });
   assert.equal((await loadSettings()).mode, 'local');
+  assert.equal((await loadSettings()).audioEnhancementBackend, 'auto');
   stored[SETTINGS_STORAGE_KEY] = { localModelsEnabled: true, volunteerInferenceEnabled: false };
   const advanced = await loadSettings();
   assert.equal(advanced.mode, 'advanced');
   assert.equal(advanced.localModelsEnabled, true);
+  assert.equal(advanced.audioEnhancementBackend, 'auto');
   const simple = await saveSettings({ ...advanced, mode: 'simple' });
   assert.deepEqual(await loadSettings(), simple);
   assert.equal(simple.localModelsEnabled, true);
   assert.equal(simple.volunteerInferenceEnabled, false);
   await saveSettings({ ...simple, mode: 'advanced' });
   assert.deepEqual(await loadSettings(), advanced);
+});
+
+test('remote enhancement survives storage round trips and transcription mode changes independently', async (t) => {
+  const previousChrome = globalThis.chrome;
+  t.after(() => Object.assign(globalThis, { chrome: previousChrome }));
+  const stored: Record<string, unknown> = {};
+  Object.assign(globalThis, {
+    chrome: {
+      runtime: {},
+      storage: { local: {
+        get(_key: string, callback: (items: Record<string, unknown>) => void) { callback(stored); },
+        set(items: Record<string, unknown>, callback: () => void) {
+          Object.assign(stored, items);
+          callback();
+        }
+      } }
+    }
+  });
+  for (const mode of ['local', 'simple', 'advanced']) {
+    const saved = await saveSettings({
+      ...await loadSettings(), mode, audioEnhancementBackend: 'swarm',
+      localModelsEnabled: true, volunteerInferenceEnabled: false, l0CustomBaseUrl: 'https://coordinator.example/base'
+    });
+    assert.deepEqual(await loadSettings(), saved);
+    assert.equal(saved.mode, mode);
+    assert.equal(saved.audioEnhancementBackend, 'swarm');
+    assert.equal(saved.localModelsEnabled, true);
+    assert.equal(saved.volunteerInferenceEnabled, false);
+  }
+  const automatic = await saveSettings({ ...await loadSettings(), audioEnhancementBackend: 'invalid' });
+  assert.equal(automatic.audioEnhancementBackend, 'auto');
+  assert.deepEqual(await loadSettings(), automatic);
 });

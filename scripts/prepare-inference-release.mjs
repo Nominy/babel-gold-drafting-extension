@@ -27,6 +27,7 @@ const manifest = JSON.parse(await readFile(path.join(bundle, 'manifest.json'), '
 if (manifest.schema !== release.bundleSchema || !manifest.pass || !manifest.validation?.actualWebGPU?.pass) throw new Error('Only a numerically and hardware-validated v3 bundle can be prepared.');
 const backendEvidence = JSON.parse(await readFile(argumentsMap.get('--evidence'), 'utf8'));
 if (!backendEvidence.pass || !backendEvidence.labelsSurviveRestart || backendEvidence.health?.release !== release.id || backendEvidence.health?.provider !== 'webgpu') throw new Error('A successful actual backend/restart report is required.');
+if (!backendEvidence.health?.ok || backendEvidence.health?.enhancement?.provider !== 'webgpu') throw new Error('A successful ZipEnhancer WebGPU backend preflight is required.');
 const coordinatorEvidence = JSON.parse(await readFile(argumentsMap.get('--coordinator-evidence'), 'utf8'));
 if (!coordinatorEvidence.pass || coordinatorEvidence.release !== release.id || coordinatorEvidence.oldClientStatus !== 426 || !coordinatorEvidence.trustedFallback || !coordinatorEvidence.labelsSurviveCoordinatorRestart) throw new Error('A successful coordinator release-gate and restart report is required.');
 for (const [name, expected] of Object.entries(release.graphs)) {
@@ -48,6 +49,10 @@ function run(script, args = []) { execFileSync(process.execPath, [path.join(root
 run('esbuild.config.mjs');
 run('scripts/pack.mjs', ['--no-build']);
 run('scripts/build-inference-backend.mjs');
+const enhancement = JSON.parse(await readFile(path.join(root, 'src/core/audio-enhancement-webgpu-model.json'), 'utf8'));
+if (['id', 'sha256', 'sourceGraphSha256'].some(key => backendEvidence.health.enhancement[key] !== enhancement[key])) {
+  throw new Error('Backend enhancement evidence does not match the packaged ZipEnhancer artifact.');
+}
 await mkdir(output, { recursive: true });
 const models = path.join(output, 'models', release.id);
 for (const file of manifest.files) {

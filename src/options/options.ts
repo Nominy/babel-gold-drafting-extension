@@ -77,6 +77,7 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
   const l0CustomBaseUrlInput = requireElement<HTMLInputElement>('#l0CustomBaseUrl');
   const l0DontRunLlmInput = requireElement<HTMLInputElement>('#l0DontRunLlm');
   const audioInputEnabledInput = requireElement<HTMLInputElement>('#audioInputEnabled');
+  const audioEnhancementBackendSelect = requireElement<HTMLSelectElement>('#audioEnhancementBackend');
   const localModelsEnabledInput = requireElement<HTMLInputElement>('#localModelsEnabled');
   const volunteerInferenceEnabledInput = requireElement<HTMLInputElement>('#volunteerInferenceEnabled');
   const volunteerLabel = document.querySelector<HTMLElement>('[data-role="volunteer-label"]');
@@ -174,6 +175,7 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
     l0CustomBaseUrlInput.value = settings.l0CustomBaseUrl;
     l0DontRunLlmInput.checked = settings.l0DontRunLlm;
     audioInputEnabledInput.checked = settings.audioInputEnabled;
+    audioEnhancementBackendSelect.value = settings.audioEnhancementBackend;
     localModelsEnabledInput.checked = settings.localModelsEnabled;
     volunteerInferenceEnabledInput.checked = settings.volunteerInferenceEnabled;
     renderL0ReplacementSettings();
@@ -452,6 +454,7 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
           l0CustomBaseUrl: normalizeL0CustomBaseUrl(l0CustomBaseUrlInput.value),
           l0DontRunLlm: l0DontRunLlmInput.checked,
           audioInputEnabled: audioInputEnabledInput.checked,
+          audioEnhancementBackend: audioEnhancementBackendSelect.value,
           localModelsEnabled: localModelsEnabledInput.checked,
           volunteerInferenceEnabled: IS_DEV_C_DENOISE
             ? persistedSettings.volunteerInferenceEnabled
@@ -460,6 +463,7 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
       : {
           ...persistedSettings,
           mode: modeSelect.value === 'local' ? 'local' : 'simple',
+          audioEnhancementBackend: audioEnhancementBackendSelect.value,
           ...(modeSelect.value === 'local'
             ? { openRouterApiKey: openRouterApiKeyInput.value, l0DontRunLlm: l0DontRunLlmInput.checked, volunteerInferenceEnabled: IS_DEV_C_DENOISE
                 ? persistedSettings.volunteerInferenceEnabled
@@ -482,9 +486,11 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
     };
     void validateLocalModels()
       .then(() =>
-        advanced && settingsToSave.l0ReplacementPreviewEnabled && !settingsToSave.localModelsEnabled
-          ? requestHostPermission(settingsToSave.l0CustomBaseUrl, 'use the custom L0 endpoint')
-          : Promise.resolve()
+        settingsToSave.audioEnhancementBackend === 'swarm'
+          ? requestHostPermission(settingsToSave.l0CustomBaseUrl, 'use remote ZipEnhancer inference')
+          : advanced && settingsToSave.l0ReplacementPreviewEnabled && !settingsToSave.localModelsEnabled
+            ? requestHostPermission(settingsToSave.l0CustomBaseUrl, 'use the custom L0 endpoint')
+            : Promise.resolve()
       )
       .then(() => saveSettings(settingsToSave))
       .then((saved) => {
@@ -493,7 +499,7 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
         else if (saved.mode === 'simple') openRouterApiKeyInput.value = saved.openRouterApiKey;
         renderLocalModelControls();
         void renderMode();
-        status.textContent = 'Saved. Reload Babel tabs to pick up the new settings.';
+        status.textContent = 'Saved. ZipEnhancer processing applies to the next enhancement; reload the current task to restart. Reload Babel tabs to pick up other settings.';
         status.setAttribute('role', 'status');
         status.setAttribute('aria-live', 'polite');
       })
