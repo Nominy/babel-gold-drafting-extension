@@ -498,6 +498,15 @@ def mixed_precision(model, provenance):
     blocked = {n.name for n in model.graph.node
                if n.op_type in sensitive_ops or (n.name.rsplit("/", 1)[0] in scopes
                                                 and n.op_type not in {"MatMul", "Conv"})}
+    # The first frequency block is not normalized until its final residual.
+    # On a silent STFT window its feed-forward projection reaches -70049.98:
+    # FP32 accumulation followed by FP16 storage still overflows (limit 65504).
+    # Keep this entire residual path wide through its normalization, rather
+    # than clipping activations or special-casing silence. Attention consumers
+    # retain their bounded FP16 outputs and the existing fused output identity.
+    blocked.update(n.name for n in model.graph.node
+                   if n.name.startswith("/model/TSConformer/encoders.0/f_layers.0/")
+                   and n.op_type != "ZipRelativeAttention")
     # ORT normally rounds a shared initializer even on its FP32 branch. Split
     # only mixed-use constants so sensitive scopes retain the original bits.
     constants = {t.name: t for t in model.graph.initializer}

@@ -18,7 +18,7 @@ Load `babel-gold-drafting-extension/` unpacked in `chrome://extensions`. Run `np
 
 ## Packaged ZipEnhancer runtime
 
-With matching Babel Helper and **Review Grader 0.1.1 or newer** installed and enabled, default-enabled **ZipEnhancer audio** automatically enhances both loaded speaker lanes. Without the pinned Review Grader extension, enhancement UI/settings, capture, cache/model initialization and swarm work stay inactive; other Gold/Helper features remain available. A usable hardware WebGPU adapter runs the packaged model locally; otherwise a cache miss uploads the Original recordings to a compatible remote swarm GPU. Assets are `models/zipenhancer-webgpu.plan.json` and `zipenhancer-webgpu.weights.bin` (4.21 MB of weights). There is no CPU inference engine. The enhancement model is independent of the downloadable C-denoise/ASR bundle.
+With matching Babel Helper and **Review Grader 0.1.1 or newer** installed and enabled, default-enabled **ZipEnhancer audio** automatically enhances both loaded speaker lanes. Without the pinned Review Grader extension, enhancement UI/settings, capture, cache/model initialization and swarm work stay inactive; other Gold/Helper features remain available. A usable hardware WebGPU adapter runs the packaged model locally; otherwise a cache miss uploads the Original recordings to a compatible remote swarm GPU. Assets are `models/zipenhancer-webgpu.plan.json` and `zipenhancer-webgpu.weights.bin` (4.54 MB of weights). There is no CPU inference engine. The enhancement model is independent of the downloadable C-denoise/ASR bundle.
 
 Gold verifies packaged asset hashes and actual local neural GPU dispatches without changing ASR's ORT environment. GPU admission requires a confirmed hardware adapter, FP16/timestamp support, and sufficient kernel limits. Only unavailable capabilities select the swarm: GPU model/allocation/inference errors remain failures rather than triggering an off-device retry. Both routes use the same model identity, full-context windows, source clocks, overlap and per-lane RMS restoration.
 
@@ -36,17 +36,22 @@ Model provenance/license remain in `models/zipenhancer.NOTICE` and `.LICENSE`. T
 
 The fixed `[1, 201, 641]` engine reuses pinned ORT WGSL operators without a WASM session. It adds 24 tiled relative-attention consumers, 40 exact source-DAG Swoosh fusions, shape/uniform specialization, and lifetime-checked activation-buffer reuse. It preserves every key, learned parameter, window, and overlap; no low-rank compression is selected. FP16 storage uses FP32 matrix accumulation and protected nonlinear/statistics islands. Fusion provenance accounts for all 2,115 original GPU nodes; every window must observe all selected compute groups, not fabricated per-source dispatch events.
 
+**0.2.45 numerical fix:** a fully silent window inside a non-silent lane drove the first frequency block's feed-forward projection to approximately -70,050, beyond FP16's finite range. Widened accumulation alone did not help: storing the result as FP16 overflowed before normalization and eventually invalidated phase. The exporter now keeps this block's residual arithmetic in FP32 through normalization, retaining mixed precision elsewhere and the existing attention kernels. No silence bypass, activation clipping or relaxed spectral validation is used. Both failing 319.08-second recordings passed all 214 windows; the live failure had retained byte-exact Originals. Changed plan/weight hashes invalidate the old pair-cache identity automatically.
+
 ### Browser port measurements
 
-Chrome 153 / NVIDIA Blackwell, both complete 63.63-second lanes, 44 neural windows, audio DSP included, no output-cache hit. Editor capture/transport is excluded:
+NVIDIA Blackwell, both complete 63.63-second lanes, 44 neural windows, audio DSP included, no output-cache hit. Original port measurements used Chrome 153; the 0.2.45 row uses Chrome 155, so this is not a controlled same-browser speed comparison. Editor capture/transport is excluded:
 
 | Runtime | Cold processing | Warm processing |
 |---|---:|---:|
 | Previous FP32 ONNX worker runtime | 20.15 s | 16.98–18.51 s |
 | Direct mixed-FP16 WebGPU + tiled attention + static uniforms | 25.54 s | 10.21–10.33 s |
-| Selected WebGPU engine + pointwise fusion | 12.20 s | 7.11–7.12 s |
+| 0.2.44 WebGPU engine + pointwise fusion | 12.20 s | 7.11–7.12 s |
+| 0.2.45 with protected first frequency block | 13.75 s | 7.55 s |
 
-The selected engine's six output WAVs were identical across its cold/two warm runs. Relative waveform RMSE versus accepted browser FP32 was 0.0842% / 0.0879%; energy ratios were 1.00014 / 0.99995. The FP32 fusion control stayed within one PCM16 quantization step. These checks establish numerical fidelity, not listening or ASR-quality certification. Peak tracked GPU-buffer allocation was 249,391,616 bytes; static planned storage was 220,865,696 bytes.
+The 0.2.44 engine's six output WAVs were identical across its cold/two warm runs. Relative waveform RMSE versus accepted browser FP32 was 0.0842% / 0.0879%; energy ratios were 1.00014 / 0.99995. The FP32 fusion control stayed within one PCM16 quantization step. These checks establish numerical fidelity, not listening or ASR-quality certification. Peak tracked GPU-buffer allocation was 249,391,616 bytes; static planned storage was 220,865,696 bytes.
+
+The 0.2.45 cold/warm WAVs were identical, with relative waveform RMSE 0.0853% / 0.0865% versus the accepted FP32 references. The browser benchmark also executes complete neural silent/near-silent windows outside its timed runs and rejects nonfinite or out-of-domain spectra/reconstruction; these are real GPU regressions, not mocked DSP tests.
 
 Optional `--capture` also passed distinct-input replay and full-wave checks, but measured only 7.03–7.07 s warm. It remains off in production: that small sample does not justify the extra replay state. **Native CUDA's 1.971 s is not the browser result.** The tested browser exposes FP16/subgroups/timestamps but no matrix/tensor-core API; the portable WGSL attention implementation does not execute CUDA WMMA.
 

@@ -1,7 +1,7 @@
 /// <reference types="@webgpu/types" />
 import { createZipWebGpuEngine } from '../src/core/zipenhancer-webgpu';
 import type { ZipWebGpuPlan } from '../src/core/zipenhancer-webgpu-plan';
-import { decodeEnhancementWav } from '../src/core/audio-enhancement-dsp';
+import { decodeEnhancementWav, zipStft, zipIstft, ZIP_CHUNK_SAMPLES } from '../src/core/audio-enhancement-dsp';
 import { enhanceZipSamplesInWorker } from '../src/core/audio-enhancement-pipeline';
 
 interface Options {
@@ -107,8 +107,28 @@ host.runZipWebBenchmark = async options => {
         precision, capture: options.capture, environment, diagnostics, progress, lanes };
       results.push(result); await save(`run-${run}.json`, JSON.stringify(result, null, 2));
     }
-    await save('summary.json', JSON.stringify(results, null, 2));
-    const summary = results.map(({ label, backend, totalMs, lanes }) => ({ label, backend, totalMs, lanes }));
+    // Real neural regression cases, outside the timed runs. A non-silent lane
+    // may contain a whole silent window; lane RMS validation cannot exclude it.
+    const numericalChecks = [];
+    for (const name of ['silent-window', 'quiet-window']) {
+      const samples = new Float32Array(ZIP_CHUNK_SAMPLES);
+      if (name === 'quiet-window') {
+        for (let i = 0; i < samples.length; i++) samples[i] = 1e-7 * Math.sin(i / 19);
+      }
+      const input = zipStft(samples);
+      const output = await engine.infer(input.magnitude, input.phase);
+      if (output.magnitude.some(value => !Number.isFinite(value) || value < 0) ||
+          output.phase.some(value => !Number.isFinite(value) || Math.abs(value) > Math.PI + 0.002)) {
+        throw new Error(`WebGPU numerical regression: invalid ${name} magnitude/phase`);
+      }
+      const waveform = zipIstft(output.magnitude, output.phase, input.frames);
+      if (waveform.some(value => !Number.isFinite(value))) {
+        throw new Error(`WebGPU numerical regression: nonfinite ${name} reconstruction`);
+      }
+      numericalChecks.push({ name, frames: input.frames, finiteSpectrum: true, finiteWaveform: true });
+    }
+    await save('summary.json', JSON.stringify(results.map(result => ({ ...result, numericalChecks })), null, 2));
+    const summary = results.map(({ label, backend, totalMs, lanes }) => ({ label, backend, totalMs, lanes, numericalChecks }));
     document.body.textContent = JSON.stringify(summary, null, 2);
     return summary;
   } finally { await engine.dispose(); }
