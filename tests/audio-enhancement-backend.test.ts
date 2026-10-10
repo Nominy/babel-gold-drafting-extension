@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { selectZipEnhancementBackend } from '../src/core/audio-enhancement-backend';
+import { enhanceAudioTracks } from '../src/core/audio-enhancement-runtime';
 
 function adapter({ fallback = false, fp16 = true, timestamps = true, storage = 32768 } = {}): GPUAdapter {
   return {
@@ -26,4 +27,15 @@ test('swarm admission covers missing, denied, software, and kernel-incompatible 
 
 test('a usable hardware adapter stays on local WebGPU', async () => {
   assert.equal((await selectZipEnhancementBackend({ gpu: { requestAdapter: async () => adapter() } })).backend, 'webgpu');
+});
+
+test('request cancellation rejects before enhancement touches original audio or GPU resources', async t => {
+  const controller = new AbortController();
+  const reason = new Error('Owning request disconnected');
+  controller.abort(reason);
+  const blob = new Blob([new Uint8Array(44)], { type: 'audio/wav' });
+  t.mock.method(blob, 'arrayBuffer', async () => { assert.fail('Cancelled source must remain unread'); });
+  await assert.rejects(enhanceAudioTracks([
+    { trackId: 'original', source: 'native', blob, mimeType: 'audio/wav' }
+  ], undefined, { signal: controller.signal }), error => error === reason);
 });

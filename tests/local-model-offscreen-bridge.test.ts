@@ -617,7 +617,6 @@ test('enhancement streams two complete tracks in bounded downloads independently
   };
   let enhancements = 0;
   const host = createLocalModelHost(async () => { throw new Error('Enhancement must not initialize ASR'); }, {
-    authorizeEnhancement: async () => new AbortController().signal,
     enhanceAudio: async (originals) => {
       enhancements++;
       assert.deepEqual(originals.map((track) => track.trackId), ['track-1', 'track-2']);
@@ -666,7 +665,7 @@ test('stale enhancement stops streaming and cleans retained output even when a c
       mimeType: 'audio/wav', sampleRate: 16000, frameCount: (bytes.length - 44) / 2,
       sourceSha256: 'a'.repeat(64), wavSha256: 'b'.repeat(64), totalBytes: bytes.length, chunkCount: 2 }
   }] };
-  const host = createLocalModelHost(async () => { throw new Error('ASR must remain unloaded'); }, { authorizeEnhancement: async () => new AbortController().signal, enhanceAudio: async () => batch });
+  const host = createLocalModelHost(async () => { throw new Error('ASR must remain unloaded'); }, { enhanceAudio: async () => batch });
   let outputId = '', current = true, emitted = 0;
   const client = createLocalModelClient(async (request) => {
     const response = await host.handleRequest({ ...request, target: 'offscreen' });
@@ -822,18 +821,3 @@ test(`background routes only owned offscreen progress and forgets requests after
 });
 }
 
-test('offscreen enhancement admission denies access before progress, model work or result downloads', async () => {
-  let modelRuns = 0, progressEvents = 0, outputChunks = 0;
-  const host = createLocalModelHost(async () => { throw new Error('ASR is unrelated'); }, {
-    authorizeEnhancement: async () => { throw new Error('This operation is unavailable.'); },
-    enhanceAudio: async () => { modelRuns++; throw new Error('Model must not initialize'); },
-    onProgress: () => { progressEvents++; },
-  });
-  const client = createLocalModelClient(request => host.handleRequest({ ...request, target: 'offscreen' }));
-  await assert.rejects(client.enhanceAudio('hidden-feature', audioTracks, {
-    isCurrent: () => true, onAudioChunk: () => { outputChunks++; },
-  }), /operation is unavailable/);
-  assert.equal(modelRuns, 0);
-  assert.equal(progressEvents, 0);
-  assert.equal(outputChunks, 0);
-});

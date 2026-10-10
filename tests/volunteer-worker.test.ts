@@ -74,7 +74,6 @@ function fixture(jobs: unknown[], ready = true) {
       return timingResult;
     },
     enhance: async () => { assert.fail('ASR-only fixture must not enhance.'); },
-    authorizeEnhancement: async () => new AbortController().signal,
     wait: async (_ms, signal) => {
       idle = true;
       if (signal.aborted) return;
@@ -302,7 +301,6 @@ test('service worker defers capability admission to offscreen and stops on disab
     loadSettings: async () => ({
       ...DEFAULT_SETTINGS, mode: 'advanced', localModelsEnabled: enabled, volunteerInferenceEnabled: volunteerEnabled
     }),
-    ready: async () => true,
     hasDocument: async () => exists,
     ensureDocument: async () => { exists = true; },
     sendMessage: async (message) => {
@@ -353,7 +351,6 @@ test('switching to Simple stops volunteering without checking or deleting the re
       ...DEFAULT_SETTINGS, mode: simple ? 'simple' : 'advanced',
       localModelsEnabled: true, volunteerInferenceEnabled: true
     }),
-    ready: async () => true,
     hasDocument: async () => true,
     ensureDocument: async () => undefined,
     sendMessage: async (message) => {
@@ -537,16 +534,29 @@ test('enhancement lease parser rejects duplicate fields, foreign URLs, and unpin
   assert.throws(() => parseLease({ ...enhancementLease, payload: { ...enhancementLease.payload, transcript: 'private transcript' } }), /payload/);
 });
 
-test('without grader access a volunteer cannot probe or advertise enhancement hardware', async t => {
+test('volunteer admits GPU-only enhancement without an external provider or ASR bundle', async t => {
   const previous = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
   let requested = 0;
+  let available = false;
   Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { gpu: {
-    requestAdapter: async () => { requested++; throw new Error('Enhancement hardware must remain untouched'); }
+    requestAdapter: async () => {
+      requested++;
+      return available ? {
+        info: { isFallbackAdapter: false },
+        features: { has: (feature: string) => feature === 'shader-f16' || feature === 'timestamp-query' },
+        limits: { maxComputeWorkgroupStorageSize: 21504, maxComputeInvocationsPerWorkgroup: 128,
+          maxComputeWorkgroupSizeX: 128, maxStorageBuffersPerShaderStage: 8 }
+      } : null;
+    }
   } } });
   t.after(() => { if (previous) Object.defineProperty(globalThis, 'navigator', previous); else Reflect.deleteProperty(globalThis, 'navigator'); });
+  assert.equal((await defaultVolunteerDependencies.ready()).enhancementModel, undefined);
+  available = true;
   const admission = await defaultVolunteerDependencies.ready();
-  assert.equal(admission.enhancementModel, undefined);
-  assert.equal(requested, 0);
+  assert.equal(admission.transcribe, false);
+  assert.equal(admission.draft, false);
+  assert.ok(admission.enhancementModel);
+  assert.equal(requested, 2);
 });
 
 test('worker independently refuses corrupt or remote runtime results before multipart completion', async () => {
@@ -565,14 +575,3 @@ test('worker independently refuses corrupt or remote runtime results before mult
   }
 });
 
-test('losing grader access after registration prevents leased audio download and inference', async () => {
-  const harness = await enhancementFixture();
-  harness.dependencies.authorizeEnhancement = async () => { throw new Error('This operation is unavailable.'); };
-  const worker = createVolunteer(harness.dependencies);
-  worker.start();
-  await until(() => harness.isIdle());
-  assert.deepEqual(harness.calls, []);
-  assert.equal(harness.requests.some(request => request.url.includes('/audio/')), false);
-  assert.match(String(harness.completed[0].error), /operation is unavailable/);
-  worker.stop();
-});

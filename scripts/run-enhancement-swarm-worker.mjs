@@ -6,25 +6,23 @@ import { setTimeout as delay } from 'node:timers/promises';
 const options = {};
 for (let index = 2; index < process.argv.length; index += 2) {
   const name = process.argv[index], value = process.argv[index + 1];
-  if (!['--extension', '--grader', '--profile', '--coordinator', '--browser'].includes(name) || !value) throw new Error(`Invalid worker argument: ${name}`);
+  if (!['--extension', '--profile', '--coordinator', '--browser'].includes(name) || !value) throw new Error(`Invalid worker argument: ${name}`);
   options[name.slice(2)] = value;
 }
-if (!options.extension || !options.grader || !options.profile || !options.coordinator) throw new Error('Supply --extension BUILT_GOLD --grader BUILT_REVIEW_GRADER --profile DEDICATED_PROFILE --coordinator HTTPS_OR_LOOPBACK_URL [--browser CHROME]');
+if (!options.extension || !options.profile || !options.coordinator) throw new Error('Supply --extension BUILT_GOLD --profile DEDICATED_PROFILE --coordinator HTTPS_OR_LOOPBACK_URL [--browser CHROME]');
 const endpoint = new URL(options.coordinator);
 if (endpoint.username || endpoint.password || endpoint.search || endpoint.hash ||
     !(endpoint.protocol === 'https:' || endpoint.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(endpoint.hostname))) {
   throw new Error('The coordinator must be HTTPS or HTTP loopback, without credentials/query/fragment.');
 }
-const extension = path.resolve(options.extension), grader = path.resolve(options.grader), profile = path.resolve(options.profile);
+const extension = path.resolve(options.extension), profile = path.resolve(options.profile);
 const manifest = JSON.parse(await readFile(path.join(extension, 'manifest.json'), 'utf8'));
 if (manifest.name !== 'Babel Gold Drafting') throw new Error('The worker requires the built Gold Drafting extension.');
-const graderManifest = JSON.parse(await readFile(path.join(grader, 'manifest.json'), 'utf8'));
-if (graderManifest.name !== 'Babel Review Grader' || !graderManifest.key || !graderManifest.background?.service_worker) throw new Error('The worker requires the updated Review Grader extension.');
 await mkdir(profile, { recursive: true });
 const context = await chromium.launchPersistentContext(profile, {
   headless: true, ...(options.browser ? { executablePath: options.browser } : {}),
   ignoreDefaultArgs: ['--disable-extensions'],
-  args: [`--disable-extensions-except=${extension},${grader}`, `--load-extension=${extension},${grader}`],
+  args: [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`],
 });
 let stopping = false;
 const stop = () => { stopping = true; };

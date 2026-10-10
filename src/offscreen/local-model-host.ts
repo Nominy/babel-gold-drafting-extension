@@ -1,5 +1,4 @@
 import { enhanceAudioTracks } from '../core/audio-enhancement-runtime';
-import { requireReviewGraderAccess } from '../core/review-grader-access';
 import type { PreparedL0Track } from '../core/l0-client';
 import { IS_DEV_C_DENOISE, isBrowserLocalMode } from '../core/settings';
 import { buildCanonicalTaskIdentity } from '../core/transcript';
@@ -70,7 +69,6 @@ export interface LocalModelHostOptions {
   maxBufferedBytes?: number;
   staleTransferMs?: number;
   enhanceAudio?: typeof enhanceAudioTracks;
-  authorizeEnhancement?: () => Promise<AbortSignal>;
   onProgress?: (message: LocalModelEnhancementProgressMessage) => void | Promise<void>;
 }
 
@@ -130,7 +128,6 @@ export function createLocalModelHost(
   const timings = new Map<string, L0TimingResponse>();
   let bufferedBytes = 0;
   let inferenceTail: Promise<void> = Promise.resolve();
-  let observedEnhancementGrant: AbortSignal | undefined;
 
   function discardOutput(transferId: string): void {
     const output = outputs.get(transferId);
@@ -300,24 +297,19 @@ export function createLocalModelHost(
   }
 
   async function execute(
-    request: Exclude<LocalModelOffscreenRequest, LocalModelUploadRequest | LocalModelDownloadRequest | LocalModelReleaseRequest>,
-    enhancementAccess?: AbortSignal
+    request: Exclude<LocalModelOffscreenRequest, LocalModelUploadRequest | LocalModelDownloadRequest | LocalModelReleaseRequest>
   ): Promise<LocalModelOffscreenResponse> {
     cleanStaleTransfers(now());
     try {
       if (request.operation === 'enhanceAudio') {
-        if (!enhancementAccess) throw new Error('This operation is unavailable.');
-        enhancementAccess.throwIfAborted();
         const tracks = resolveCapturedAudioTracks(request.audioTracks);
         const batch = await (options.enhanceAudio ?? enhanceAudioTracks)(tracks, progress => {
-          enhancementAccess.throwIfAborted();
           return options.onProgress?.({
             type: LOCAL_MODEL_OFFSCREEN_MESSAGE_TYPE, version: LOCAL_MODEL_OFFSCREEN_VERSION,
             target: 'background', event: 'enhancement-progress', operation: 'enhanceAudio',
             requestId: request.requestId, taskId: request.taskId, progress
           });
-        }, { taskId: request.taskId, signal: enhancementAccess });
-        enhancementAccess.throwIfAborted();
+        }, { taskId: request.taskId });
         consumeTransfers(request.audioTracks.map((track) => track.audioTransferId));
         const totalBytes = batch.tracks.reduce((sum, track) => sum + track.bytes.byteLength, 0);
         if (bufferedBytes + totalBytes > maxBufferedBytes) throw new InvalidAudioTransferError('Enhanced audio exceeds the bounded transfer buffer.');
@@ -424,10 +416,6 @@ export function createLocalModelHost(
   async function handleRequest(request: LocalModelOffscreenRequest): Promise<LocalModelOffscreenResponse> {
     if (request.operation === 'download' || request.operation === 'release') {
       try {
-        if (request.operation === 'download') {
-          const grant = await (options.authorizeEnhancement ?? requireReviewGraderAccess)();
-          grant.throwIfAborted();
-        }
         return Promise.resolve(request.operation === 'download' ? handleDownload(request) : handleRelease(request));
       } catch (error) {
         return Promise.resolve(createLocalModelFailure(request, 'invalid-request', error));
@@ -440,18 +428,8 @@ export function createLocalModelHost(
         return Promise.resolve(createLocalModelFailure(request, 'invalid-request', error));
       }
     }
-    let enhancementAccess: AbortSignal | undefined;
     if (request.operation === 'enhanceAudio') {
       try {
-        enhancementAccess = await (options.authorizeEnhancement ?? requireReviewGraderAccess)();
-        enhancementAccess.throwIfAborted();
-        if (enhancementAccess !== observedEnhancementGrant) {
-          observedEnhancementGrant = enhancementAccess;
-          enhancementAccess.addEventListener('abort', () => {
-            for (const id of outputs.keys()) discardOutput(id);
-            observedEnhancementGrant = undefined;
-          }, { once: true });
-        }
         await options.onProgress?.({
           type: LOCAL_MODEL_OFFSCREEN_MESSAGE_TYPE, version: LOCAL_MODEL_OFFSCREEN_VERSION,
           target: 'background', event: 'enhancement-progress', operation: 'enhanceAudio',
@@ -464,7 +442,7 @@ export function createLocalModelHost(
         return createLocalModelFailure(request, 'offscreen-unavailable', error);
       }
     }
-    return runExclusive(() => execute(request, enhancementAccess));
+    return runExclusive(() => execute(request));
   }
 
   return { handleRequest, runExclusive };

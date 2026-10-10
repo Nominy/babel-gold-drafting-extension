@@ -1,6 +1,4 @@
-import { IS_DEV_C_DENOISE, isBrowserLocalMode, LOCAL_MODEL_BASE_URL, SETTINGS_STORAGE_KEY, loadSettings } from '../core/settings';
-import { getLocalModelStatus } from '../core/local-model-bundle';
-import { hasReviewGraderAccess, reviewGraderAccess } from '../core/review-grader-access';
+import { IS_DEV_C_DENOISE, isBrowserLocalMode, SETTINGS_STORAGE_KEY, loadSettings } from '../core/settings';
 import { isVolunteerMessage, type VolunteerMessage, type VolunteerStatus } from '../core/volunteer-protocol';
 import {
   createLocalModelFailure,
@@ -148,7 +146,6 @@ export function createLocalModelOffscreenBridge(dependencies: LocalModelOffscree
 }
 export interface VolunteerLifecycleDependencies {
   loadSettings: typeof loadSettings;
-  ready: () => Promise<boolean>;
   hasDocument: () => Promise<boolean>;
   ensureDocument: () => Promise<void>;
   sendMessage: (message: VolunteerMessage) => Promise<VolunteerStatus>;
@@ -164,14 +161,14 @@ export function createVolunteerLifecycle(dependencies: VolunteerLifecycleDepende
       try {
         const settings = await dependencies.loadSettings();
         enabled = !IS_DEV_C_DENOISE && isBrowserLocalMode(settings) && settings.volunteerInferenceEnabled;
-        if (!enabled || !await dependencies.ready()) {
+        if (!enabled) {
           state = { state: 'disabled', detail: IS_DEV_C_DENOISE
             ? 'Own-task C-denoise WebGPU trial; the shared coordinator is not enabled.'
             : settings.mode === 'simple'
               ? 'Simple mode uses MAI cloud transcription; local volunteering is off.'
             : isBrowserLocalMode(settings) && !settings.volunteerInferenceEnabled
               ? 'Swarm participation is off; local models remain available for your own tasks.'
-              : 'Verified local models are unavailable.' };
+              : 'Local-model volunteering is disabled in settings.' };
           if (await dependencies.hasDocument()) {
             await dependencies.sendMessage({ type: 'babel-l0-volunteer', target: 'offscreen', action: 'stop' });
           }
@@ -240,16 +237,10 @@ if (defaultDependencies) {
   });
   const volunteer = createVolunteerLifecycle({
     loadSettings,
-    ready: async () => {
-      if (await hasReviewGraderAccess()) return true;
-      const status = await getLocalModelStatus(LOCAL_MODEL_BASE_URL);
-      return status.state === 'ready' && status.tested === true;
-    },
     hasDocument: defaultDependencies.hasDocument,
     ensureDocument: bridge.ensureDocument,
     sendMessage: (message) => chrome.runtime.sendMessage(message)
   });
-  reviewGraderAccess().subscribe(() => { void volunteer.reconcile(); });
   chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
     if (!isVolunteerMessage(message, 'background')) return false;
     void (message.action === 'settings' ? loadSettings() : volunteer.status())

@@ -22,7 +22,6 @@ export async function prepareZipWebGpuArtifact(root) {
   if (!runtimeFiles.includes('src/core/zipenhancer-webgpu.ts') || !runtimeFiles.includes('src/core/zipenhancer-webgpu-attention.ts')) throw new Error('Browser ZipEnhancer runtime sources are incomplete');
   const sourceFiles = [...runtimeFiles, 'src/core/audio-enhancement-runtime.ts', 'src/core/audio-enhancement-backend.ts', 'src/core/audio-enhancement-dsp.ts',
     'src/core/audio-enhancement-swarm.ts', 'src/core/audio-enhancement-swarm-protocol.ts',
-    'src/core/review-grader-access.ts',
     'src/core/audio-enhancement-worker.ts', 'src/core/audio-enhancement-worker-client.ts', 'src/core/audio-enhancement-worker-protocol.ts',
     'src/core/audio-enhancement-pipeline.ts', 'src/core/c-denoise-acoustic.ts', 'scripts/ort-jsep-options.mjs', 'scripts/ort-kernel-transforms.mjs'].sort();
   const implementation = Object.fromEntries(await Promise.all(sourceFiles.map(async name => [name, digest(await readFile(path.join(root, name)))])));

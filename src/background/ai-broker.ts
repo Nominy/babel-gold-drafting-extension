@@ -18,14 +18,12 @@ import { assertReleasedGraphs } from '../core/inference-release';
 import { isBrowserLocalMode, LOCAL_MODEL_BASE_URL, loadSettings } from '../core/settings';
 import { isOpenLocalModelOptionsMessage } from '../core/local-model-suggestion-protocol';
 import type { ExtensionSettings } from '../core/types';
-import { hasReviewGraderAccess } from '../core/review-grader-access';
 
 export async function resolveBrokerCapabilities(
   settings: ExtensionSettings,
-  getStatus: (baseUrl: string) => Promise<LocalModelStatus> = getLocalModelStatus,
-  enhancementAllowed: () => Promise<boolean> = hasReviewGraderAccess
+  getStatus: (baseUrl: string) => Promise<LocalModelStatus> = getLocalModelStatus
 ) {
-  const enhanceAudio = await enhancementAllowed();
+  const enhanceAudio = true;
   if (settings.mode === 'simple') {
     const configured = Boolean(settings.openRouterApiKey.trim());
     return {
@@ -209,7 +207,6 @@ async function admitBrokerRequest(
   onAccepted?: () => void
 ): Promise<BrokerAdmission> {
   if (request.operation === 'enhanceAudio') {
-    if (!await hasReviewGraderAccess()) return { response: unavailable('unsupported-operation', 'This operation is unavailable.', false) };
     onAccepted?.();
     if (typeof request.taskId !== 'string' || !request.taskId.trim() ||
       Object.keys(request).some((key) => !['type', 'version', 'operation', 'requestId', 'taskId'].includes(key))) {
@@ -279,9 +276,7 @@ async function handleBrokerRequest(
   request: AiBrokerExternalRequest,
   sender: chrome.runtime.MessageSender
 ): Promise<AiBrokerResponse> {
-  if (request.operation === 'enhanceAudio') return await hasReviewGraderAccess()
-    ? unavailable('invalid-request', 'Audio enhancement requires the streamed AI broker port.', false)
-    : unavailable('unsupported-operation', 'This operation is unavailable.', false);
+  if (request.operation === 'enhanceAudio') return unavailable('invalid-request', 'Audio enhancement requires the streamed AI broker port.', false);
   const admission = await admitBrokerRequest(request, sender);
   return 'response' in admission
     ? admission.response

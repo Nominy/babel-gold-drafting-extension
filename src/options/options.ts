@@ -19,7 +19,6 @@ import {
 import { transcribeLocalAudio } from '../core/local-model-runtime';
 import type { ExtensionSettings } from '../core/types';
 import type { VolunteerStatus } from '../core/volunteer-protocol';
-import { reviewGraderAccess } from '../core/review-grader-access';
 const MAX_TEST_AUDIO_SECONDS = 15;
 function requireElement<T extends HTMLElement>(selector: string): T {
   const element = document.querySelector(selector);
@@ -80,15 +79,10 @@ export async function boot(overrides: Partial<OptionsDependencies> = {}): Promis
   const audioInputEnabledInput = requireElement<HTMLInputElement>('#audioInputEnabled');
   const localModelsEnabledInput = requireElement<HTMLInputElement>('#localModelsEnabled');
   const volunteerInferenceEnabledInput = requireElement<HTMLInputElement>('#volunteerInferenceEnabled');
-  const stopGraderAccess = reviewGraderAccess().subscribe(available => {
-    const label = document.querySelector<HTMLElement>('[data-role="volunteer-label"]');
-    const description = document.querySelector<HTMLElement>('[data-role="volunteer-description"]');
-    if (label) label.textContent = available ? "Volunteer GPU for other users' ZipEnhancer / L0 audio" : "Volunteer to process other users' L0 audio";
-    if (description) description.textContent = available
-      ? 'Off for new installs. This permits downloading other users’ audio and using your GPU/network. ZipEnhancer needs a supported GPU; L0 also needs its verified downloaded bundle. Save Settings to apply.'
-      : 'Off for new installs. This permits downloading other users’ audio and using your compute/network. L0 volunteering requires its verified downloaded bundle. Save Settings to apply.';
-  });
-  globalThis.addEventListener?.('pagehide', stopGraderAccess, { once: true });
+  const volunteerLabel = document.querySelector<HTMLElement>('[data-role="volunteer-label"]');
+  const volunteerDescription = document.querySelector<HTMLElement>('[data-role="volunteer-description"]');
+  if (volunteerLabel) volunteerLabel.textContent = "Volunteer GPU for other users' ZipEnhancer / L0 audio";
+  if (volunteerDescription) volunteerDescription.textContent = 'Off for new installs. This permits downloading other users’ audio and using your GPU/network. ZipEnhancer needs a supported GPU; L0 also needs its verified downloaded bundle. Save Settings to apply.';
   const localModelDownloadButton = requireElement<HTMLButtonElement>('[data-role="local-model-download"]');
   const localModelRemoveButton = requireElement<HTMLButtonElement>('[data-role="local-model-remove"]');
   const localModelTestAudioInput = requireElement<HTMLInputElement>('#localModelTestAudio');

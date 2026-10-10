@@ -14,7 +14,6 @@ import { runExclusiveGpuInference } from './local-gpu-run-queue';
 import { createAudioEnhancementPairCache, enhancementSha256, runWithAudioEnhancementPairCache } from './audio-enhancement-cache';
 import type { CapturedAudioTrack } from './types';
 import type { AudioEnhancementPairCache } from './audio-enhancement-cache';
-import { requireReviewGraderAccess, reviewGraderAccess } from './review-grader-access';
 
 const CHECKPOINT_SHA256 = 'b18896915e27a821585584221d0c0820f35e12145315ae3f1e73ccd5a68d195f';
 const SOURCE_GRAPH_SHA256 = '2f18c8f7ff10a2702d6243ce1230db9e73e6804dd6cd7b20d8e191ee06924016';
@@ -60,7 +59,6 @@ let idleTimer: number | NodeJS.Timeout | null = null;
 let enhancementTail: Promise<void> = Promise.resolve();
 let activeRequests = 0;
 let pairCache: AudioEnhancementPairCache | undefined;
-let observeAccess: (() => void) | undefined;
 
 function artifact(): ZipModelArtifact {
   const value = modelArtifact as ZipModelArtifact;
@@ -201,17 +199,7 @@ export async function enhanceAudioTracks(
   onProgress?: (progress: AudioEnhancementProgress) => void | Promise<void>,
   options: AudioEnhancementRunOptions = {}
 ): Promise<EnhancedAudioBatch> {
-  const grant = await requireReviewGraderAccess();
-  const signal = options.signal ? AbortSignal.any([options.signal, grant]) : grant;
-  signal.throwIfAborted();
-  options = { ...options, signal };
-  observeAccess ??= reviewGraderAccess().subscribe(available => {
-    if (!available) {
-      pairCache?.close();
-      pairCache = undefined;
-      void releaseResources();
-    }
-  });
+  throwIfZipCancelled(options.signal);
   if (!tracks.length || tracks.some((track) => !track.trackId) || new Set(tracks.map((track) => track.trackId)).size !== tracks.length) return Promise.reject(new Error('ZipEnhancer requires distinct original source tracks.'));
   if (idleTimer !== null) { globalThis.clearTimeout(idleTimer); idleTimer = null; }
   activeRequests++;

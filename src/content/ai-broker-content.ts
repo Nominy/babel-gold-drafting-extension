@@ -17,7 +17,6 @@ import { getCurrentL0TimingGeneration, recoverCurrentLocalL0Timing, waitForCurre
 import { isBrowserLocalMode, loadSettings } from '../core/settings';
 import { buildCanonicalTaskIdentity, captureTranscriptJob } from '../core/transcript';
 import type { ExtensionSettings, TranscriptRow } from '../core/types';
-import { reviewGraderAccess } from '../core/review-grader-access';
 
 const AI_BROKER_CONTENT_BUILD = 'port-stream-postmortem-2026-06-23';
 const AI_BROKER_CONTENT_BUILD_ATTR = 'data-babel-gold-drafting-ai-broker-build';
@@ -184,14 +183,12 @@ async function handleBrokerRequest(
   isConnected: () => boolean = () => true
 ): Promise<AiBrokerResponse> {
   if (message.operation === 'enhanceAudio') {
-    const access = await reviewGraderAccess().acquire();
-    if (!access) return brokerError('unsupported-operation', 'This operation is unavailable.', false);
     if (!emit || typeof message.taskId !== 'string' || !message.taskId.trim() ||
       Object.keys(message).some((key) => !['type', 'version', 'operation', 'requestId', 'taskId'].includes(key))) {
       return brokerError('invalid-request', 'Audio enhancement requires a streamed request with only the native taskId.', false);
     }
     const isCurrent = () => {
-      if (access.aborted || !isConnected()) return false;
+      if (!isConnected()) return false;
       try {
         const job = captureTranscriptJob();
         return job.taskScoped === true && job.jobId === message.taskId;

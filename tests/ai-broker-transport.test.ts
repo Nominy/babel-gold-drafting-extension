@@ -11,9 +11,6 @@ import {
 import type { AiBrokerPortMessage, AiBrokerResponse } from '../src/core/ai-broker-protocol';
 import type { ExtensionSettings } from '../src/core/types';
 import { registerAiBrokerContentHandler } from '../src/content/ai-broker-content';
-import { REVIEW_GRADER_EXTENSION_IDS, REVIEW_GRADER_ACCESS_PORT, isReviewGraderAccessRequest } from '@nominy/babel-babel-runtime';
-import type { ReviewGraderPort } from '@nominy/babel-babel-runtime';
-import { reviewGraderAccess } from '../src/core/review-grader-access';
 
 interface TestEvent<Args extends unknown[]> {
   addListener(listener: (...args: Args) => unknown): void;
@@ -76,27 +73,9 @@ test('broker transports preserve admission, failure policy and disconnect framin
   const onMessage = event<[unknown, chrome.runtime.MessageSender, (response: AiBrokerResponse) => void]>();
   const onConnect = event<[TestPort]>();
   let tabPort = port(AI_BROKER_INTERNAL_PORT_NAME);
-  let graderAvailable = true;
-  const graderPorts: ReviewGraderPort[] = [];
-  const connectGrader = (id: string, info: { name: string }): ReviewGraderPort => {
-    assert.ok(REVIEW_GRADER_EXTENSION_IDS.some(target => target === id));
-    assert.equal(info.name, REVIEW_GRADER_ACCESS_PORT);
-    const messages = event<[unknown]>(), disconnect = event<[]>();
-    const grader: ReviewGraderPort = {
-      name: info.name, sender: { id }, onMessage: messages, onDisconnect: disconnect,
-      postMessage(message) {
-        if (graderAvailable && isReviewGraderAccessRequest(message)) queueMicrotask(() => messages.emit({ ...message, type: 'grant' }));
-      },
-      disconnect() { disconnect.emit(); },
-    };
-    graderPorts.push(grader);
-    if (!graderAvailable) queueMicrotask(() => disconnect.emit());
-    return grader;
-  };
-  t.after(() => reviewGraderAccess().dispose());
   Object.assign(globalThis, {
     chrome: {
-      runtime: { onMessageExternal, onConnectExternal, onMessage, onConnect, connect: connectGrader },
+      runtime: { onMessageExternal, onConnectExternal, onMessage, onConnect },
       storage: { local: { get(_key: string, callback: (items: object) => void) {
         if (storageFailure) throw new Error('Storage unavailable');
         callback({ [SETTINGS_STORAGE_KEY]: settings });
@@ -304,19 +283,4 @@ test('broker transports preserve admission, failure policy and disconnect framin
     assert.equal(response.fallbackAllowed, false);
   });
 
-  await t.test('revoked grader removes enhancement admission before any tab capture', async () => {
-    graderAvailable = false;
-    for (const connection of [...graderPorts]) connection.disconnect();
-    tabPort = port(AI_BROKER_INTERNAL_PORT_NAME);
-    const denied = terminal(await sendPort({ type: AI_BROKER_EXTERNAL_MESSAGE_TYPE, version: 1, operation: 'enhanceAudio', taskId: 'native-review-1' })).response;
-    assert.equal(denied.ok, false);
-    if (denied.ok) throw new Error('A missing grader must deny enhancement');
-    assert.equal(denied.reason, 'unsupported-operation');
-    assert.equal(denied.fallbackAllowed, false);
-    assert.deepEqual(tabPort.messages, []);
-    const ping = await sendMessage({ ...request, operation: 'ping' });
-    assert.equal(ping.ok, true);
-    if (!ping.ok || !('capabilities' in ping)) throw new Error('Missing broker capabilities');
-    assert.equal(ping.capabilities?.enhanceAudio, false);
-  });
 });

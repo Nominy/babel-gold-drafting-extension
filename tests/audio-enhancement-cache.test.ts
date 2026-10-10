@@ -337,7 +337,6 @@ test('native client streams a persistent hit after host restart using the curren
   let generations = 0;
   const progress: AudioEnhancementProgress[] = [];
   const createHost = () => createLocalModelHost(async () => { throw new Error('Enhancement cannot initialize ASR'); }, {
-    authorizeEnhancement: async () => new AbortController().signal,
     enhanceAudio: (tracks, onProgress) => runWithAudioEnhancementPairCache(tracks, model, cache, async (sources) => {
       generations++;
       return generateFixtureEnhancement(sources);
@@ -385,7 +384,6 @@ test('native client still delivers both playable lanes when persistent cache sto
   indexedDB.open = () => { throw new DOMException('Storage disabled by policy', 'SecurityError'); };
   const cache = createAudioEnhancementPairCache({ indexedDB });
   const host = createLocalModelHost(async () => { throw new Error('Enhancement cannot initialize ASR'); }, {
-    authorizeEnhancement: async () => new AbortController().signal,
     enhanceAudio: (tracks, onProgress) => runWithAudioEnhancementPairCache(tracks, model, cache, generateFixtureEnhancement, onProgress).then(batch => ({ ...batch, provider: 'browser-local' as const }))
   });
   const client = createLocalModelClient((request) => host.handleRequest({ ...request, target: 'offscreen' }));
@@ -407,7 +405,6 @@ for (const invalid of ['unknown-status', 'missing-notice', 'unexpected-notice', 
   test(`native client rejects ${invalid} cache metadata before downloading any enhanced bytes`, async (t) => {
     const indexedDB = new IDBFactory(), cache = createAudioEnhancementPairCache({ indexedDB });
     const host = createLocalModelHost(async () => { throw new Error('Enhancement cannot initialize ASR'); }, {
-      authorizeEnhancement: async () => new AbortController().signal,
       enhanceAudio: (tracks, onProgress) => runWithAudioEnhancementPairCache(tracks, model, cache, generateFixtureEnhancement, onProgress).then(batch => ({ ...batch, provider: 'browser-local' as const }))
     });
     const outputIds: string[] = [];

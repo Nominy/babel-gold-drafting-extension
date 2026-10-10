@@ -1,7 +1,6 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$Extension,
-    [Parameter(Mandatory = $true)][string]$Grader,
     [Parameter(Mandatory = $true)][string]$Profile,
     [Parameter(Mandatory = $true)][string]$Coordinator,
     [string]$Browser = ""
@@ -15,7 +14,7 @@ New-Item -ItemType Directory -Force $LogRoot | Out-Null
 try {
     $lock = [System.IO.File]::Open((Join-Path $LogRoot "swarm.lock"), [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
 } catch { exit 0 }
-$arguments = @("`"$Worker`"", "--extension", "`"$Extension`"", "--grader", "`"$Grader`"", "--profile", "`"$Profile`"", "--coordinator", "`"$Coordinator`"")
+$arguments = @("`"$Worker`"", "--extension", "`"$Extension`"", "--profile", "`"$Profile`"", "--coordinator", "`"$Coordinator`"")
 if ($Browser) { $arguments += @("--browser", "`"$Browser`"") }
 $backoff = 5
 try {

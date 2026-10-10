@@ -8,7 +8,6 @@ import { generateLocalL0DraftFromTiming, generateLocalL0Timing } from '../core/l
 import { parseL0TimingResponse } from '../core/l0-timing-client';
 import { selectZipEnhancementBackend } from '../core/audio-enhancement-backend';
 import { enhanceAudioTracks, getAudioEnhancementModel, type EnhancedAudioBatch } from '../core/audio-enhancement-runtime';
-import { hasReviewGraderAccess, requireReviewGraderAccess } from '../core/review-grader-access';
 import {
   ENHANCEMENT_MAX_TRACK_BYTES, parseEnhancementModel, parseEnhancementPayload, parseEnhancementTrackMetadata,
   parseEnhancementWorkerProgress, readBoundedSwarmBlob, readBoundedSwarmJson, sameEnhancementModel, verifyEnhancementWav,
@@ -57,7 +56,6 @@ export interface VolunteerDependencies {
   draft: typeof generateLocalL0DraftFromTiming;
   transcribe: typeof generateLocalL0Timing;
   enhance: typeof enhanceAudioTracks;
-  authorizeEnhancement: () => Promise<AbortSignal>;
   wait: (ms: number, signal: AbortSignal) => Promise<void>;
 }
 
@@ -82,7 +80,7 @@ export const defaultVolunteerDependencies: VolunteerDependencies = {
     } catch { /* An unavailable ASR bundle must not prevent packaged enhancement admission. */ }
     let enhancementModel: EnhancementModelDescriptor | undefined;
     try {
-      if (await hasReviewGraderAccess() && (await selectZipEnhancementBackend()).backend === 'webgpu') enhancementModel = getAudioEnhancementModel();
+      if ((await selectZipEnhancementBackend()).backend === 'webgpu') enhancementModel = getAudioEnhancementModel();
     } catch { /* Enhancement admission is independent of the verified ASR bundle. */ }
     return { transcribe: asr, draft: asr, ...(enhancementModel ? { enhancementModel } : {}) };
   },
@@ -90,7 +88,6 @@ export const defaultVolunteerDependencies: VolunteerDependencies = {
   draft: generateLocalL0DraftFromTiming,
   transcribe: generateLocalL0Timing,
   enhance: enhanceAudioTracks,
-  authorizeEnhancement: requireReviewGraderAccess,
   wait: (ms, signal) => new Promise<void>((resolve) => {
     if (signal.aborted) { resolve(); return; }
     const finish = () => {
@@ -184,7 +181,6 @@ async function request(dependencies: VolunteerDependencies, baseUrl: string, pat
 async function executeLease(lease: Lease, settings: ExtensionSettings, readiness: VolunteerReadiness, credentials: Credentials,
   dependencies: VolunteerDependencies, baseUrl: string, signal: AbortSignal): Promise<L0DraftResponse | L0TimingResponse | EnhancedAudioBatch> {
   if (lease.operation === 'enhance') {
-    signal = AbortSignal.any([signal, await dependencies.authorizeEnhancement()]);
     signal.throwIfAborted();
     if (!readiness.enhancementModel || !sameEnhancementModel(readiness.enhancementModel, lease.payload.model)) {
       throw new Error('This worker is not admitted for the leased enhancement model.');
