@@ -11,7 +11,7 @@ import {
 import type { AiBrokerPortMessage, AiBrokerResponse } from '../src/core/ai-broker-protocol';
 import type { ExtensionSettings } from '../src/core/types';
 import { registerAiBrokerContentHandler } from '../src/content/ai-broker-content';
-import { REVIEW_GRADER_EXTENSION_ID, REVIEW_GRADER_ACCESS_PORT, isReviewGraderAccessRequest } from '@nominy/babel-babel-runtime';
+import { REVIEW_GRADER_EXTENSION_IDS, REVIEW_GRADER_ACCESS_PORT, isReviewGraderAccessRequest } from '@nominy/babel-babel-runtime';
 import type { ReviewGraderPort } from '@nominy/babel-babel-runtime';
 import { reviewGraderAccess } from '../src/core/review-grader-access';
 
@@ -79,11 +79,11 @@ test('broker transports preserve admission, failure policy and disconnect framin
   let graderAvailable = true;
   const graderPorts: ReviewGraderPort[] = [];
   const connectGrader = (id: string, info: { name: string }): ReviewGraderPort => {
-    assert.equal(id, REVIEW_GRADER_EXTENSION_ID);
+    assert.ok(REVIEW_GRADER_EXTENSION_IDS.some(target => target === id));
     assert.equal(info.name, REVIEW_GRADER_ACCESS_PORT);
     const messages = event<[unknown]>(), disconnect = event<[]>();
     const grader: ReviewGraderPort = {
-      name: info.name, onMessage: messages, onDisconnect: disconnect,
+      name: info.name, sender: { id }, onMessage: messages, onDisconnect: disconnect,
       postMessage(message) {
         if (graderAvailable && isReviewGraderAccessRequest(message)) queueMicrotask(() => messages.emit({ ...message, type: 'grant' }));
       },
