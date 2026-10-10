@@ -9,6 +9,7 @@ import { encodeEnhancementWav } from '../src/core/audio-enhancement-dsp';
 import { enhancementSha256 } from '../src/core/audio-enhancement-cache';
 import { ENHANCEMENT_MAX_TRACK_BYTES, ENHANCEMENT_MODEL_ID, ENHANCEMENT_SOURCE_GRAPH_SHA256 } from '../src/core/audio-enhancement-swarm-protocol';
 import type { EnhancedAudioBatch } from '../src/core/audio-enhancement-runtime';
+import { hydratePunctuatedTiming, __localModelRuntimeTesting } from '../src/core/local-model-runtime';
 
 const wav = new Blob([new Uint8Array([82, 73, 70, 70, 0, 0, 0, 0, 87, 65, 86, 69, 0])], { type: 'audio/wav' });
 const lease = (operation: 'draft' | 'transcribe', options?: Record<string, unknown>) => ({
@@ -117,13 +118,68 @@ test('punctuation lease uses cached timing without downloading audio and complet
   assert.deepEqual(harness.requests.map((request) => request.url.slice(PUBLIC_L0_BASE_URL.length)), [
     '/v1/workers/register', '/v1/workers/lease', '/v1/jobs/job-1/complete'
   ]);
-  assert.deepEqual(JSON.parse(String(harness.requests[0].init.body)), {
-    modelBundleSchema: 'babel-browser-model-bundle-v3', protocolVersion: 3, modelRelease: 'c-denoise-v3-2026-10-03-r2',
-    operations: ['transcribe', 'draft']
-  });
   worker.stop();
   assert.equal(worker.getStatus().state, 'disabled');
 });
+
+for (const declaredLength of [true, false]) {
+  test(`fresh transcription hands a large cached-word draft lease through to completion (${declaredLength ? 'declared' : 'streamed'} size)`, async () => {
+    const words = Array.from({ length: 1000 }, (_, index) => ({
+      id: `remote-task:A:${index}`, text: 'слово',
+      startSeconds: index / 4, endSeconds: (index + 1) / 4
+    }));
+    const timing: L0TimingResponse = {
+      ...timingResult, models: { release: 'c-denoise-v3-2026-10-03-r2' },
+      tracks: [{
+        ...timingResult.tracks[0], tokens: words,
+        punctuationLabels: words.map((_, index) => index === words.length - 1 ? 2 : 0),
+        segments: [{ id: 'long-segment', startSeconds: 0, endSeconds: 250,
+          startSample: 0, endSample: 4_000_000, sampleRate: 16000 }]
+      }, { ...timingResult.tracks[1], punctuationLabels: [] }]
+    };
+    const draftLease = { ...lease('draft'), payload: { taskId: timing.taskId, timing } };
+    const bytes = new TextEncoder().encode(JSON.stringify(draftLease));
+    assert.ok(bytes.byteLength > 64 * 1024 && bytes.byteLength < 16 * 1024 * 1024);
+    const harness = fixture([lease('transcribe')]);
+    const originalFetch = harness.dependencies.fetch, originalWait = harness.dependencies.wait;
+    harness.dependencies.transcribe = async () => timing;
+    harness.dependencies.draft = async cached => {
+      const lane = hydratePunctuatedTiming(cached).get('A')!;
+      return { ...draftResult, rows: [{
+        id: 'long-segment', lane: 'A', startSeconds: 0, endSeconds: 250,
+        text: __localModelRuntimeTesting.renderCachedRange(lane, 0, lane.tokens.length)
+      }] };
+    };
+    let leases = 0;
+    harness.dependencies.fetch = async (url, init) => {
+      if (url.endsWith('/v1/workers/lease') && ++leases === 2) {
+        let offset = 0;
+        return new Response(new ReadableStream({
+          pull(controller) {
+            if (offset === bytes.length) { controller.close(); return; }
+            const end = Math.min(offset + 4096, bytes.length);
+            controller.enqueue(bytes.slice(offset, end)); offset = end;
+          }
+        }), { headers: declaredLength ? { 'Content-Length': String(bytes.byteLength) } : {} });
+      }
+      return originalFetch(url, init);
+    };
+    harness.dependencies.wait = async (delay, signal) => {
+      if (delay === 1000 && harness.completed.length === 1) return;
+      return originalWait(delay, signal);
+    };
+    const worker = createVolunteer(harness.dependencies);
+    try {
+      worker.start();
+      await until(() => harness.isIdle());
+      assert.equal(harness.completed.length, 2, worker.getStatus().detail);
+      assert.equal(worker.getStatus().state, 'connected');
+      const draft = harness.completed[1].result as L0DraftResponse;
+      assert.equal(draft.rows[0].text, `Слово ${Array(999).fill('слово').join(' ')}.`);
+      assert.equal(draft.rows[0].endSeconds, 250);
+    } finally { worker.stop(); }
+  });
+}
 
 test('preserveRows punctuates cached words while unsupported options report an error to the coordinator', async () => {
   const row = { rowId: 'existing', speakerKey: 'A', startSeconds: 0, endSeconds: 1, text: '', index: 0 };

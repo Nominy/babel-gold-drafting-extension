@@ -18,6 +18,9 @@ import {
 const SCHEMA = INFERENCE_RELEASE.bundleSchema;
 const CONTROL_REQUEST_TIMEOUT_MS = 45_000;
 const AUDIO_REQUEST_TIMEOUT_MS = 5 * 60_000;
+// Draft leases carry complete word timings, unlike small registration/status
+// messages. Match the coordinator's bounded 16 MiB worker JSON contract.
+const LEASE_RESPONSE_BYTES = 16 * 1024 * 1024;
 const IDLE_POLL_MS = 3_000;
 const MAX_BACKOFF_MS = 30_000;
 
@@ -287,7 +290,8 @@ export function createVolunteer(dependencies: VolunteerDependencies = defaultVol
         }
         const baseUrl = normalizeL0CustomBaseUrl(settings.l0CustomBaseUrl);
         const registration = { modelBundleSchema: SCHEMA, protocolVersion: INFERENCE_RELEASE.protocolVersion, modelRelease: INFERENCE_RELEASE.id,
-          operations, ...(readiness.enhancementModel ? { enhancementModel: readiness.enhancementModel } : {}) };
+          maxLeaseBytes: LEASE_RESPONSE_BYTES, operations,
+          ...(readiness.enhancementModel ? { enhancementModel: readiness.enhancementModel } : {}) };
         const nextKey = JSON.stringify([baseUrl, registration]);
         if (nextKey !== registrationKey) { credentials = null; registrationKey = nextKey; }
         if (!credentials) {
@@ -316,7 +320,7 @@ export function createVolunteer(dependencies: VolunteerDependencies = defaultVol
           continue;
         }
         if (!response.ok) throw new Error(`Worker lease failed: HTTP ${response.status}`);
-        const lease = parseLease(await readBoundedSwarmJson(response, signal));
+        const lease = parseLease(JSON.parse(await (await readBoundedSwarmBlob(response, LEASE_RESPONSE_BYTES, signal)).text()));
         status = { state: 'busy' };
         let completion: RequestInit;
         const leaseSignal = AbortSignal.any([signal, AbortSignal.timeout(8 * 60_000)]);
