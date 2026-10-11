@@ -7,7 +7,8 @@ import { kernelSourceHashes } from './ort-kernel-transforms.mjs';
 const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const checkpoint = 'b18896915e27a821585584221d0c0820f35e12145315ae3f1e73ccd5a68d195f';
 const graph = '2f18c8f7ff10a2702d6243ce1230db9e73e6804dd6cd7b20d8e191ee06924016';
-export const zipWebGpuAssets = ['zipenhancer-webgpu.plan.json', 'zipenhancer-webgpu.weights.bin', 'zipenhancer.LICENSE', 'zipenhancer.NOTICE'];
+export const zipWebGpuAssets = ['zipenhancer-webgpu.plan.json', 'zipenhancer-webgpu.weights.bin',
+  'zipenhancer-webgpu-fp32.plan.json', 'zipenhancer-webgpu-fp32.weights.bin', 'zipenhancer.LICENSE', 'zipenhancer.NOTICE'];
 
 export async function prepareZipWebGpuArtifact(root) {
   const planBytes = await readFile(path.join(root, 'models', zipWebGpuAssets[0]));
@@ -17,6 +18,22 @@ export async function prepareZipWebGpuArtifact(root) {
       !['float32', 'mixed-float16'].includes(plan.precision)) throw new Error('The browser ZipEnhancer plan is not bound to the verified model/ABI');
   const weights = await readFile(path.join(root, 'models', zipWebGpuAssets[1]));
   if (weights.byteLength !== plan.weights.byteLength || digest(weights) !== plan.weights.sha256) throw new Error('Browser ZipEnhancer weight digest/length mismatch');
+  const recoveryPlanBytes = await readFile(path.join(root, 'models', zipWebGpuAssets[2]));
+  const recoveryPlan = JSON.parse(recoveryPlanBytes);
+  if (recoveryPlan.schema !== plan.schema || recoveryPlan.checkpointSha256 !== checkpoint || recoveryPlan.sourceGraphSha256 !== graph ||
+      recoveryPlan.kernelAbi !== plan.kernelAbi || recoveryPlan.weights?.file !== zipWebGpuAssets[3] || recoveryPlan.precision !== 'float32' ||
+      !Array.isArray(recoveryPlan.tensors) || recoveryPlan.tensors.length === 0 || recoveryPlan.tensors.some(tensor => tensor.dataType === 10) ||
+      !Array.isArray(recoveryPlan.nodes) || recoveryPlan.nodes.length === 0 ||
+      recoveryPlan.nodes.some(node => node.op === 'Cast' && node.attributes?.to === 10)) {
+    throw new Error('The browser ZipEnhancer recovery plan is not the verified full-FP32 model/ABI');
+  }
+  const recoveryWeights = await readFile(path.join(root, 'models', zipWebGpuAssets[3]));
+  if (recoveryWeights.byteLength !== recoveryPlan.weights.byteLength || digest(recoveryWeights) !== recoveryPlan.weights.sha256) {
+    throw new Error('Browser ZipEnhancer recovery weight digest/length mismatch');
+  }
+  const recovery = { policy: 'invalid-spectra-float32-v1', planSha256: digest(recoveryPlanBytes),
+    weightsSha256: recoveryPlan.weights.sha256, weightsByteLength: recoveryWeights.byteLength,
+    planPath: `models/${zipWebGpuAssets[2]}`, weightsPath: `models/${zipWebGpuAssets[3]}`, precision: 'float32' };
   const core = path.join(root, 'src/core');
   const runtimeFiles = (await readdir(core)).filter(name => /^zipenhancer-webgpu.*\.(?:ts|mjs)$/.test(name)).map(name => `src/core/${name}`);
   if (!runtimeFiles.includes('src/core/zipenhancer-webgpu.ts') || !runtimeFiles.includes('src/core/zipenhancer-webgpu-attention.ts')) throw new Error('Browser ZipEnhancer runtime sources are incomplete');
@@ -27,13 +44,13 @@ export async function prepareZipWebGpuArtifact(root) {
   const implementation = Object.fromEntries(await Promise.all(sourceFiles.map(async name => [name, digest(await readFile(path.join(root, name)))])));
   const planSha256 = digest(planBytes);
   const identity = { schema: 'babel-zip-webgpu-artifact-v1', planSha256, weightsSha256: plan.weights.sha256,
-    kernelAbi: plan.kernelAbi, precision: plan.precision, implementation, vendorSources: kernelSourceHashes };
+    kernelAbi: plan.kernelAbi, precision: plan.precision, recovery, implementation, vendorSources: kernelSourceHashes };
   const metadata = {
     id: 'zipenhancer-webgpu-2026-10-09-r1', sha256: digest(JSON.stringify(identity)),
     checkpointSha256: checkpoint, sourceGraphSha256: graph, planSha256,
     weightsSha256: plan.weights.sha256, weightsByteLength: weights.byteLength,
     planPath: `models/${zipWebGpuAssets[0]}`, weightsPath: `models/${zipWebGpuAssets[1]}`,
-    precision: plan.precision, kernelAbi: plan.kernelAbi, sampleRate: 16000,
+    precision: plan.precision, recovery, kernelAbi: plan.kernelAbi, sampleRate: 16000,
     fftSize: 400, hopSize: 100, winSize: 400, compressFactor: 0.3,
     chunkSeconds: 4, strideSeconds: 3, inputFrames: 641, implementation,
   };

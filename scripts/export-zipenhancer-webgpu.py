@@ -507,6 +507,10 @@ def mixed_precision(model, provenance):
     blocked.update(n.name for n in model.graph.node
                    if n.name.startswith("/model/TSConformer/encoders.0/f_layers.0/")
                    and n.op_type != "ZipRelativeAttention")
+    # This is a measured fast-path improvement, not a global range proof:
+    # other projections/residuals and FP32-to-FP16 boundaries remain input
+    # dependent. Invalid fast-path spectra require same-input full-FP32 GPU
+    # recomputation, not another empirically selected block or saturation.
     # ORT normally rounds a shared initializer even on its FP32 branch. Split
     # only mixed-use constants so sensitive scopes retain the original bits.
     constants = {t.name: t for t in model.graph.initializer}
@@ -784,6 +788,9 @@ def export(args):
     # dtype annotations; standard ONNX inference then covers inserted casts.
     model = onnx.shape_inference.infer_shapes(model, strict_mode=True, data_prop=True)
     types = tensor_types(model)
+    if args.precision == "float32":
+        require(all(dtype != TensorProto.FLOAT16 for dtype, _ in types.values()),
+                "Full-FP32 recovery graph contains an FP16 tensor")
     inputs = [v.name for v in model.graph.input]
     outputs = [v.name for v in model.graph.output]
     require(inputs == ["noisy_mag", "noisy_pha"] and outputs == ["amp_g", "pha_g"], "Unexpected model ABI")
@@ -854,7 +861,7 @@ def export(args):
     plan = {"schema": "babel-zip-webgpu-v1", "checkpointSha256": CHECKPOINT_SHA,
             "sourceGraphSha256": SOURCE_SHA, "precision": args.precision,
             "kernelAbi": "zip-relative-attention-v1+swoosh-v1",
-            "weights": {"file": "zipenhancer-webgpu.weights.bin", "sha256": digest(weights), "byteLength": len(weights)},
+            "weights": {"file": f"{args.asset_prefix}.weights.bin", "sha256": digest(weights), "byteLength": len(weights)},
             "inputs": inputs, "outputs": outputs, "tensors": tensors, "nodes": nodes, "slots": slots,
             "sources": list(sources.values()), "attentionGroups": groups,
             "statistics": {"sourceNodes": len(sources), "sourceGpuNodes": sum(s["placement"] == "gpu" for s in sources.values()),
@@ -874,9 +881,9 @@ def export(args):
               "boundaryBytes": pinned_bytes, "qualityValidated": False}
     args.out_dir.mkdir(parents=True, exist_ok=True)
     (args.out_dir / plan["weights"]["file"]).write_bytes(weights)
-    (args.out_dir / "zipenhancer-webgpu.plan.json").write_bytes(plan_bytes)
+    (args.out_dir / f"{args.asset_prefix}.plan.json").write_bytes(plan_bytes)
     report_bytes = json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False) + "\n"
-    (args.out_dir / "zipenhancer-webgpu.report.json").write_text(report_bytes, encoding="utf-8", newline="\n")
+    (args.out_dir / f"{args.asset_prefix}.report.json").write_text(report_bytes, encoding="utf-8", newline="\n")
     print(report_bytes, end="")
 
 
@@ -884,6 +891,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--precision", choices=["float32", "mixed-float16"], default="mixed-float16")
     parser.add_argument("--out-dir", type=Path, required=True)
+    parser.add_argument("--asset-prefix", choices=["zipenhancer-webgpu", "zipenhancer-webgpu-fp32"],
+                        default="zipenhancer-webgpu",
+                        help="Asset filenames; use zipenhancer-webgpu-fp32 for the recovery graph")
     parser.add_argument("--source", type=Path, default=ROOT / "models/zipenhancer.onnx")
     parser.add_argument("--metadata", type=Path, default=ROOT / "src/core/audio-enhancement-model.json")
     export(parser.parse_args())

@@ -169,18 +169,41 @@ for (let frame = 0; frame < ZIP_FRAMES; frame++) {
   }
 }
 
-export function zipIstft(magnitude: Float32Array, phase: Float32Array, frames: number): Float32Array {
-  if (frames !== ZIP_CHUNK_SAMPLES / ZIP_HOP_SIZE + 1 || magnitude.length !== ZIP_BINS * frames || phase.length !== magnitude.length) {
+export class ZipInvalidSpectrumError extends Error {
+  constructor() {
+    super('ZipEnhancer produced invalid spectral values.');
+    this.name = 'ZipInvalidSpectrumError';
+  }
+}
+
+function assertZipSpectrumShape(magnitude: Float32Array, phase: Float32Array, frames: number): void {
+  if (!(magnitude instanceof Float32Array) || !(phase instanceof Float32Array) ||
+    frames !== ZIP_FRAMES || magnitude.length !== ZIP_BINS * frames || phase.length !== magnitude.length) {
     throw new Error('ZipEnhancer returned an invalid magnitude/phase shape.');
   }
+}
+
+function spectralAmplitude(magnitude: number, phase: number): number {
+  const amplitude = f32(magnitude ** (1 / 0.3));
+  if (!Number.isFinite(amplitude) || !Number.isFinite(phase) || amplitude < 0) throw new ZipInvalidSpectrumError();
+  return amplitude;
+}
+
+/** Check the exact ISTFT numerical domain before output transfer discards the original inference inputs. */
+export function validateZipSpectrum(magnitude: Float32Array, phase: Float32Array, frames: number): void {
+  assertZipSpectrumShape(magnitude, phase, frames);
+  for (let index = 0; index < magnitude.length; index++) spectralAmplitude(magnitude[index], phase[index]);
+}
+
+export function zipIstft(magnitude: Float32Array, phase: Float32Array, frames: number): Float32Array {
+  assertZipSpectrumShape(magnitude, phase, frames);
   const length = (frames - 1) * ZIP_HOP_SIZE + ZIP_FFT_SIZE;
   const sum = new Float64Array(length);
   const real = new Float64Array(ZIP_FFT_SIZE), imaginary = new Float64Array(ZIP_FFT_SIZE);
   const workReal = new Float64Array(CONVOLUTION_SIZE), workImaginary = new Float64Array(CONVOLUTION_SIZE);
   for (let frame = 0; frame < frames; frame++) {
     for (let bin = 0; bin < ZIP_BINS; bin++) {
-      const source = bin * frames + frame, amplitude = f32(magnitude[source] ** (1 / 0.3));
-      if (!Number.isFinite(amplitude) || !Number.isFinite(phase[source]) || amplitude < 0) throw new Error('ZipEnhancer produced invalid spectral values.');
+      const source = bin * frames + frame, amplitude = spectralAmplitude(magnitude[source], phase[source]);
       real[bin] = f32(amplitude * f32(Math.cos(phase[source])));
       imaginary[bin] = bin === 0 || bin === ZIP_BINS - 1 ? 0 : f32(amplitude * f32(Math.sin(phase[source])));
       if (bin > 0 && bin < ZIP_BINS - 1) { real[ZIP_FFT_SIZE - bin] = real[bin]; imaginary[ZIP_FFT_SIZE - bin] = -imaginary[bin]; }

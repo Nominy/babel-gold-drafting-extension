@@ -1,7 +1,8 @@
-import type { ZipSpectrum } from './audio-enhancement-dsp';
+import { validateZipSpectrum, ZipInvalidSpectrumError, type ZipSpectrum } from './audio-enhancement-dsp';
 import { createPackagedZipDspWorker, throwIfZipCancelled, ZipDspWorkerClient } from './audio-enhancement-worker-client';
 import type { ZipDspWorkerPort } from './audio-enhancement-worker-protocol';
 
+/** Recovery-enabled inference must not mutate or transfer inputs: FP32 uploads these exact same buffers. */
 export type ZipNeuralInference = (magnitude: Float32Array, phase: Float32Array, frames: number) => Promise<{ magnitude: Float32Array; phase: Float32Array }>;
 export interface ZipPipelineOptions {
   signal?: AbortSignal;
@@ -11,12 +12,39 @@ export interface ZipPipelineOptions {
   onChunksReady?: (totalChunks: number) => void | Promise<void>;
   onChunkCompleted?: (completedChunks: number, totalChunks: number) => void | Promise<void>;
   onEncoding?: (totalChunks: number) => void | Promise<void>;
+  /** Supplied only for a mixed-precision primary engine; never a CPU or original-audio fallback. */
+  recoverNumericalFailure?: ZipNeuralInference;
+  /** A latched FP32 engine is never retried as if it were still mixed precision. */
+  canRecoverNumericalFailure?: () => boolean;
+  onNumericalRecovery?: (index: number, totalChunks: number) => void | Promise<void>;
 }
 export interface ZipEnhancedLane {
   bytes: Uint8Array<ArrayBuffer>;
   sampleRate: number;
   frameCount: number;
   totalChunks: number;
+}
+
+async function inferWindow(
+  spectrum: ZipSpectrum, infer: ZipNeuralInference, options: ZipPipelineOptions, index: number, totalChunks: number
+): Promise<ZipSpectrum> {
+  const { magnitude, phase, frames } = spectrum;
+  // Inference/device/audit exceptions are fatal. Only validation of completed output can authorize recovery.
+  let enhanced = await infer(magnitude, phase, frames);
+  throwIfZipCancelled(options.signal);
+  try {
+    validateZipSpectrum(enhanced.magnitude, enhanced.phase, frames);
+  } catch (error) {
+    if (!(error instanceof ZipInvalidSpectrumError) || !options.recoverNumericalFailure ||
+      options.canRecoverNumericalFailure?.() === false) throw error;
+    await options.onNumericalRecovery?.(index, totalChunks);
+    throwIfZipCancelled(options.signal);
+    enhanced = await options.recoverNumericalFailure(magnitude, phase, frames);
+    throwIfZipCancelled(options.signal);
+    // Recovery is exactly once for this window; invalid FP32 output remains a terminal failure.
+    validateZipSpectrum(enhanced.magnitude, enhanced.phase, frames);
+  }
+  return { ...enhanced, frames };
 }
 
 /** Consumes owned source PCM. Only audited neural results may enter this pipeline. */
@@ -38,9 +66,8 @@ export async function enhanceZipSamplesInWorker(
     let previous: ZipSpectrum | undefined;
     for (let index = 0; index < totalChunks; index++) {
       throwIfZipCancelled(options.signal);
-      const frames = spectrum.frames;
       // Start the sole neural flight before posting prior ISTFT/copy and next STFT.
-      neuralFlight = infer(spectrum.magnitude, spectrum.phase, frames).then((enhanced) => ({ ...enhanced, frames }));
+      neuralFlight = inferWindow(spectrum, infer, options, index, totalChunks);
       reconstruction = previous
         ? client.reconstruct(index - 1, previous).then(async (completedChunks) => {
           throwIfZipCancelled(options.signal);
