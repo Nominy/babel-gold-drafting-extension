@@ -1,6 +1,6 @@
 {
   "id": "zipenhancer-webgpu-2026-10-09-r1",
-  "sha256": "d98d4e0b60124a5d8bb3a524562f41685ca4d2dcdad9ea978c064cd734ac1384",
+  "sha256": "28e472a062ddaee7ff023d8f2d3c5ffe49426f62d0bd32a615c60404e26db5ab",
   "checkpointSha256": "b18896915e27a821585584221d0c0820f35e12145315ae3f1e73ccd5a68d195f",
   "sourceGraphSha256": "2f18c8f7ff10a2702d6243ce1230db9e73e6804dd6cd7b20d8e191ee06924016",
   "planSha256": "af9499b1137897022f97da07d039c4b713978441b186ef0c2e9eff381ac0153a",
@@ -33,7 +33,7 @@
     "src/core/audio-enhancement-backend.ts": "7df1d9843be725a8d14d9d7fa80e9f56e2ab1922e27ab5b30f1f3653eae3db8e",
     "src/core/audio-enhancement-dsp.ts": "d11b0e9a10607ce4ff7db834f28971e96876dbfc731ef83b3b6cd05203b027e7",
     "src/core/audio-enhancement-pipeline.ts": "78f589e9782a527c9cae5a4cedd5818b711de6afcc1dc8a3ddd2d8858cea6aac",
-    "src/core/audio-enhancement-runtime.ts": "22dd90bcb7877f0048b7175df031739af4dd524d9871487c3e4f4899ece94167",
+    "src/core/audio-enhancement-runtime.ts": "a034044bbdde91940f9ea96a6fc92185226152a7b88e1bae1d4dae6621ed2a7b",
     "src/core/audio-enhancement-swarm-protocol.ts": "fb2e84160bbd5e26d8c9e81237d872f2d070e751b36481efac4d67b6513a0741",
     "src/core/audio-enhancement-swarm.ts": "bfb23e7b5b7dbd67ca05cb2ec6faee72d427451bebad73a2e03de17b9f451eb9",
     "src/core/audio-enhancement-worker-client.ts": "38310e3911cbc5cf5e34c93c69e46e1718f472efde295315ff1be33619fe39ec",

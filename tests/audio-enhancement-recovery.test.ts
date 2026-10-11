@@ -14,6 +14,10 @@ import type { ZipDspRequest, ZipDspWorkerPort } from '../src/core/audio-enhancem
 import type { ZipWebGpuEngine } from '../src/core/zipenhancer-webgpu';
 import type { AudioEnhancementProgress } from '@nominy/babel-babel-runtime';
 import type * as EnhancementRuntime from '../src/core/audio-enhancement-runtime';
+import {
+  isLocalModelEnhancementProgress, LOCAL_MODEL_OFFSCREEN_MESSAGE_TYPE, LOCAL_MODEL_OFFSCREEN_VERSION,
+  type LocalModelEnhanceAudioRequest
+} from '../src/core/local-model-offscreen-protocol';
 
 type Precision = 'mixed-float16' | 'float32';
 type Output = { magnitude: Float32Array; phase: Float32Array };
@@ -176,15 +180,26 @@ test('local owner, cache and localOnly consumers share one memory-safe latched G
     }
     return enhanced(magnitude, phase);
   };
-  const batch = await fixture.runtime.enhanceAudioTracks(originals, notice => { progress.push(notice); });
+  const request: LocalModelEnhanceAudioRequest = {
+    type: LOCAL_MODEL_OFFSCREEN_MESSAGE_TYPE, version: LOCAL_MODEL_OFFSCREEN_VERSION,
+    target: 'offscreen', operation: 'enhanceAudio', requestId: 'owned-recovery', taskId: 'native-task',
+    audioTracks: originals.map(({ blob: _blob, ...track }, index) => ({ ...track, audioTransferId: `transfer-${index}` }))
+  };
+  const batch = await fixture.runtime.enhanceAudioTracks(originals, notice => {
+    const message = {
+      type: request.type, version: request.version, target: 'content', event: 'enhancement-progress',
+      operation: request.operation, requestId: request.requestId, taskId: request.taskId, progress: notice
+    };
+    assert.equal(isLocalModelEnhancementProgress(message, 'content', request), true,
+      `The owning content tab must accept actual recovery progress: ${JSON.stringify(notice)}`);
+    progress.push(notice);
+  });
   assert.equal(batch.cacheStatus, 'stored');
   assert.equal(batch.tracks.length, 2);
   assert.deepEqual(fixture.events.filter(event => /^(create|dispose|infer):/.test(event)), [
     'create:mixed-float16', 'infer:mixed-float16', 'dispose:mixed-float16', 'create:float32', 'infer:float32', 'infer:float32'
   ]);
   assert.equal(fixture.events.filter(event => event === 'adapter:device').length, 2, 'mixed and FP32 initialization consume distinct adapters');
-  const recovery = progress.find(notice => notice.backendReason?.includes('full FP32'));
-  assert.ok(recovery); assert.equal(recovery.phase, 'enhancing'); assert.equal(recovery.completedChunks, 0); assert.equal(recovery.totalChunks, 1);
   let previous: AudioEnhancementProgress | undefined;
   for (const notice of progress.filter(value => ['loading-model', 'enhancing', 'encoding'].includes(value.phase))) {
     if (previous?.trackId === notice.trackId) {

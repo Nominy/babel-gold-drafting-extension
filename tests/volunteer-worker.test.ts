@@ -50,7 +50,8 @@ function fixture(jobs: unknown[], ready = true) {
   const requests: Array<{ url: string; init: RequestInit }> = [];
   const completed: Array<Record<string, unknown>> = [];
   const calls: string[] = [];
-  let idle = false;
+  // Observe the worker's wait hook; async SHA verification is not bounded by event-loop turns.
+  const idle = Promise.withResolvers<void>();
   const dependencies: VolunteerDependencies = {
     settings: async () => ({ ...DEFAULT_SETTINGS, mode: 'advanced', localModelsEnabled: true, volunteerInferenceEnabled: true }),
     ready: async () => ({ transcribe: ready, draft: ready }),
@@ -75,7 +76,7 @@ function fixture(jobs: unknown[], ready = true) {
     },
     enhance: async () => { assert.fail('ASR-only fixture must not enhance.'); },
     wait: async (_ms, signal) => {
-      idle = true;
+      idle.resolve();
       if (signal.aborted) return;
       const { promise, resolve } = Promise.withResolvers<void>();
       signal.addEventListener('abort', () => resolve(), { once: true });
@@ -100,7 +101,7 @@ function fixture(jobs: unknown[], ready = true) {
       assert.fail(`Unexpected worker request: ${url}`);
     }
   };
-  return { dependencies, requests, completed, calls, isIdle: () => idle };
+  return { dependencies, requests, completed, calls, idle: idle.promise };
 }
 
 test('punctuation lease uses cached timing without downloading audio and completes with credentials', async () => {
@@ -108,7 +109,7 @@ test('punctuation lease uses cached timing without downloading audio and complet
   const worker = createVolunteer(harness.dependencies);
   assert.equal(worker.start().state, 'connecting');
   assert.equal(worker.start().state, 'connecting');
-  await until(() => harness.isIdle());
+  await harness.idle;
   assert.equal(worker.getStatus().state, 'connected');
   assert.deepEqual(harness.calls, ['exclusive', 'draft']);
   assert.deepEqual(harness.completed, [{
@@ -170,7 +171,7 @@ for (const declaredLength of [true, false]) {
     const worker = createVolunteer(harness.dependencies);
     try {
       worker.start();
-      await until(() => harness.isIdle());
+      await harness.idle;
       assert.equal(harness.completed.length, 2, worker.getStatus().detail);
       assert.equal(worker.getStatus().state, 'connected');
       const draft = harness.completed[1].result as L0DraftResponse;
@@ -185,7 +186,7 @@ test('preserveRows punctuates cached words while unsupported options report an e
   const first = fixture([lease('draft', { preserveRows: [row] })]);
   const volunteer = createVolunteer(first.dependencies);
   volunteer.start();
-  await until(() => first.isIdle());
+  await first.idle;
   assert.deepEqual(first.calls, ['exclusive', 'draft']);
   assert.deepEqual((first.completed[0].result as L0DraftResponse).rows, [
     { id: 'existing', lane: 'A', startSeconds: 0, endSeconds: 1, text: 'Preserved text' }
@@ -195,7 +196,7 @@ test('preserveRows punctuates cached words while unsupported options report an e
   const second = fixture([lease('draft', { preprocessing: 'afftdn' })]);
   const rejected = createVolunteer(second.dependencies);
   rejected.start();
-  await until(() => second.isIdle());
+  await second.idle;
   assert.match(second.completed[0].error as string, /Unsupported draft options/);
   assert.deepEqual(second.calls, ['exclusive']);
   rejected.stop();
@@ -205,7 +206,7 @@ test('transcription lease downloads audio and returns timing with segments', asy
   const harness = fixture([lease('transcribe')]);
   const worker = createVolunteer(harness.dependencies);
   worker.start();
-  await until(() => harness.isIdle());
+  await harness.idle;
   const result = harness.completed[0].result as L0TimingResponse;
   assert.equal(result.taskId, 'remote-task');
   assert.deepEqual(result.tracks[0].segments, timingResult.tracks[0].segments);
@@ -266,7 +267,7 @@ test('expired worker credentials re-register before another lease and back off b
   };
   const worker = createVolunteer(harness.dependencies);
   worker.start();
-  await until(() => harness.isIdle());
+  await harness.idle;
   assert.equal(registrations, 3);
   assert.equal(leaseCalls, 2);
   assert.deepEqual(delays, [2_000, 2_000, 3_000]);
@@ -277,18 +278,23 @@ test('expired worker credentials re-register before another lease and back off b
 test('a busy volunteer does not request a second lease before finishing the first', async () => {
   const harness = fixture([lease('draft'), lease('draft')]);
   const { promise, resolve } = Promise.withResolvers<void>();
+  const draftStarted = Promise.withResolvers<void>();
   const originalDraft = harness.dependencies.draft;
   harness.dependencies.draft = async (...args) => {
+    draftStarted.resolve();
     await promise;
     return originalDraft(...args);
   };
   const worker = createVolunteer(harness.dependencies);
   worker.start();
-  await until(() => worker.getStatus().state === 'busy' && harness.calls.includes('exclusive'));
+  await draftStarted.promise;
+  assert.equal(worker.getStatus().state, 'busy');
+  assert.ok(harness.calls.includes('exclusive'));
   assert.equal(harness.requests.filter((request) => request.url.endsWith('/v1/workers/lease')).length, 1);
   assert.equal(harness.completed.length, 0);
   resolve();
-  await until(() => harness.completed.length === 1);
+  await harness.idle;
+  assert.equal(harness.completed.length, 1);
   worker.stop();
 });
 
@@ -433,7 +439,7 @@ test('enhancement-only GPU volunteer registers without ASR, reports real chunks,
   const harness = await enhancementFixture();
   const worker = createVolunteer(harness.dependencies);
   worker.start();
-  await until(() => harness.isIdle());
+  await harness.idle;
   assert.equal(worker.getStatus().state, 'connected');
   assert.deepEqual(JSON.parse(String(harness.requests[0].init.body)).operations, ['enhance']);
   assert.deepEqual(JSON.parse(String(harness.requests[0].init.body)).enhancementModel, enhancementModel);
@@ -463,7 +469,7 @@ test('volunteer uses only the normalized saved coordinator for registration, aud
   };
   const worker = createVolunteer(harness.dependencies);
   worker.start();
-  await until(() => harness.isIdle());
+  await harness.idle;
   assert.ok(urls.length > 5);
   assert.ok(urls.every(url => url.startsWith('http://127.0.0.1:8976/private/v1/')));
   worker.stop();
@@ -474,7 +480,7 @@ test('enhancement lease rejects mismatched model admission before fetching audio
   harness.dependencies.ready = async () => ({ transcribe: false, draft: false, enhancementModel: { ...enhancementModel, sha256: 'f'.repeat(64) } });
   const worker = createVolunteer(harness.dependencies);
   worker.start();
-  await until(() => harness.isIdle());
+  await harness.idle;
   assert.match(String(harness.completed[0].error), /not admitted/);
   assert.deepEqual(harness.calls, []);
   assert.equal(harness.requests.some(request => request.url.includes('/audio/')), false);
@@ -490,7 +496,7 @@ test('corrupt or oversized leased Originals fail before GPU execution and never 
       : originalFetch(url, init);
     const worker = createVolunteer(harness.dependencies);
     worker.start();
-    await until(() => harness.isIdle());
+    await harness.idle;
     assert.ok(harness.completed[0].error);
     assert.equal(harness.uploaded(), undefined);
     assert.deepEqual(harness.calls, []);
@@ -504,7 +510,7 @@ test('expired enhancement progress halts execution and reports failure rather th
   harness.dependencies.fetch = async (url, init) => url.endsWith('/progress') ? new Response(null, { status: 409 }) : originalFetch(url, init);
   const worker = createVolunteer(harness.dependencies);
   worker.start();
-  await until(() => harness.isIdle());
+  await harness.idle;
   assert.match(String(harness.completed[0].error), /progress rejected: HTTP 409/);
   assert.equal(harness.uploaded(), undefined);
   worker.stop();
@@ -512,17 +518,18 @@ test('expired enhancement progress halts execution and reports failure rather th
 
 test('stop aborts enhancement execution and prevents late completion', async () => {
   const harness = await enhancementFixture();
-  let executionSignal: AbortSignal | undefined;
+  const executionStarted = Promise.withResolvers<AbortSignal | undefined>();
   const pending = Promise.withResolvers<EnhancedAudioBatch>();
   harness.dependencies.enhance = async (_tracks, _progress, options) => {
-    executionSignal = options?.signal;
+    executionStarted.resolve(options?.signal);
     return pending.promise;
   };
   const worker = createVolunteer(harness.dependencies);
   worker.start();
-  await until(() => executionSignal !== undefined);
+  const executionSignal = await executionStarted.promise;
+  assert.ok(executionSignal);
   worker.stop();
-  assert.equal(executionSignal!.aborted, true);
+  assert.equal(executionSignal.aborted, true);
   pending.resolve(harness.result);
   await setImmediate();
   assert.deepEqual(harness.completed, []);
@@ -572,7 +579,7 @@ test('worker independently refuses corrupt or remote runtime results before mult
         metadata: { ...harness.result.tracks[0].metadata, wavSha256: '0'.repeat(64) } }, harness.result.tracks[1]] };
     const worker = createVolunteer(harness.dependencies);
     worker.start();
-    await until(() => harness.isIdle());
+    await harness.idle;
     assert.match(String(harness.completed[0].error), remote ? /different enhancement model/ : /SHA-256 mismatch/);
     assert.equal(harness.uploaded(), undefined);
     worker.stop();

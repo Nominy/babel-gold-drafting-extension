@@ -214,9 +214,10 @@ async function enhanceAudioLocally(
             await promoteToFullPrecision(resource, options.signal);
             return infer(resource, magnitude, phase, frames, options.signal);
           },
-          onNumericalRecovery: (index: number, totalChunks: number) => reportProgress({
-            ...trackProgress, phase: 'enhancing', completedChunks: completed, totalChunks,
-            backendReason: `Mixed-precision window ${index + 1} produced invalid spectra; switching to full FP32 GPU inference and recomputing this same window.`
+          // backendReason describes remote routing in the existing wire contract.
+          // Recovery stays local and must remain valid for already-installed Helper clients.
+          onNumericalRecovery: (_index: number, totalChunks: number) => reportProgress({
+            ...trackProgress, phase: 'enhancing', completedChunks: completed, totalChunks
           })
         } : {}),
         onChunkCompleted: (completedChunks, totalChunks) => {
