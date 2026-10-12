@@ -1,5 +1,5 @@
 import { build } from 'esbuild';
-import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ortJsepBuildOptions } from './ort-jsep-options.mjs';
@@ -16,6 +16,7 @@ await build({ ...ortJsepBuildOptions, entryPoints: [path.join(root, 'src/backend
 await build({ entryPoints: [path.join(root, 'src/workers/audio-enhancement.ts')],
   outfile: path.join(destination, 'dist/workers/audio-enhancement.js'), bundle: true,
   platform: 'browser', format: 'iife', target: 'chrome114' });
+await rm(path.join(destination, 'dist/models'), { recursive: true, force: true });
 await mkdir(path.join(destination, 'dist/models'), { recursive: true });
 for (const name of zipWebGpuAssets) {
   await copyFile(path.join(root, 'models', name), path.join(destination, 'dist/models', name));

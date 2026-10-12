@@ -21,7 +21,7 @@ test('swarm admission covers missing, denied, software, and kernel-incompatible 
   const environments = [
     {}, { gpu: { requestAdapter: async () => null } },
     { gpu: { requestAdapter: async () => { throw new Error('GPU disabled by policy'); } } },
-    ...[adapter({ fallback: true }), adapter({ fp16: false }), adapter({ timestamps: false }), adapter({ storage: 16384 })]
+    ...[adapter({ fallback: true }), adapter({ timestamps: false }), adapter({ storage: 16384 })]
       .map(value => ({ gpu: { requestAdapter: async () => value } })),
   ];
   for (const environment of environments) {
@@ -30,9 +30,11 @@ test('swarm admission covers missing, denied, software, and kernel-incompatible 
   }
 });
 
-test('a usable hardware adapter stays on local WebGPU', async () => {
-  assert.equal((await selectZipEnhancementBackend({ gpu: { requestAdapter: async () => adapter() } })).backend, 'webgpu');
-});
+for (const fp16 of [true, false]) {
+  test(`a usable hardware adapter stays on local WebGPU with shader-f16 ${fp16 ? 'available' : 'unavailable'}`, async () => {
+    assert.equal((await selectZipEnhancementBackend({ gpu: { requestAdapter: async () => adapter({ fp16 }) } })).backend, 'webgpu');
+  });
+}
 
 test('request cancellation rejects before enhancement touches original audio or GPU resources', async t => {
   const controller = new AbortController();

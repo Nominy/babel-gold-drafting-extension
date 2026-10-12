@@ -39,6 +39,7 @@ const ortRuntimeAssetNames = [
 async function prepareExtensionAssets() {
   await prepareZipWebGpuArtifact(rootDir);
   await mkdir(ortRuntimeOutputDir, { recursive: true });
+  await rm(zipModelOutputDir, { recursive: true, force: true });
   await mkdir(zipModelOutputDir, { recursive: true });
   await Promise.all([
     copyFile(offscreenPageSourcePath, offscreenPageOutputPath),
@@ -49,7 +50,7 @@ async function prepareExtensionAssets() {
       copyFile(fileURLToPath(import.meta.resolve(`onnxruntime-web/${assetName}`)), path.join(ortRuntimeOutputDir, assetName))
     )
   ]);
-  await Promise.all(['models/zipenhancer.onnx', 'models/zipenhancer-cpu.onnx', 'workers/zipenhancer-wasm.js', 'workers/zipenhancer-wasm.js.map']
+  await Promise.all(['workers/zipenhancer-wasm.js', 'workers/zipenhancer-wasm.js.map']
     .map(name => rm(path.join(rootDir, 'dist', name), { force: true })));
 }
 

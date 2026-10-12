@@ -9,7 +9,6 @@ from __future__ import annotations
 import argparse
 from bisect import bisect_left
 from collections import Counter, defaultdict
-import copy
 import hashlib
 import heapq
 import json
@@ -24,7 +23,7 @@ SOURCE_SHA = "2f18c8f7ff10a2702d6243ce1230db9e73e6804dd6cd7b20d8e191ee06924016"
 CHECKPOINT_SHA = "b18896915e27a821585584221d0c0820f35e12145315ae3f1e73ccd5a68d195f"
 ROOT = Path(__file__).resolve().parents[1]
 CUSTOM_DOMAIN = "babel.zipenhancer"
-TYPE_BYTES = {1: 4, 6: 4, 7: 8, 9: 1, 10: 2}
+TYPE_BYTES = {1: 4, 6: 4, 7: 8, 9: 1}
 ALIAS_OPS = {"Reshape", "Squeeze", "Unsqueeze"}
 CUSTOM_OPS = {"ZipRelativeAttention", "ZipSwoosh"}
 
@@ -442,7 +441,7 @@ def fuse_swoosh(model, sources, provenance):
         require(not (removed & region.keys()), "Overlapping Swoosh source chains")
         removed.update(region)
         # ONNX cannot represent object-array attributes. Keep the exact IR in
-        # a string through precision conversion, decoding only for the plan.
+        # a string until plan serialization.
         replacements[terminal.name] = helper.make_node(
             "ZipSwoosh", inputs, [matmul.input[0]], name=terminal.name, domain=CUSTOM_DOMAIN,
             steps=json.dumps(steps, separators=(",", ":"), allow_nan=False), output=refs[matmul.input[0]])
@@ -483,160 +482,33 @@ def topological_sort(model):
             dependencies[user] -= 1
             if not dependencies[user]:
                 heapq.heappush(ready, user)
-    require(len(ordered) == len(nodes), "Cyclic fused/precision graph")
+    require(len(ordered) == len(nodes), "Cyclic fused graph")
     del model.graph.node[:]
     model.graph.node.extend(ordered)
 
 
-def mixed_precision(model, provenance):
-    from onnxruntime.transformers import float16
+def require_float32_plan(tensors, nodes):
+    require(bool(tensors) and all(t["dataType"] in TYPE_BYTES for t in tensors),
+            "Full-FP32 graph contains an unsupported tensor type")
 
-    # Keep complete local nonlinear/normalization arithmetic scopes in FP32,
-    # not merely the reduction itself (anchoring and variance are sensitive).
-    sensitive_ops = {"ReduceMean", "ReduceSum", "ReduceMax", "Exp", "Log", "Sqrt", "Pow", "Atan", "ZipSwoosh"}
-    scopes = {n.name.rsplit("/", 1)[0] for n in model.graph.node if n.op_type in sensitive_ops}
-    blocked = {n.name for n in model.graph.node
-               if n.op_type in sensitive_ops or (n.name.rsplit("/", 1)[0] in scopes
-                                                and n.op_type not in {"MatMul", "Conv"})}
-    # The first frequency block is not normalized until its final residual.
-    # On a silent STFT window its feed-forward projection reaches -70049.98:
-    # FP32 accumulation followed by FP16 storage still overflows (limit 65504).
-    # Keep this entire residual path wide through its normalization, rather
-    # than clipping activations or special-casing silence. Attention consumers
-    # retain their bounded FP16 outputs and the existing fused output identity.
-    blocked.update(n.name for n in model.graph.node
-                   if n.name.startswith("/model/TSConformer/encoders.0/f_layers.0/")
-                   and n.op_type != "ZipRelativeAttention")
-    # This is a measured fast-path improvement, not a global range proof:
-    # other projections/residuals and FP32-to-FP16 boundaries remain input
-    # dependent. Invalid fast-path spectra require same-input full-FP32 GPU
-    # recomputation, not another empirically selected block or saturation.
-    # ORT normally rounds a shared initializer even on its FP32 branch. Split
-    # only mixed-use constants so sensitive scopes retain the original bits.
-    constants = {t.name: t for t in model.graph.initializer}
-    usages = defaultdict(set)
-    for n in model.graph.node:
-        for name in n.input:
-            if name in constants:
-                usages[name].add(n.name in blocked)
-    for name, uses in usages.items():
-        if uses == {False, True} and constants[name].data_type == TensorProto.FLOAT:
-            duplicate = copy.deepcopy(constants[name])
-            duplicate.name = name + "/zip-fp32"
-            require(duplicate.name not in constants, f"Precision initializer collision: {duplicate.name}")
-            model.graph.initializer.append(duplicate)
-            for n in model.graph.node:
-                if n.name in blocked:
-                    for i, value in enumerate(n.input):
-                        if value == name:
-                            n.input[i] = duplicate.name
-    # The converter's min/max knobs assert clipping thresholds. Replace only
-    # its scalar conversion hook, restoring it even on failure: IEEE round to
-    # nearest/even, including subnormals/zero/inf, with no extra clipping.
-    original_conversion = float16.convert_np_to_float16
-    def ieee_half(value, min_positive_val=5.96e-8, max_finite_val=65504.0):
-        return np.asarray(value).astype(np.float16)
-    float16.convert_np_to_float16 = ieee_half
-    try:
-        model = float16.convert_float_to_float16(model, keep_io_types=True, disable_shape_infer=True,
-                                               op_block_list=[], node_block_list=sorted(blocked))
-    finally:
-        float16.convert_np_to_float16 = original_conversion
-    # ORT inserts a down/up cast at *each* blocked node. Bypass those bridges
-    # on FP32-to-FP32 edges; otherwise the supposed precision island still
-    # rounds every intermediate to half. Original source Cast nodes stay real.
-    nodes = list(model.graph.node)
-    producers = {x: n for n in nodes for x in n.output}
-    replacements = {}
-    outputs = {v.name for v in model.graph.output}
-    eliminated = set()
-    boundary_renames = {}
-    for n in nodes:
-        if n.name in provenance or n.op_type != "Cast" or attributes(n).get("to") != TensorProto.FLOAT:
-            continue
-        down = producers.get(n.input[0])
-        if down is not None and down.name not in provenance and down.op_type == "Cast" \
-                and attributes(down).get("to") == TensorProto.FLOAT16:
-            if n.output[0] in outputs:
-                # The final producer is already FP32. Preserve its exact bits
-                # and the public name instead of rounding through half twice.
-                boundary_renames[down.input[0]] = n.output[0]
-                eliminated.add(n.name)
-            else:
-                replacements[n.output[0]] = down.input[0]
-                eliminated.add(n.name)
-    replacements.update(boundary_renames)
-    def resolve(name):
-        while name in replacements:
-            name = replacements[name]
-        return name
-    for old, new in boundary_renames.items():
-        producer = producers.get(old)
-        require(producer is not None and producer.name in provenance,
-                f"Unexpected precision boundary producer: {old}")
-        for i, name in enumerate(producer.output):
-            if name == old:
-                producer.output[i] = new
-    for n in nodes:
-        for i, name in enumerate(n.input):
-            n.input[i] = resolve(name)
-    nodes = [n for n in nodes if n.name not in eliminated]
-    keep = {n.name for n in nodes if n.name in provenance}
-    needed = set(outputs)
-    changed = True
-    while changed:
-        changed = False
-        for n in nodes:
-            if n.name in keep or any(x in needed for x in n.output):
-                before = len(needed)
-                keep.add(n.name)
-                needed.update(n.input)
-                changed |= len(needed) != before
-    nodes = [n for n in nodes if n.name in keep]
-    del model.graph.node[:]
-    model.graph.node.extend(nodes)
-    prune_annotations(model)
-    return model, sorted(blocked)
+    def check(node):
+        attrs = node.get("attributes", {})
+        require(node.get("op") != "Cast" or node.get("to", attrs.get("to")) in TYPE_BYTES,
+                "Full-FP32 graph contains an unsupported Cast")
+        require("outputType" not in attrs or attrs["outputType"] == TensorProto.FLOAT,
+                "Full-FP32 fused output is not FP32")
+        for key, value in node.items():
+            if key in {"dataType", "outputType", "to"}:
+                require(value in TYPE_BYTES, "Full-FP32 graph contains an unsupported type")
+            if isinstance(value, dict):
+                check(value)
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, dict):
+                        check(item)
 
-
-def fold_swoosh_precision_boundaries(model, provenance):
-    nodes = list(model.graph.node)
-    producers = {name: n for n in nodes for name in n.output}
-    users = defaultdict(list)
-    for n in nodes:
-        for name in n.input:
-            users[name].append(n)
-    types = tensor_types(model)
-    outputs = {v.name for v in model.graph.output}
-    removed = set()
-
-    def synthetic_cast(node, source_type, target_type):
-        return (node is not None and node.name not in provenance and node.op_type == "Cast"
-                and node.domain in {"", "ai.onnx"} and len(node.input) == len(node.output) == 1
-                and attributes(node) == {"to": target_type}
-                and types[node.input[0]][0] == source_type and types[node.output[0]][0] == target_type
-                and types[node.input[0]][1] == types[node.output[0]][1])
-
-    for n in nodes:
-        if n.op_type != "ZipSwoosh":
-            continue
-        # The shader loads half storage into FP32 once and rounds only when
-        # storing its result. Original source Cast steps remain inside the IR.
-        up = producers.get(n.input[0])
-        if synthetic_cast(up, TensorProto.FLOAT16, TensorProto.FLOAT) \
-                and up.output[0] not in outputs and len(users[up.output[0]]) == 1:
-            n.input[0] = up.input[0]
-            removed.add(up.name)
-        consumers = users[n.output[0]]
-        if n.output[0] not in outputs and len(consumers) == 1:
-            down = consumers[0]
-            if synthetic_cast(down, TensorProto.FLOAT, TensorProto.FLOAT16):
-                n.output[0] = down.output[0]
-                removed.add(down.name)
-    retained = [n for n in nodes if n.name not in removed]
-    del model.graph.node[:]
-    model.graph.node.extend(retained)
-    prune_annotations(model)
+    for node in nodes:
+        check(node)
 
 
 def normalized_attributes(node, types):
@@ -647,8 +519,8 @@ def normalized_attributes(node, types):
         require(set(attrs) == {"steps", "output"} and 2 <= len(node.input) <= 7
                 and len(node.output) == 1, f"Invalid fused Swoosh: {node.name}")
         output_type, dims = types[node.output[0]]
-        require(output_type in {TensorProto.FLOAT, TensorProto.FLOAT16}
-                and types[node.input[0]][0] in {TensorProto.FLOAT, TensorProto.FLOAT16}
+        require(output_type == TensorProto.FLOAT
+                and types[node.input[0]][0] == TensorProto.FLOAT
                 and types[node.input[0]][1] == dims
                 and all(types[name] == (TensorProto.FLOAT, ()) for name in node.input[1:]),
                 f"Swoosh boundary precision changed: {node.name}")
@@ -756,6 +628,7 @@ def plan_storage(tensors, nodes, inputs, outputs):
 
 
 def export(args):
+    require(args.precision == "float32", "Only full-FP32 exports are supported")
     source_bytes = args.source.read_bytes()
     require(digest(source_bytes) == SOURCE_SHA, "Exporter only supports pinned 2f18 ZipEnhancer ONNX")
     metadata = json.loads(args.metadata.read_text(encoding="utf-8"))
@@ -779,18 +652,11 @@ def export(args):
     model = onnx.shape_inference.infer_shapes(model, strict_mode=True, data_prop=True)
     groups, provenance, removed = AttentionRecognizer(model, sources).run()
     removed.update(fuse_swoosh(model, sources, provenance))
-    blocked = []
-    if args.precision == "mixed-float16":
-        model, blocked = mixed_precision(model, provenance)
-        fold_swoosh_precision_boundaries(model, provenance)
     topological_sort(model)
-    # Custom outputs retain their known source shapes, including converted
-    # dtype annotations; standard ONNX inference then covers inserted casts.
     model = onnx.shape_inference.infer_shapes(model, strict_mode=True, data_prop=True)
     types = tensor_types(model)
-    if args.precision == "float32":
-        require(all(dtype != TensorProto.FLOAT16 for dtype, _ in types.values()),
-                "Full-FP32 recovery graph contains an FP16 tensor")
+    require(all(dtype in TYPE_BYTES for dtype, _ in types.values()),
+            "Full-FP32 graph contains an unsupported tensor type")
     inputs = [v.name for v in model.graph.input]
     outputs = [v.name for v in model.graph.output]
     require(inputs == ["noisy_mag", "noisy_pha"] and outputs == ["amp_g", "pha_g"], "Unexpected model ABI")
@@ -811,14 +677,12 @@ def export(args):
     nodes = []
     for node in model.graph.node:
         original = provenance.get(node.name)
-        require(original is not None or node.op_type == "Cast", f"Unmapped synthetic operator: {node.name}")
+        require(original is not None, f"Unmapped operator: {node.name}")
         alias = node.op_type in ALIAS_OPS
         n = {"id": len(nodes), "name": node.name, "kind": "alias" if alias else "compute",
              "op": "Alias" if alias else node.op_type, "inputs": normalized_inputs(node),
              "outputs": list(node.output), "attributes": {} if alias else normalized_attributes(node, types),
-             "sources": original if original is not None else []}
-        if original is None:
-            n["reason"] = "precision-cast"
+             "sources": original}
         if alias:
             require(len(node.output) == 1 and types[node.output[0]][0] == types[node.input[0]][0]
                     and math.prod(types[node.output[0]][1]) == math.prod(types[node.input[0]][1]),
@@ -829,6 +693,7 @@ def export(args):
                     and all(name in initializers for name in node.input[1:]),
                     f"Swoosh source/scalar coverage changed: {node.name}")
         nodes.append(n)
+    require_float32_plan(tensors, nodes)
     slots = plan_storage(tensors, nodes, inputs, outputs)
     covered = {name for n in nodes for name in n["sources"]}
     gpu_covered = {name for n in nodes if n["kind"] == "compute" for name in n["sources"]}
@@ -841,7 +706,7 @@ def export(args):
             node = node_table[consumer["node"]]
             require(node["op"] == "ZipRelativeAttention" and node["outputs"] == [consumer["output"]]
                     and set(node["sources"]) == set(group["scoreSources"] + consumer["sources"]),
-                    "Fused consumer coverage changed during precision conversion")
+                    "Fused consumer coverage changed")
     # Every custom kernel reports its complete original region; shared
     # attention scores count once in the source inventory, not per consumer.
     fused_nodes = [n for n in nodes if n["op"] in CUSTOM_OPS]
@@ -870,13 +735,13 @@ def export(args):
                            "plannedBytes": physical_bytes}}
     plan_bytes = (json.dumps(plan, ensure_ascii=False, separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8")
     report = {"schema": plan["schema"], "precision": args.precision, "sourceGraphSha256": SOURCE_SHA,
+              "precisionPolicy": "full-float32-v1",
               "checkpointSha256": CHECKPOINT_SHA, "planSha256": digest(plan_bytes), "weights": plan["weights"],
               "statistics": plan["statistics"], "attentionGroups": len(groups), "queryChunks": 40,
               "fusedConsumers": fused_counts["ZipRelativeAttention"], "customFusionCounts": dict(sorted(fused_counts.items())),
               "fusedGpuSources": fused_placements["gpu"], "fusedAliasSources": fused_placements["tensor-alias"],
               "retainedGpuSources": retained_placements["gpu"], "retainedAliasSources": retained_placements["tensor-alias"],
-              "precisionCasts": sum(n.get("reason") == "precision-cast" for n in nodes),
-              "fp32Nodes": blocked, "initializerCount": len(initializers), "tensorCount": len(tensors),
+              "initializerCount": len(initializers), "tensorCount": len(tensors),
               "slotCount": len(slots), "activationSlotBytes": sum(s["byteLength"] for s in slots),
               "boundaryBytes": pinned_bytes, "qualityValidated": False}
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -889,11 +754,9 @@ def export(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--precision", choices=["float32", "mixed-float16"], default="mixed-float16")
+    parser.add_argument("--precision", choices=["float32"], default="float32")
     parser.add_argument("--out-dir", type=Path, required=True)
-    parser.add_argument("--asset-prefix", choices=["zipenhancer-webgpu", "zipenhancer-webgpu-fp32"],
-                        default="zipenhancer-webgpu",
-                        help="Asset filenames; use zipenhancer-webgpu-fp32 for the recovery graph")
+    parser.add_argument("--asset-prefix", choices=["zipenhancer-webgpu"], default="zipenhancer-webgpu")
     parser.add_argument("--source", type=Path, default=ROOT / "models/zipenhancer.onnx")
     parser.add_argument("--metadata", type=Path, default=ROOT / "src/core/audio-enhancement-model.json")
     export(parser.parse_args())

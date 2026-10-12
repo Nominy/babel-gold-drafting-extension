@@ -363,133 +363,45 @@ for (const sourceError of ['zero', 'nonfinite'] as const) {
 }
 
 for (const invalid of ['nan-magnitude', 'infinite-phase', 'negative-magnitude', 'decompression-overflow'] as const) {
-  test(`${invalid} is recomputed from the exact retained spectrum before transfer, with one latched FP32 path and the source clock intact`, async t => {
-    const sampleRate = 48_000, frameCount = 4 * sampleRate + 137;
-    const source = sourceLane(frameCount), expected = await oracle(source.slice(), sampleRate);
-    const worker = new RealDspWorker(t), recovered = Promise.withResolvers<void>(), gate = Promise.withResolvers<void>();
-    const completed: number[] = [], notices: Array<[number, number]> = [];
-    let mixed = true, mixedCalls = 0, fullCalls = 0, recoveryCalls = 0;
-    let retained: { magnitude: Float32Array; phase: Float32Array } | undefined;
-    let snapshot: { magnitude: Float32Array; phase: Float32Array } | undefined;
-    const enhancement = enhanceZipSamplesInWorker(source, sampleRate, async (magnitude, phase) => {
-      if (!mixed) { fullCalls++; return transformed(magnitude.slice(), phase.slice()); }
-      mixedCalls++;
-      retained = { magnitude, phase };
-      snapshot = { magnitude: magnitude.slice(), phase: phase.slice() };
-      const output = transformed(magnitude.slice(), phase.slice());
+  test(`${invalid} is fatal after one neural pass without reconstruction or partial lane publication`, async t => {
+    const worker = new RealDspWorker(t);
+    let calls = 0, completions = 0;
+    await assert.rejects(enhanceZipSamplesInWorker(sourceLane(ZIP_CHUNK_SAMPLES + 137), ZIP_SAMPLE_RATE, async (magnitude, phase) => {
+      calls++;
+      const output = transformed(magnitude, phase);
       if (invalid === 'nan-magnitude') output.magnitude[31] = Number.NaN;
       else if (invalid === 'infinite-phase') output.phase[31] = Number.POSITIVE_INFINITY;
       else output.magnitude[31] = invalid === 'negative-magnitude' ? -1 : 1e20;
       return output;
     }, {
       createWorker: () => worker,
-      canRecoverNumericalFailure: () => mixed,
-      recoverNumericalFailure: async (magnitude, phase) => {
-        recoveryCalls++;
-        assert.equal(magnitude, retained?.magnitude);
-        assert.equal(phase, retained?.phase);
-        assert.deepEqual(magnitude, snapshot?.magnitude);
-        assert.deepEqual(phase, snapshot?.phase);
-        mixed = false;
-        fullCalls++;
-        recovered.resolve();
-        await gate.promise;
-        return transformed(magnitude.slice(), phase.slice());
-      },
-      onNumericalRecovery: (index, total) => { notices.push([index, total]); },
-      onChunkCompleted: count => { completed.push(count); }
-    });
-    await recovered.promise;
-    assert.equal(source.byteLength, 0, 'DSP still owns the original source PCM');
-    assert.deepEqual(completed, [], 'rejected mixed execution is not a completed window');
-    assert.deepEqual(notices, [[0, 2]]);
-    assert.equal(worker.requests.some(request => request.type === 'reconstruct' || request.type === 'finish'), false);
-    gate.resolve();
-    const result = await enhancement;
-    assert.equal(mixedCalls, 1);
-    assert.equal(recoveryCalls, 1);
-    assert.equal(fullCalls, result.totalChunks);
-    assert.deepEqual(completed, [1, 2]);
-    assert.deepEqual(result.bytes, expected);
-    assert.equal(readEnhancementWavHeader(result.bytes.buffer).frameCount, frameCount);
-    assert.equal(result.sampleRate, sampleRate);
-    assert.equal(worker.terminateCount, 1);
-  });
-}
-
-for (const failure of ['device', 'audit', 'typed-inference-error', 'shape', 'unrecoverable-spectrum', 'invalid-fp32', 'recovery-progress'] as const) {
-  test(`${failure} stays fatal without an unauthorized retry or partial lane publication`, async t => {
-    const worker = new RealDspWorker(t);
-    let primaryCalls = 0, recoveryCalls = 0, notices = 0, completions = 0;
-    const reason = failure === 'device' ? new Error('GPU device lost')
-      : failure === 'audit' ? new Error('GPU dispatch audit failed')
-      : failure === 'typed-inference-error' ? new ZipInvalidSpectrumError() : undefined;
-    const enhancement = enhanceZipSamplesInWorker(sourceLane(ZIP_CHUNK_SAMPLES + 137), ZIP_SAMPLE_RATE, async (magnitude, phase) => {
-      primaryCalls++;
-      if (reason) throw reason;
-      if (failure === 'shape') return { magnitude: magnitude.subarray(1), phase };
-      const output = { magnitude: magnitude.slice(), phase: phase.slice() };
-      output.phase[0] = Number.NaN;
-      return output;
-    }, {
-      createWorker: () => worker,
-      canRecoverNumericalFailure: () => failure !== 'unrecoverable-spectrum',
-      recoverNumericalFailure: async (magnitude, phase) => {
-        recoveryCalls++;
-        const output = { magnitude: magnitude.slice(), phase: phase.slice() };
-        output.magnitude[0] = Number.NaN;
-        return output;
-      },
-      onNumericalRecovery: () => {
-        notices++;
-        if (failure === 'recovery-progress') throw new Error('Recovery progress rejected');
-      },
       onChunkCompleted: () => { completions++; }
-    });
-    await assert.rejects(enhancement, error => reason ? error === reason
-      : failure === 'shape' ? error instanceof Error && !(error instanceof ZipInvalidSpectrumError) && /shape/.test(error.message)
-      : failure === 'recovery-progress' ? error instanceof Error && /Recovery progress rejected/.test(error.message)
-      : error instanceof ZipInvalidSpectrumError);
-    assert.equal(primaryCalls, 1);
-    assert.equal(recoveryCalls, failure === 'invalid-fp32' ? 1 : 0);
-    assert.equal(notices, failure === 'invalid-fp32' || failure === 'recovery-progress' ? 1 : 0);
+    }), error => error instanceof ZipInvalidSpectrumError);
+    assert.equal(calls, 1);
     assert.equal(completions, 0);
     assert.equal(worker.requests.some(request => request.type === 'reconstruct' || request.type === 'finish'), false);
     assert.equal(worker.terminateCount, 1);
   });
 }
 
-for (const stage of ['mixed-flight', 'recovery-progress', 'fp32-flight'] as const) {
-  test(`cancellation during ${stage} cannot start another recovery or release an outstanding flight early`, async t => {
-    const worker = new RealDspWorker(t), controller = new AbortController(), reason = new Error('Recovery owner cancelled');
-    const started = Promise.withResolvers<void>(), gate = Promise.withResolvers<void>();
-    let recoveries = 0, settled = false;
-    const enhancement = enhanceZipSamplesInWorker(sourceLane(ZIP_CHUNK_SAMPLES + 137), ZIP_SAMPLE_RATE, async (magnitude, phase) => {
-      if (stage === 'mixed-flight') { started.resolve(); await gate.promise; }
-      const output = { magnitude: magnitude.slice(), phase: phase.slice() };
-      output.phase[0] = Number.NaN;
-      return output;
+for (const failure of ['device', 'audit', 'typed-inference-error', 'shape'] as const) {
+  test(`${failure} stays fatal without retry or partial lane publication`, async t => {
+    const worker = new RealDspWorker(t);
+    let calls = 0, completions = 0;
+    const reason = failure === 'device' ? new Error('GPU device lost')
+      : failure === 'audit' ? new Error('GPU dispatch audit failed')
+      : failure === 'typed-inference-error' ? new ZipInvalidSpectrumError() : undefined;
+    await assert.rejects(enhanceZipSamplesInWorker(sourceLane(ZIP_CHUNK_SAMPLES + 137), ZIP_SAMPLE_RATE, async (magnitude, phase) => {
+      calls++;
+      if (reason) throw reason;
+      return { magnitude: magnitude.subarray(1), phase };
     }, {
-      createWorker: () => worker, signal: controller.signal,
-      recoverNumericalFailure: async (magnitude, phase) => {
-        recoveries++;
-        started.resolve();
-        await gate.promise;
-        return transformed(magnitude.slice(), phase.slice());
-      },
-      onNumericalRecovery: async () => {
-        if (stage === 'recovery-progress') { started.resolve(); await gate.promise; }
-      },
-      onChunkCompleted: () => { assert.fail('Cancelled recovery cannot report a completed window'); }
-    }).finally(() => { settled = true; });
-    const rejected = assert.rejects(enhancement, error => error === reason);
-    await started.promise;
-    controller.abort(reason);
-    await worker.exited.promise;
-    assert.equal(settled, false);
-    gate.resolve();
-    await rejected;
-    assert.equal(recoveries, stage === 'fp32-flight' ? 1 : 0);
+      createWorker: () => worker,
+      onChunkCompleted: () => { completions++; }
+    }), error => reason ? error === reason
+      : error instanceof Error && !(error instanceof ZipInvalidSpectrumError) && /shape/.test(error.message));
+    assert.equal(calls, 1);
+    assert.equal(completions, 0);
     assert.equal(worker.requests.some(request => request.type === 'reconstruct' || request.type === 'finish'), false);
     assert.equal(worker.terminateCount, 1);
   });

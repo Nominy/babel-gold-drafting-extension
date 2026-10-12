@@ -23,7 +23,7 @@ export async function selectZipEnhancementBackend(
     return swarm('The browser could not acquire WebGPU; enhancement will run remotely, using official GPU inference first, then the GPU swarm.');
   }
   if (!adapter || adapter.info?.isFallbackAdapter !== false) return swarm('No confirmed hardware WebGPU adapter; enhancement will run remotely, using official GPU inference first, then the GPU swarm.');
-  if (!adapter.features.has('shader-f16') || !adapter.features.has('timestamp-query')) {
+  if (!adapter.features.has('timestamp-query')) {
     return swarm('Required GPU features are unavailable; enhancement will run remotely, using official GPU inference first, then the GPU swarm.');
   }
   if (adapter.limits.maxComputeWorkgroupStorageSize < 21504 || adapter.limits.maxComputeInvocationsPerWorkgroup < 128 ||

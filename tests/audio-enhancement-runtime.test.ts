@@ -19,7 +19,6 @@ import {
   type LocalModelEnhanceAudioRequest
 } from '../src/core/local-model-offscreen-protocol';
 
-type Precision = 'mixed-float16' | 'float32';
 type Output = { magnitude: Float32Array; phase: Float32Array };
 
 function installGlobal(t: TestContext, name: string, value: unknown): void {
@@ -48,24 +47,26 @@ function tracks(prefix: string) {
 }
 
 let fixtureId = 0;
-async function runtimeFixture(t: TestContext) {
-  const directory = await mkdtemp(path.join(tmpdir(), 'babel-zip-recovery-'));
+async function runtimeFixture(t: TestContext, options: {
+  artifactPrecision?: string;
+  precision?: string;
+  tensors?: readonly { dataType: number }[];
+  nodes?: readonly { op: string; attributes: Readonly<Record<string, unknown>> }[];
+} = {}) {
+  const directory = await mkdtemp(path.join(tmpdir(), 'babel-zip-fp32-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const weights = new Uint8Array([1, 2, 3, 4]), weightsSha256 = await enhancementSha256(weights.buffer);
-  const plans = (['mixed-float16', 'float32'] as const).map(precision => ({
+  const plan = {
     checkpointSha256: modelArtifact.checkpointSha256, sourceGraphSha256: modelArtifact.sourceGraphSha256,
-    kernelAbi: modelArtifact.kernelAbi, precision, tensors: [{ dataType: 1 }], nodes: [],
-    weights: { file: precision === 'float32' ? 'zipenhancer-webgpu-fp32.weights.bin' : 'zipenhancer-webgpu.weights.bin',
-      sha256: weightsSha256, byteLength: weights.byteLength }
-  }));
-  const planBytes = plans.map(plan => new TextEncoder().encode(JSON.stringify(plan)));
-  const artifact = { ...modelArtifact, sha256: 'a'.repeat(64), precision: 'mixed-float16',
-    planSha256: await enhancementSha256(planBytes[0].buffer), weightsSha256, weightsByteLength: weights.byteLength,
-    recovery: { policy: 'invalid-spectra-float32-v1', precision: 'float32',
-      planPath: 'models/zipenhancer-webgpu-fp32.plan.json', weightsPath: 'models/zipenhancer-webgpu-fp32.weights.bin',
-      planSha256: await enhancementSha256(planBytes[1].buffer), weightsSha256, weightsByteLength: weights.byteLength }
+    kernelAbi: modelArtifact.kernelAbi, precision: options.precision ?? 'float32',
+    tensors: options.tensors ?? [{ dataType: 1 }], nodes: options.nodes ?? [],
+    weights: { file: 'zipenhancer-webgpu.weights.bin', sha256: weightsSha256, byteLength: weights.byteLength }
   };
-  const key = `__zipRecoveryFixture${++fixtureId}`, outfile = path.join(directory, 'runtime.mjs');
+  const planBytes = new TextEncoder().encode(JSON.stringify(plan));
+  const artifact = { ...modelArtifact, sha256: 'a'.repeat(64), precision: options.artifactPrecision ?? 'float32',
+    planSha256: await enhancementSha256(planBytes.buffer), weightsSha256, weightsByteLength: weights.byteLength
+  };
+  const key = `__zipFp32Fixture${++fixtureId}`, outfile = path.join(directory, 'runtime.mjs');
   await build({ entryPoints: [fileURLToPath(new URL('../src/core/audio-enhancement-runtime.ts', import.meta.url))],
     outfile, bundle: true, platform: 'node', format: 'esm', target: 'node22', logLevel: 'silent', plugins: [{
       name: 'controlled-neural-boundary', setup(builder) {
@@ -77,33 +78,34 @@ async function runtimeFixture(t: TestContext) {
       }
     }] });
   const events: string[] = [], requests: ZipDspRequest[] = [], fetches: string[] = [];
-  const engines: Array<{ precision: Precision; disposed: boolean; disposal: PromiseWithResolvers<void> }> = [];
+  const engines: Array<{ disposed: boolean; disposal: PromiseWithResolvers<void> }> = [];
   let idle: (() => void) | undefined;
   const controls = {
-    recoveryAdapterAvailable: true,
-    infer: async (precision: Precision, magnitude: Float32Array, phase: Float32Array): Promise<Output> =>
-      precision === 'mixed-float16' ? invalid(magnitude, phase) : enhanced(magnitude, phase),
+    initialize: async (): Promise<void> => {},
+    infer: async (magnitude: Float32Array, phase: Float32Array): Promise<Output> => enhanced(magnitude, phase),
     fetch: undefined as ((url: string, signal?: AbortSignal | null) => Promise<Response | undefined>) | undefined
   };
-  installGlobal(t, key, async (plan: { precision: Precision }, _weights: Uint8Array, options: { adapter: GPUAdapter }) => {
+  installGlobal(t, key, async (plan: { precision: string }, _weights: Uint8Array, options: { adapter: GPUAdapter }) => {
+    assert.equal(plan.precision, 'float32');
     assert.ok(engines.every(engine => engine.disposed), 'only one model/device may be resident');
     await options.adapter.requestDevice();
-    const engine = { precision: plan.precision, disposed: false, disposal: Promise.withResolvers<void>() };
+    const engine = { disposed: false, disposal: Promise.withResolvers<void>() };
     engines.push(engine);
-    events.push(`create:${engine.precision}`);
+    events.push('create:float32');
+    await controls.initialize();
     let running = false;
     return {
       infer: async (magnitude: Float32Array, phase: Float32Array) => {
         assert.equal(running, false); assert.equal(engine.disposed, false);
         running = true;
-        events.push(`infer:${engine.precision}`);
-        try { return await controls.infer(engine.precision, magnitude, phase); }
-        finally { running = false; events.push(`settled:${engine.precision}`); }
+        events.push('infer:float32');
+        try { return await controls.infer(magnitude, phase); }
+        finally { running = false; events.push('settled:float32'); }
       },
       dispose: async () => {
         assert.equal(running, false, 'actual inference must settle before resources are released');
         if (engine.disposed) return;
-        events.push(`dispose:${engine.precision}`);
+        events.push('dispose:float32');
         engine.disposed = true;
         engine.disposal.resolve();
       }
@@ -123,15 +125,12 @@ async function runtimeFixture(t: TestContext) {
     terminate(): void { this.closed = true; events.push('worker:terminate'); }
   }
   installGlobal(t, 'Worker', OwnedDspWorker);
-  installGlobal(t, 'chrome', { runtime: { getURL: (file: string) => `chrome-extension://recovery/${file}` } });
-  let adapterCount = 0;
+  installGlobal(t, 'chrome', { runtime: { getURL: (file: string) => `chrome-extension://fp32/${file}` } });
   installGlobal(t, 'navigator', { gpu: { requestAdapter: async () => {
-    adapterCount++;
     events.push('adapter:acquire');
-    if (adapterCount > 1 && !controls.recoveryAdapterAvailable) return null;
     let consumed = false;
     return {
-      info: { isFallbackAdapter: false }, features: { has: (feature: string) => feature === 'shader-f16' || feature === 'timestamp-query' },
+      info: { isFallbackAdapter: false }, features: { has: (feature: string) => feature === 'timestamp-query' },
       limits: { maxComputeWorkgroupStorageSize: 32768, maxComputeInvocationsPerWorkgroup: 256,
         maxComputeWorkgroupSizeX: 256, maxStorageBuffersPerShaderStage: 8 },
       requestDevice: async () => {
@@ -150,11 +149,11 @@ async function runtimeFixture(t: TestContext) {
   t.mock.method(globalThis, 'fetch', async (input: string | URL | Request, options?: RequestInit) => {
     const url = String(input);
     fetches.push(url);
-    assert.match(url, /^chrome-extension:\/\/recovery\/dist\/models\//, 'fixtures never upload originals');
+    assert.match(url, /^chrome-extension:\/\/fp32\/dist\/models\/zipenhancer-webgpu\.(plan\.json|weights\.bin)$/, 'only primary packaged assets may be requested');
     const override = await controls.fetch?.(url, options?.signal);
     if (override) return override;
     if (url.endsWith('.weights.bin')) return new Response(weights);
-    return new Response(planBytes[url.includes('-fp32.') ? 1 : 0]);
+    return new Response(planBytes);
   });
   // Each test imports its independently bundled runtime with a controlled neural boundary.
   const runtime = await import(pathToFileURL(outfile).href) as typeof EnhancementRuntime;
@@ -169,20 +168,11 @@ async function runtimeFixture(t: TestContext) {
   return { runtime, controls, events, engines, requests, fetches, disposeIdle };
 }
 
-test('local owner, cache and localOnly consumers share one memory-safe latched GPU recovery and retain exact Original clocks', async t => {
+test('owner, cache and localOnly consumers use one FP32 engine and retain exact Original clocks', async t => {
   const fixture = await runtimeFixture(t), originals = tracks('owner'), progress: AudioEnhancementProgress[] = [];
-  let firstInput: Output | undefined;
-  fixture.controls.infer = async (precision, magnitude, phase) => {
-    if (precision === 'mixed-float16') { firstInput = { magnitude, phase }; return invalid(magnitude, phase); }
-    if (firstInput) {
-      assert.equal(magnitude, firstInput.magnitude); assert.equal(phase, firstInput.phase);
-      firstInput = undefined;
-    }
-    return enhanced(magnitude, phase);
-  };
   const request: LocalModelEnhanceAudioRequest = {
     type: LOCAL_MODEL_OFFSCREEN_MESSAGE_TYPE, version: LOCAL_MODEL_OFFSCREEN_VERSION,
-    target: 'offscreen', operation: 'enhanceAudio', requestId: 'owned-recovery', taskId: 'native-task',
+    target: 'offscreen', operation: 'enhanceAudio', requestId: 'owned-fp32', taskId: 'native-task',
     audioTracks: originals.map(({ blob: _blob, ...track }, index) => ({ ...track, audioTransferId: `transfer-${index}` }))
   };
   const batch = await fixture.runtime.enhanceAudioTracks(originals, notice => {
@@ -191,17 +181,21 @@ test('local owner, cache and localOnly consumers share one memory-safe latched G
       operation: request.operation, requestId: request.requestId, taskId: request.taskId, progress: notice
     };
     assert.equal(isLocalModelEnhancementProgress(message, 'content', request), true,
-      `The owning content tab must accept actual recovery progress: ${JSON.stringify(notice)}`);
+      `The owning content tab must accept actual enhancement progress: ${JSON.stringify(notice)}`);
+    assert.equal(notice.backendReason, undefined, 'local progress cannot claim remote routing');
     progress.push(notice);
   });
   assert.equal(batch.cacheStatus, 'stored');
   assert.equal(batch.tracks.length, 2);
   assert.deepEqual(fixture.events.filter(event => /^(create|dispose|infer):/.test(event)), [
-    'create:mixed-float16', 'infer:mixed-float16', 'dispose:mixed-float16', 'create:float32', 'infer:float32', 'infer:float32'
+    'create:float32', 'infer:float32', 'infer:float32'
   ]);
-  assert.equal(fixture.events.filter(event => event === 'adapter:device').length, 2, 'mixed and FP32 initialization consume distinct adapters');
+  assert.equal(fixture.events.filter(event => event === 'adapter:acquire').length, 1);
+  assert.equal(fixture.events.filter(event => event === 'adapter:device').length, 1);
+  assert.equal(fixture.fetches.length, 2, 'the primary plan and weights load exactly once');
   let previous: AudioEnhancementProgress | undefined;
   for (const notice of progress.filter(value => ['loading-model', 'enhancing', 'encoding'].includes(value.phase))) {
+    assert.equal(notice.backend, 'webgpu');
     if (previous?.trackId === notice.trackId) {
       assert.ok(notice.completedChunks >= previous.completedChunks);
       if (previous.totalChunks > 0) assert.equal(notice.totalChunks, previous.totalChunks);
@@ -218,72 +212,118 @@ test('local owner, cache and localOnly consumers share one memory-safe latched G
     assert.notDeepEqual(output.bytes, new Uint8Array(original), 'Enhanced is neural output, never relabeled Original');
   }
   const fetches = fixture.fetches.length, runs = fixture.events.filter(event => event.startsWith('infer:')).length;
+  const probes = fixture.events.filter(event => event === 'adapter:acquire').length;
   const cached = await fixture.runtime.enhanceAudioTracks(originals);
   assert.equal(cached.cacheStatus, 'hit'); assert.equal(fixture.fetches.length, fetches);
   assert.equal(fixture.events.filter(event => event.startsWith('infer:')).length, runs);
+  assert.equal(fixture.events.filter(event => event === 'adapter:acquire').length, probes);
   await fixture.runtime.enhanceAudioTracks(tracks('volunteer'), undefined, { localOnly: true, cache: false });
-  assert.equal(fixture.engines.length, 2, 'FP32 remains latched across tracks and consumers until idle disposal');
-  assert.equal(fixture.events.filter(event => event === 'infer:mixed-float16').length, 1);
+  assert.equal(fixture.engines.length, 1, 'the sole engine remains resident across lanes and consumers until idle disposal');
+  assert.equal(fixture.events.filter(event => event === 'infer:float32').length, 4);
   await fixture.disposeIdle();
   assert.ok(fixture.engines.every(engine => engine.disposed));
+  await fixture.runtime.enhanceAudioTracks(tracks('after-idle'), undefined, { cache: false });
+  assert.equal(fixture.engines.length, 2, 'new work after idle release creates one fresh engine');
 });
 
-for (const failure of ['device', 'fp32-numerical', 'fp32-later-lane', 'fp32-asset', 'fp32-adapter'] as const) {
-  test(`${failure} rejects the complete pair without cache publication or further fallback`, async t => {
+for (const failure of ['device', 'audit', 'numerical', 'later-lane', 'asset', 'progress'] as const) {
+  test(`${failure} rejects the complete pair without cache publication or fallback`, async t => {
     const fixture = await runtimeFixture(t), originals = tracks(failure);
-    let fullCalls = 0;
-    fixture.controls.infer = async (precision, magnitude, phase) => {
-      if (failure === 'device') throw new Error('GPU device lost');
-      if (precision === 'float32' && failure === 'fp32-later-lane' && ++fullCalls === 1) return enhanced(magnitude, phase);
-      return invalid(magnitude, phase);
+    const snapshots = await Promise.all(originals.map(track => track.blob.arrayBuffer()));
+    const reason = new Error(`${failure} rejected`);
+    let calls = 0;
+    fixture.controls.infer = async (magnitude, phase) => {
+      calls++;
+      if (failure === 'device' || failure === 'audit') throw reason;
+      if (failure === 'numerical' || failure === 'later-lane' && calls === 2) return invalid(magnitude, phase);
+      return enhanced(magnitude, phase);
     };
-    if (failure === 'fp32-asset') fixture.controls.fetch = async url => url.includes('-fp32.') ? new Response(null, { status: 503 }) : undefined;
-    if (failure === 'fp32-adapter') fixture.controls.recoveryAdapterAvailable = false;
-    await assert.rejects(fixture.runtime.enhanceAudioTracks(originals),
-      failure === 'device' ? /GPU device lost/ : failure === 'fp32-asset' ? /assets could not be loaded/
-        : failure === 'fp32-adapter' ? /fresh hardware WebGPU adapter/ : /invalid spectral values/);
+    if (failure === 'asset') fixture.controls.fetch = async () => { throw reason; };
+    await assert.rejects(fixture.runtime.enhanceAudioTracks(originals, progress => {
+      if (failure === 'progress' && progress.phase === 'enhancing' && progress.completedChunks > 0) throw reason;
+    }), error => failure === 'numerical' || failure === 'later-lane'
+      ? error instanceof Error && /invalid spectral values/.test(error.message) : error === reason);
     assert.ok(fixture.engines.every(engine => engine.disposed));
-    assert.equal(fixture.requests.filter(request => request.type === 'finish').length, failure === 'fp32-later-lane' ? 1 : 0);
-    assert.equal(fixture.engines.length, failure === 'fp32-numerical' || failure === 'fp32-later-lane' ? 2 : 1);
-    if (failure === 'device' || failure === 'fp32-adapter') assert.equal(fixture.fetches.some(url => url.includes('-fp32.')), false);
+    assert.equal(fixture.requests.filter(request => request.type === 'finish').length, failure === 'later-lane' ? 1 : 0);
+    assert.equal(fixture.engines.length, failure === 'asset' ? 0 : 1);
+    assert.equal(calls, failure === 'asset' ? 0 : failure === 'later-lane' ? 2 : 1);
+    assert.equal(fixture.events.filter(event => event === 'adapter:acquire').length, 1, 'failure never reacquires or reroutes');
+    for (let index = 0; index < originals.length; index++) assert.deepEqual(await originals[index].blob.arrayBuffer(), snapshots[index]);
     fixture.controls.fetch = undefined;
-    fixture.controls.recoveryAdapterAvailable = true;
-    fixture.controls.infer = async (_precision, magnitude, phase) => enhanced(magnitude, phase);
+    fixture.controls.infer = async (magnitude, phase) => enhanced(magnitude, phase);
     const retried = await fixture.runtime.enhanceAudioTracks(originals);
     assert.notEqual(retried.cacheStatus, 'hit', 'a rejected pair must never become a cache hit');
     assert.equal(retried.cacheStatus, 'stored');
+    assert.equal(fixture.requests.filter(request => request.type === 'finish').length, failure === 'later-lane' ? 3 : 2);
   });
 }
 
-for (const stage of ['recovery-load', 'recovery-flight'] as const) {
-  test(`cancellation during ${stage} drains owned work, publishes nothing and disposes the single resident engine`, async t => {
-    const fixture = await runtimeFixture(t), controller = new AbortController(), reason = new Error('Owner cancelled recovery');
-    const started = Promise.withResolvers<void>(), gate = Promise.withResolvers<void>();
-    if (stage === 'recovery-load') fixture.controls.fetch = async (url, signal) => {
-      if (!url.includes('-fp32.')) return undefined;
+for (const stage of ['load', 'initialize', 'flight'] as const) {
+  test(`cancellation during ${stage} drains owned work and releases the sole engine without publication`, async t => {
+    const fixture = await runtimeFixture(t), controller = new AbortController(), reason = new Error('Owner cancelled enhancement');
+    const originals = tracks(stage), started = Promise.withResolvers<void>(), gate = Promise.withResolvers<void>();
+    if (stage === 'load') fixture.controls.fetch = async (_url, signal) => {
       started.resolve();
       await gate.promise;
       signal?.throwIfAborted();
       return undefined;
     };
-    fixture.controls.infer = async (precision, magnitude, phase) => {
-      if (precision === 'mixed-float16') return invalid(magnitude, phase);
+    if (stage === 'initialize') fixture.controls.initialize = async () => { started.resolve(); await gate.promise; };
+    if (stage === 'flight') fixture.controls.infer = async (magnitude, phase) => {
       started.resolve(); await gate.promise;
       return enhanced(magnitude, phase);
     };
     let settled = false;
-    const result = fixture.runtime.enhanceAudioTracks(tracks(stage), undefined, { signal: controller.signal, cache: false })
+    const result = fixture.runtime.enhanceAudioTracks(originals, undefined, { signal: controller.signal })
       .finally(() => { settled = true; });
     const rejected = assert.rejects(result, error => error === reason);
     await started.promise;
     controller.abort(reason);
     await Promise.resolve();
     assert.equal(settled, false);
-    if (stage === 'recovery-flight') assert.equal(fixture.engines.at(-1)?.disposed, false);
+    if (stage !== 'load') assert.equal(fixture.engines.at(-1)?.disposed, false);
     gate.resolve();
     await rejected;
     assert.ok(fixture.engines.every(engine => engine.disposed));
     assert.equal(fixture.requests.some(request => request.type === 'finish'), false);
-    assert.equal(fixture.engines.length, stage === 'recovery-flight' ? 2 : 1);
+    assert.equal(fixture.engines.length, stage === 'load' ? 0 : 1);
+    fixture.controls.fetch = undefined;
+    fixture.controls.initialize = async () => {};
+    fixture.controls.infer = async (magnitude, phase) => enhanced(magnitude, phase);
+    const retried = await fixture.runtime.enhanceAudioTracks(originals);
+    assert.equal(retried.cacheStatus, 'stored', 'cancellation cannot publish a cache hit');
+  });
+}
+
+for (const laneIndex of [0, 1]) {
+  test(`cancellation before encoding lane ${laneIndex} never commits or returns an incomplete pair`, async t => {
+    const fixture = await runtimeFixture(t), controller = new AbortController(), reason = new Error('Owner cancelled completion');
+    const originals = tracks(`encoding-${laneIndex}`);
+    await assert.rejects(fixture.runtime.enhanceAudioTracks(originals, progress => {
+      if (progress.phase === 'encoding' && progress.trackIndex === laneIndex) controller.abort(reason);
+    }, { signal: controller.signal }), error => error === reason);
+    const runs = fixture.events.filter(event => event.startsWith('infer:')).length;
+    const retried = await fixture.runtime.enhanceAudioTracks(originals);
+    assert.equal(retried.cacheStatus, 'stored');
+    assert.equal(fixture.events.filter(event => event.startsWith('infer:')).length, runs + 2);
+  });
+}
+
+for (const [name, options] of [
+  ['mixed artifact', { artifactPrecision: 'mixed-float16' }],
+  ['mixed plan', { precision: 'mixed-float16' }],
+  ['half tensor', { tensors: [{ dataType: 10 }] }],
+  ['half Cast', { nodes: [{ op: 'Cast', attributes: { to: 10 } }] }],
+  ['half fused Cast', { nodes: [{ op: 'ZipSwoosh', attributes: { steps: [{ op: 'Cast', to: 10 }] } }] }],
+  ['nested half fused Cast', { nodes: [{ op: 'ZipSwoosh', attributes: { steps: [{ op: 'Where', steps: [{ op: 'Cast', to: 10 }] }] } }] }],
+  ['half fused output', { nodes: [{ op: 'ZipSwoosh', attributes: { outputType: 10 } }] }],
+] as const) {
+  test(`${name} is rejected before any engine or worker allocation`, async t => {
+    const fixture = await runtimeFixture(t, options);
+    await assert.rejects(fixture.runtime.enhanceAudioTracks(tracks(name), undefined, { cache: false }));
+    assert.equal(fixture.engines.length, 0);
+    assert.equal(fixture.events.filter(event => event === 'adapter:device').length, 0);
+    assert.equal(fixture.requests.length, 0);
+    assert.equal(fixture.fetches.length, name === 'mixed artifact' ? 0 : 2);
   });
 }
