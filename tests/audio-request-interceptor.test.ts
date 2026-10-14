@@ -89,11 +89,11 @@ test('native waveform blob URLs retain their speaker lane mapping', async () => 
 });
 
 test('native task identity survives deleting every annotation and follows the committed root', async () => {
-  const dom = new JSDOM('<main><table><tbody><tr><td><textarea placeholder="What was said"></textarea></td></tr></tbody></table></main>', {
+  const dom = new JSDOM('<main><div data-transcript-scroll><section data-annotation-id="annotation-a"><div role="textbox" aria-label="Edit turn text"></div></section></div></main>', {
     url: 'https://dashboard.babel.audio/transcription/RU-transcription'
   });
-  const body = dom.window.document.querySelector('tbody')!;
-  const textarea = dom.window.document.querySelector('textarea')!;
+  const body = dom.window.document.querySelector('[data-transcript-scroll]')!;
+  const turn = dom.window.document.querySelector('[data-annotation-id]')!;
   type NativeFiber = {
     memoizedProps?: { reviewActionId: string; transcriptionChunkProcessedRecordings: unknown[] };
     return?: NativeFiber;
@@ -118,10 +118,10 @@ test('native task identity survives deleting every annotation and follows the co
   bodyB.alternate = bodyA;
   actionA.child = bodyA;
   actionB.child = bodyB;
-  const textareaFiber: NativeFiber = { return: bodyA };
-  bodyA.child = textareaFiber;
+  const turnFiber: NativeFiber = { return: bodyA };
+  bodyA.child = turnFiber;
   Object.assign(dom.window.document.querySelector('main')!, { __reactFiber$test: bodyA });
-  Object.assign(textarea, { __reactFiber$test: textareaFiber });
+  Object.assign(turn, { __reactFiber$test: turnFiber });
   Object.assign(globalThis, {
     window: dom.window,
     document: dom.window.document,

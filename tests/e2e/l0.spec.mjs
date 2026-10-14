@@ -1,10 +1,10 @@
 import { test, expect } from '@nominy/babel-extension-e2e/test'
+import { TEXT as ROW, editText, readTexts as texts, saved } from '@nominy/babel-extension-e2e/native-helpers';
+import { expectNativeTexts } from './native-transcript.mjs';
 
-const ROW = 'textarea[placeholder^="What was said"]';
 const WAND = '#babel-gold-drafting-magic-button';
 const STATUS = '#babel-gold-drafting-overlay .bgd-status';
 const PANEL = '.bgd-timing-hover-panel';
-const texts = (page) => page.locator(ROW).evaluateAll((elements) => elements.map((element) => element.value));
 const nativeAnnotations = (page) => page.evaluate(() => window.__BABEL_E2E__.snapshot().annotations);
 const byAnnotationTime = (left, right) => left.startTimeInSeconds - right.startTimeInSeconds
   || left.endTimeInSeconds - right.endTimeInSeconds || left.id.localeCompare(right.id);
@@ -44,7 +44,8 @@ test.describe('Gold without a replacement consumer', () => {
     await configure(page, babel, { mode: 'simple' });
     const original = annotationData(await nativeAnnotations(page));
     await page.locator(WAND).click();
-    await expect(page.locator(`${STATUS}[data-error="true"]`)).toContainText('requires Babel Helper');
+    await expect(page.locator(STATUS)).toHaveAttribute('data-error', 'true');
+    await expect(page.locator(WAND)).toBeEnabled();
     expect(transcriptionRequests).toBe(0);
     expect(annotationData(await nativeAnnotations(page))).toEqual(original);
     await expect(page.getByRole('button', { name: 'Apply Draft', exact: true })).toBeDisabled();
@@ -100,10 +101,10 @@ test.describe('Gold and Helper L0 integration', () => {
     expect(annotations.map(row => row.content).sort()).toEqual(generated.map(row => row.text).sort());
     expect(annotations.every(row => row.startTimeInSeconds < row.endTimeInSeconds)).toBe(true);
     expect(state.calls.filter(call => call.path.startsWith('/api/draft/'))).toEqual([]);
-    await page.getByRole('button', { name: 'Save progress', exact: true }).click();
+    await saved(page, babel);
     await expect.poll(async () => annotationData((await babel.state()).action.annotations)).toEqual(annotationData(annotations));
     await page.reload();
-    await expect.poll(async () => (await texts(page)).sort()).toEqual(generated.map(row => row.text).sort());
+    await expectNativeTexts(page, generated.map(row => row.text), { sorted: true });
   });
 
   test('ordinary drafting still rejects an empty transcript without sending generation requests', async ({ page, babel }) => {
@@ -154,8 +155,8 @@ test.describe('Gold and Helper L0 integration', () => {
       expect(created.startTimeInSeconds).toBeCloseTo(generated.startSeconds, 2);
       expect(created.endTimeInSeconds).toBeCloseTo(generated.endSeconds, 2);
     }
-    await page.getByRole('button', { name: 'Save progress', exact: true }).click();
-    // Replacement changes native unsaved state; persistence belongs to Save.
+    await saved(page, babel);
+    // Native Save and autosave must both persist the replacement state.
     await expect.poll(async () => annotationData((await babel.state()).action.annotations))
       .toEqual(annotationData(annotations));
     expect(annotations.every((row) => Number.isFinite(row.startTimeInSeconds) && row.startTimeInSeconds < row.endTimeInSeconds)).toBe(true);
@@ -164,7 +165,7 @@ test.describe('Gold and Helper L0 integration', () => {
     await page.reload();
     await expect.poll(() => page.evaluate(() => window.__BABEL_E2E__?.snapshot().ready === true)).toBe(true);
     await expect.poll(async () => annotationData(await nativeAnnotations(page))).toEqual(annotationData(annotations));
-    await expect.poll(async () => (await texts(page)).sort()).toEqual(annotations.map((row) => row.content).sort());
+    await expectNativeTexts(page, annotations.map((row) => row.content), { sorted: true });
   });
 
   test('L0 replacement can recapture its created rows before Gold stream apply', async ({ page, babel }) => {
@@ -189,15 +190,15 @@ test.describe('Gold and Helper L0 integration', () => {
     const draft = state.draftSessions[request.body.draftSessionId].result;
     const draftById = new Map(draft.draftRows.map((row) => [row.rowId, row.rewrittenText]));
     const expectedTexts = request.body.rows.map((row) => draftById.get(row.rowId) ?? row.text);
-    await expect.poll(() => texts(page)).toEqual(expectedTexts);
+    await expectNativeTexts(page, expectedTexts);
     if (babel.ai === 'placeholder') expect(expectedTexts).not.toEqual(request.body.rows.map((row) => row.text));
-    await page.locator(ROW).first().focus();
+    await page.locator(ROW).first().click();
     expect(await page.locator(ROW).count()).toBe(nativeIds.length);
     await expect.poll(async () => (await nativeAnnotations(page)).map((row) => row.content).sort())
       .toEqual([...expectedTexts].sort());
     const applied = await nativeAnnotations(page);
     expect(applied.map((row) => row.id).sort()).toEqual(nativeIds);
-    await page.getByRole('button', { name: 'Save progress', exact: true }).click();
+    await saved(page, babel);
     await expect.poll(async () => annotationData((await babel.state()).action.annotations))
       .toEqual(annotationData(applied));
     const transcriptionsBeforeReload = state.calls.filter((call) => call.path === '/v1/transcribe').length;
@@ -206,7 +207,7 @@ test.describe('Gold and Helper L0 integration', () => {
     await page.reload();
     await expect.poll(() => page.evaluate(() => window.__BABEL_E2E__?.snapshot().ready === true)).toBe(true);
     await expect.poll(async () => annotationData(await nativeAnnotations(page))).toEqual(annotationData(applied));
-    await expect.poll(async () => (await texts(page)).sort()).toEqual(applied.map((row) => row.content).sort());
+    await expectNativeTexts(page, applied.map((row) => row.content), { sorted: true });
     await expect.poll(async () => (await babel.state()).calls.filter((call) => call.path === '/v1/timing/lookup').length)
       .toBeGreaterThan(lookupsBeforeReload);
     expect((await babel.state()).calls.filter((call) => call.path === '/v1/transcribe')).toHaveLength(transcriptionsBeforeReload);
@@ -242,7 +243,34 @@ test.describe('Gold and Helper L0 integration', () => {
     const completed = await babel.state();
     const timing = completed.calls.find((call) => call.path === '/v1/transcribe' && call.outcome === 'success');
     expect(timing).toBeDefined();
-    expect(updates[0].tracks).toEqual(timing.response.tracks);
+    expect(timing.response.taskId).toBe(timing.body.taskId);
+    expect(JSON.parse(timing.response.taskId).baseTaskId).toBe(state.action.reviewActionId);
+    // The page protocol publishes lane/token timing, not the private acoustic
+    // cache metadata used by the inference and segmentation endpoints.
+    expect(updates[0]).toEqual({
+      type: 'babel-gold-drafting:l0-timing-update',
+      version: 1,
+      taskId: timing.response.taskId,
+      tracks: timing.response.tracks.map(({ lane, tokens }) => ({ lane, tokens })),
+    });
+    expect(updates[0].tracks.map(({ lane }) => lane)).toEqual(timing.body.tracks.map(({ lane }) => lane));
+    for (const track of timing.response.tracks) {
+      expect(track.pcmSha256).toMatch(/^[0-9a-f]{64}$/);
+      expect(Number.isSafeInteger(track.sampleRate) && track.sampleRate > 0).toBe(true);
+      expect(Array.isArray(track.segments)).toBe(true);
+      if (babel.ai === 'placeholder') expect(track.segments.length).toBeGreaterThan(0);
+      for (const segment of track.segments) {
+        expect(segment.id.trim()).not.toBe('');
+        expect(Number.isSafeInteger(segment.startSample) && segment.startSample >= 0).toBe(true);
+        expect(Number.isSafeInteger(segment.endSample) && segment.endSample > segment.startSample).toBe(true);
+        expect(segment.sampleRate).toBe(track.sampleRate);
+        expect(segment.startSeconds).toBeGreaterThanOrEqual(0);
+        expect(segment.endSeconds).toBeGreaterThan(segment.startSeconds);
+        expect(segment.endSeconds).toBeLessThanOrEqual(state.audio.duration);
+        expect(Math.abs(segment.startSeconds - segment.startSample / segment.sampleRate)).toBeLessThanOrEqual(1e-5);
+        expect(Math.abs(segment.endSeconds - segment.endSample / segment.sampleRate)).toBeLessThanOrEqual(1e-5);
+      }
+    }
     for (const call of completed.calls.filter((call) => call.path.startsWith('/v1/queue/') && call.outcome === 'success')) {
       const queued = call.response;
       expect(queued.requestId).toBe(decodeURIComponent(call.path.split('/').at(-1)));
@@ -255,6 +283,12 @@ test.describe('Gold and Helper L0 integration', () => {
       if (babel.ai === 'placeholder') expect(track.tokens.length).toBeGreaterThan(1);
       for (let index = 0; index < track.tokens.length; index += 1) {
         const token = track.tokens[index];
+        expect(token).toEqual({
+          id: expect.any(String), text: expect.any(String),
+          startSeconds: expect.any(Number), endSeconds: expect.any(Number),
+        });
+        expect(token.id.trim()).not.toBe('');
+        expect(token.text.trim()).not.toBe('');
         expect(token.startSeconds).toBeGreaterThanOrEqual(0);
         expect(token.endSeconds).toBeGreaterThan(token.startSeconds);
         expect(token.endSeconds).toBeLessThanOrEqual(state.audio.duration);
@@ -271,15 +305,13 @@ test.describe('Gold and Helper L0 integration', () => {
     });
     await page.locator(WAND).hover();
     await expect(page.locator(PANEL)).toHaveAttribute('data-status', 'retrying', { timeout: 15_000 });
-    await page.locator(ROW).first().fill('Редактор работает при ошибке таймингов.');
-    await page.locator(ROW).nth(1).focus();
-    await expect(page.locator(ROW).first()).toHaveValue('Редактор работает при ошибке таймингов.');
+    await editText(page, 0, 'Редактор работает при ошибке таймингов.');
     await expect(page.locator(PANEL)).toHaveAttribute('data-status', 'unavailable', { timeout: 50_000 });
     await babel.control({ routes: {} });
     await page.locator(WAND).hover();
     await page.getByRole('button', { name: 'Regenerate timestamp data', exact: true }).click();
     await expect(page.locator(PANEL)).toHaveAttribute('data-status', 'available', { timeout: babel.ai === 'placeholder' ? 30_000 : 150_000 });
-    await expect(page.locator(ROW).first()).toHaveValue('Редактор работает при ошибке таймингов.');
+    await expect(page.locator(ROW).first()).toHaveText('Редактор работает при ошибке таймингов.');
     await page.locator(WAND).hover();
     await expect(page.getByRole('button', { name: 'Regenerate timestamp data', exact: true })).toBeHidden();
   });
@@ -287,20 +319,30 @@ test.describe('Gold and Helper L0 integration', () => {
   test('navigation while timing is preparing releases the wand for the next task @local-engine', async ({ page, babel, request }) => {
     if (babel.ai !== 'placeholder') test.setTimeout(180_000);
     const initial = await configure(page, babel, {}, { audio: { laneCount: 0 } });
+    // Enter through the real project link so Back leaves the task without
+    // submitting through the native listening gate or replacing the document.
+    await page.goto(`${babel.baseURL}/projects`);
+    const documentToken = await page.evaluate(() => window.__goldNavigationDocumentToken = crypto.randomUUID());
+    await page.getByRole('link', { name: /RU-tx-gold/ }).click();
+    await expect(page.locator('html')).toHaveAttribute('data-babel-review-action-id', initial.action.reviewActionId);
+    await expect(page.locator(ROW)).toHaveCount(initial.action.annotations.length);
+    expect(await page.evaluate(() => window.__goldNavigationDocumentToken)).toBe(documentToken);
     await page.locator(WAND).click();
-    await expect(page.locator(STATUS)).toContainText('Waiting for shared L0 word timing');
+    await expect(page.locator('#babel-gold-drafting-overlay .bgd-activity')).toBeVisible();
+    await expect(page.locator(STATUS)).toHaveAttribute('data-error', 'false');
+    await expect(page.getByRole('button', { name: 'Apply Draft', exact: true })).toBeDisabled();
     await expect(page.locator(WAND)).toBeDisabled();
     expect((await babel.state()).calls.filter((call) => call.path === '/v1/transcribe' || call.path === '/v1/draft')).toEqual([]);
 
-    await page.getByRole('button', { name: 'Submit Review', exact: true }).focus();
-    await page.keyboard.press('Enter');
-    const submission = page.getByRole('dialog', { name: 'Confirm Submission' });
-    await expect(submission).toBeVisible();
-    await submission.getByRole('button', { name: 'Submit', exact: true }).focus();
-    await page.keyboard.press('Enter');
+    expect(annotationData(await nativeAnnotations(page))).toEqual(annotationData(initial.action.annotations));
+    await page.goBack();
     await expect(page).toHaveURL(/\/projects$/);
-    await expect(page.locator(STATUS)).toContainText('task changed');
+    expect(await page.evaluate(() => window.__goldNavigationDocumentToken)).toBe(documentToken);
     await expect(page.locator('#babel-gold-drafting-overlay')).toBeHidden();
+    await expect(page.getByRole('button', { name: 'Apply Draft', exact: true, includeHidden: true })).toBeDisabled();
+    const cancelled = await babel.state();
+    expect(cancelled.calls.filter((call) => call.path === '/v1/transcribe' || call.path === '/v1/draft')).toEqual([]);
+    expect(annotationData(cancelled.action.annotations)).toEqual(annotationData(initial.action.annotations));
 
     const nextId = '66666666-6666-4666-8666-666666666666';
     const nextRows = initial.action.annotations.map((row, index) => ({
@@ -314,8 +356,10 @@ test.describe('Gold and Helper L0 integration', () => {
     expect(reset.ok()).toBeTruthy();
     await page.getByRole('link', { name: /RU-tx-gold/ }).click();
     await expect(page.locator('html')).toHaveAttribute('data-babel-review-action-id', nextId);
+    expect(await page.evaluate(() => window.__goldNavigationDocumentToken)).toBe(documentToken);
     await expect(page.locator(WAND)).toBeEnabled();
     await expect.poll(async () => (await texts(page)).sort()).toEqual(nextRows.map((row) => row.content).sort());
+    expect(annotationData(await nativeAnnotations(page))).toEqual(annotationData(nextRows));
     await page.locator(WAND).click();
     await expect(page.locator(STATUS)).toContainText('L0 replacement complete', {
       timeout: babel.ai === 'placeholder' ? 60_000 : 150_000
@@ -329,14 +373,21 @@ test.describe('Gold and Helper L0 integration', () => {
     if (babel.ai !== 'placeholder') test.setTimeout(180_000);
     const hold = 'stale-l0-draft';
     const audio = speechAudio(babel);
-    await configure(page, babel, {}, {
+    const initial = await configure(page, babel, {}, {
       ...audio,
       controls: { routes: { '/v1/draft': { holdResponse: hold, times: 1 } } }
     });
+    await page.goto(`${babel.baseURL}/projects`);
+    const documentToken = await page.evaluate(() => window.__goldNavigationDocumentToken = crypto.randomUUID());
+    await page.getByRole('link', { name: /RU-tx-gold/ }).click();
+    await expect(page.locator('html')).toHaveAttribute('data-babel-review-action-id', initial.action.reviewActionId);
+    await expect(page.locator(ROW)).toHaveCount(initial.action.annotations.length);
+    expect(await page.evaluate(() => window.__goldNavigationDocumentToken)).toBe(documentToken);
     await page.locator(WAND).click();
     await expect.poll(async () => (await babel.state()).events.some((event) => event.type === 'response-held' && event.hold === hold), {
       timeout: babel.ai === 'placeholder' ? 15_000 : 150_000
     }).toBe(true);
+    await expect(page.locator(WAND)).toBeDisabled();
     const nextId = '55555555-5555-4555-8555-555555555555';
     const state = await babel.state();
     const heldResponse = state.calls.find((call) => call.path === '/v1/draft' && call.outcome === 'held')?.response;
@@ -344,15 +395,11 @@ test.describe('Gold and Helper L0 integration', () => {
     const nextRows = state.action.annotations.map((row, index) => ({
       ...row, id: `next-row-${index}`, reviewActionId: nextId, content: `Новая задача ${index + 1}.`
     }));
-    // Native submission navigates without replacing the document. Drop Claim
-    // is admin-only and is not part of this ordinary worker's task surface.
-    await page.getByRole('button', { name: 'Submit Review', exact: true }).focus();
-    await page.keyboard.press('Enter');
-    const submission = page.getByRole('dialog', { name: 'Confirm Submission' });
-    await expect(submission).toBeVisible();
-    await submission.getByRole('button', { name: 'Submit', exact: true }).focus();
-    await page.keyboard.press('Enter');
+    // Traverse the history established by the real project link, keeping the
+    // pending response in this document while native task navigation cancels it.
+    await page.goBack();
     await expect(page).toHaveURL(/\/projects$/);
+    expect(await page.evaluate(() => window.__goldNavigationDocumentToken)).toBe(documentToken);
     await expect(page.locator('#babel-gold-drafting-overlay')).toBeHidden();
     const reset = await request.post(`${babel.apiURL}/__e2e__/reset`, {
       data: { scenario: 'baseline', overrides: { ...audio, action: { actionId: nextId, reviewActionId: nextId, annotations: nextRows } } },
@@ -360,8 +407,10 @@ test.describe('Gold and Helper L0 integration', () => {
     expect(reset.ok()).toBeTruthy();
     await page.getByRole('link', { name: /RU-tx-gold/ }).click();
     await expect(page.locator('html')).toHaveAttribute('data-babel-review-action-id', nextId);
+    expect(await page.evaluate(() => window.__goldNavigationDocumentToken)).toBe(documentToken);
     await expect.poll(() => page.evaluate(() => window.__BABEL_E2E__.snapshot().reviewActionId)).toBe(nextId);
     await expect(page.locator('#babel-gold-drafting-overlay')).toBeHidden();
+    await expect(page.locator(WAND)).toBeEnabled();
     const [staleResponse] = await Promise.all([
       page.waitForResponse((response) => new URL(response.url()).pathname === '/v1/draft'),
       babel.control({ release: { [hold]: true } })
@@ -369,16 +418,16 @@ test.describe('Gold and Helper L0 integration', () => {
     await staleResponse.finished();
     expect(staleResponse.status()).toBe(200);
     expect(await staleResponse.json()).toEqual(heldResponse);
-    await expect(page.locator(STATUS)).toHaveAttribute('data-error', 'true');
+    await expect(page.locator('#babel-gold-drafting-overlay')).toBeHidden();
+    await expect(page.locator(WAND)).toBeEnabled();
     await expect(page.getByRole('button', { name: 'Apply Draft', exact: true, includeHidden: true })).toBeDisabled();
     await expect.poll(async () => annotationData(await nativeAnnotations(page))).toEqual(annotationData(nextRows));
     await expect.poll(async () => (await texts(page)).sort()).toEqual(nextRows.map((row) => row.content).sort());
     await expect(page.locator(WAND)).toHaveCount(1);
     const nextState = await babel.state();
     expect(nextState.action.annotations.map((row) => row.content)).toEqual(nextRows.map((row) => row.content));
-    await page.locator(ROW).first().fill('Новая задача остаётся редактируемой.');
-    await page.locator(ROW).nth(1).focus();
-    await expect(page.locator(ROW).first()).toHaveValue('Новая задача остаётся редактируемой.');
+    await editText(page, 0, 'Новая задача остаётся редактируемой.');
+    await expect(page.locator(ROW).first()).toHaveText('Новая задача остаётся редактируемой.');
   });
 });
 
@@ -422,7 +471,8 @@ test.describe('Simple native transcription in the existing editor', () => {
     await expect(page.locator(PANEL)).toHaveAttribute('data-status', 'unavailable');
     expect(requests).toEqual([]);
     await page.locator(WAND).click();
-    await expect(page.locator(STATUS)).toContainText('Simple transcription complete', { timeout: 30_000 });
+    await expect(page.getByRole('button', { name: 'Apply Draft', exact: true })).toBeEnabled({ timeout: 30_000 });
+    await expect(page.locator(STATUS)).toHaveAttribute('data-error', 'false');
     expect(requests).toEqual(['/api/v1/audio/transcriptions', '/api/v1/audio/transcriptions']);
     const annotations = await nativeAnnotations(page);
     expect(annotations.map((row) => row.content)).toEqual([nativeText, nativeText]);
@@ -435,7 +485,7 @@ test.describe('Simple native transcription in the existing editor', () => {
     expect(timing.tracks.map((track) => track.tokens.map((token) => token.text))).toEqual([['Ну', 'я', 'да'], ['Ну', 'я', 'да']]);
     await page.getByRole('button', { name: 'Apply Draft', exact: true }).click();
     expect((await nativeAnnotations(page)).map((row) => row.content)).toEqual([nativeText, nativeText]);
-    await page.getByRole('button', { name: 'Save progress', exact: true }).click();
+    await saved(page, babel);
     await expect.poll(async () => annotationData((await babel.state()).action.annotations)).toEqual(annotationData(await nativeAnnotations(page)));
     await page.reload();
     await expect(page.locator(WAND)).toBeVisible();
@@ -443,7 +493,8 @@ test.describe('Simple native transcription in the existing editor', () => {
     await expect(page.locator(PANEL)).toHaveAttribute('data-status', 'available');
     expect(requests).toHaveLength(2);
     await page.locator(WAND).click();
-    await expect(page.locator(STATUS)).toContainText('Simple transcription complete');
+    await expect(page.getByRole('button', { name: 'Apply Draft', exact: true })).toBeEnabled();
+    await expect(page.locator(STATUS)).toHaveAttribute('data-error', 'false');
     expect(requests).toHaveLength(2);
     expect((await babel.state()).calls.filter((call) => call.path.startsWith('/api/draft/') || call.path.startsWith('/v1/'))).toEqual([]);
   });

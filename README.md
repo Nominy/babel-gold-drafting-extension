@@ -16,6 +16,26 @@ Load `babel-gold-drafting-extension/` unpacked in `chrome://extensions`. Run `np
 
 `build` preserves the version. Use `npm run version:patch` explicitly when preparing a new release. The manifest includes the official public identity key so the unpacked extension keeps its normal broker identity.
 
+## Current Babel editor integration
+
+Capture, Apply Draft and Restore Original use the current native turn/Slate
+model, including hidden speaker lanes and pending raw text that has not reached
+the native debounce yet. Applying waits for captured pending edits to commit,
+then rechecks task, audio, readonly state and the complete transcript. Native
+callbacks preserve normal undo and persistence; direct DOM text replacement and
+the old table/textarea reader are not used.
+
+Audio-consuming requests wait for an enabled Helper enhancement control to publish
+the current task's state and commit the selected strength before binding audio.
+Missing or previous-task state during initialization is not treated as Original
+readiness. Gold alone, with no active enhancement feature, can use Original audio;
+text-only generation does not wait for unrelated audio changes.
+
+Closing a generation cancels its stream/reconciliation and ignores late results.
+A native apply already in progress is not interrupted halfway through. L0
+replacement carries the originating review action and complete expected rows to
+Helper, rather than treating whichever task happens to be visible as its target.
+
 ## Packaged ZipEnhancer runtime
 
 With matching Babel Helper installed, default-enabled **ZipEnhancer audio** automatically enhances both loaded speaker lanes. **Review Grader is not required** for UI, capture, caching, local inference or remote processing. Options → **ZipEnhancer processing** is available in Local, Cloud (Simple), and Advanced modes. **Automatic (prefer local GPU)** uses hardware WebGPU when supported; **Remote inference (official first, then swarm)** uses remote processing even on a capable GPU. Save Settings, then reload the current task to start its next enhancement with that choice. The preference is independent of transcription mode and volunteering. The package contains one optimized FP32 plan and 8.39 MB of original weights, not a mixed model plus a second recovery model. No CPU inference engine or downloaded C-denoise/ASR bundle is required.

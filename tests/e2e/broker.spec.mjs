@@ -1,9 +1,9 @@
 import { test, expect } from '@nominy/babel-extension-e2e/test'
+import { TEXT as ROW } from '@nominy/babel-extension-e2e/native-helpers';
 
 const TYPE = 'babel-gold-drafting:ai-broker';
 const PORT = 'babel-gold-drafting:ai-broker-port';
 const ENDPOINT = '/api/broker/transcribe-segment';
-const ROW = 'textarea[placeholder^="What was said"]';
 const segment = { rowId: 'row-1', speakerKey: 'speaker-1', startSeconds: 0.5, endSeconds: 2.5 };
 const request = (operation, fields = {}) => ({ type: TYPE, version: 1, operation, ...fields });
 
@@ -138,7 +138,7 @@ test.describe('Gold public broker transports with real installed Helper', () => 
     } finally { await world.close(); }
   });
 
-  test('non-Babel options tabs and tabless workers cannot bypass admission or permit L0 fallback', async ({ page, context, babel }) => {
+  test('non-Babel options tabs cannot bypass admission or permit L0 fallback', async ({ page, babel }) => {
     await configure(page, babel);
     const helperOptions = await babel.options('helper');
     const remote = await helperOptions.evaluate(({ id, payload }) => chrome.runtime.sendMessage(id, payload), {
@@ -150,20 +150,8 @@ test.describe('Gold public broker transports with real installed Helper', () => 
       payload: request('transcribeSegmentL0', { taskId: 'not-current', row: { ...segment, text: '', index: 0 } }),
     });
     expect(l0).toMatchObject({ ok: false, reason: 'tab-broker-unavailable', fallbackAllowed: false });
-    // An options page opened in a tab has a sender tab in real Chromium.
-    // The installed Helper worker supplies a genuine tabless sender instead.
-    const helperWorker = context.serviceWorkers().find((worker) =>
-      worker.url().startsWith(`chrome-extension://${babel.extensionIds.helper}/`));
-    expect(helperWorker, 'The actual installed Helper background worker must be available').toBeDefined();
-    for (const payload of [
-      request('transcribeSegment', { segment }),
-      request('transcribeSegmentL0', { taskId: 'not-current', row: { ...segment, text: '', index: 0 } }),
-    ]) {
-      const result = await helperWorker.evaluate(({ id, payload }) => chrome.runtime.sendMessage(id, payload), {
-        id: babel.extensionIds.gold, payload,
-      });
-      expect(result).toMatchObject({ ok: false, reason: 'missing-tab', fallbackAllowed: false });
-    }
+    // Helper is content-only; genuine tabless sender admission is covered by
+    // ai-broker-transport.test.ts rather than an invented background worker.
     expect((await babel.state()).calls.filter((call) => call.path === ENDPOINT || call.path === '/v1/draft')).toEqual([]);
     await helperOptions.close();
   });

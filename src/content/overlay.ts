@@ -5,7 +5,7 @@ import { generateMaiL0Draft, MaiBridgeError } from '../core/mai-client';
 import { replaceTranscriptWithL0Rows, requireL0ReplacementConsumer } from '../core/l0-replacement-bridge';
 import { matchL0CreatedRows } from '../core/l0-created-row-matcher';
 import { assessAudioCaptureForDrafting, type AudioCaptureIssue } from '../core/audio-capture-guard';
-import { captureAudioTracksForDrafting } from '../core/audio-cues';
+import { captureAudioTracksForDrafting, waitForAudioSelection } from '../core/audio-cues';
 import { isBrowserLocalMode, loadSettings } from '../core/settings';
 import { applyDraftRows, buildCanonicalTaskIdentity, buildDiffPreviewItems, captureTranscriptJob, restoreCapturedRows } from '../core/transcript';
 import { generateCurrentLocalL0Draft, getCurrentL0TimingGeneration, waitForCurrentL0Timing } from './l0-timing-service';
@@ -29,7 +29,7 @@ import type {
 const STYLE_ID = 'babel-gold-drafting-style';
 const BUTTON_ID = 'babel-gold-drafting-magic-button';
 const OVERLAY_ID = 'babel-gold-drafting-overlay';
-const TOOLBAR_BUTTON_SELECTOR = 'button[aria-label="Play all tracks"]';
+const TOOLBAR_BUTTON_SELECTOR = 'button[aria-label="Play all tracks"], button[aria-label="Pause all tracks"]';
 export function shouldRunGoldLlmAfterL0(settings: ExtensionSettings): boolean {
   return settings.mode !== 'simple' && !settings.l0DontRunLlm &&
     (settings.mode === 'advanced' || Boolean(settings.openRouterApiKey.trim()));
@@ -150,6 +150,8 @@ export class DraftingOverlayController {
   private streamedTotalRows = 0;
   private activeDraftLabel = 'Gold / OpenRouter';
   private busy = false;
+  private draftAbort: AbortController | null = null;
+  private mutationBusy = false;
   private pendingAudioDraft: {
     capturedJob: TranscriptJob;
     settings: ExtensionSettings;
@@ -174,6 +176,7 @@ export class DraftingOverlayController {
   ensureMagicButton(): void {
     ensureStyles();
     if (this.dialogTask && hasDialogTaskChanged(this.dialogTask, window.location, readPublishedPageTaskId())) {
+      this.cancelDraft();
       this.dialogTask = null;
       if (this.overlay) this.overlay.hidden = true;
       this.cancelTimingPanelHide();
@@ -184,6 +187,7 @@ export class DraftingOverlayController {
   }
 
   unmount(): void {
+    this.draftAbort?.abort(new DOMException('Draft closed', 'AbortError'));
     this.button?.remove();
     this.overlay?.remove();
     this.timingPanel?.remove();
@@ -444,13 +448,24 @@ export class DraftingOverlayController {
     }
   }
 
+  private cancelDraft(): void {
+    this.draftAbort?.abort(new DOMException('Draft cancelled', 'AbortError'));
+    this.state = { capturedJob: null, draftResponse: null };
+    this.streamedRows = [];
+    this.streamedSummary = null;
+    this.clearAudioGuard();
+    this.setBusy(false);
+    this.setButtonState('idle', 'Gold Draft');
+  }
+
   private closeDialog(): void {
-    if (!this.busy && this.overlay) {
-      this.overlay.hidden = true;
-    }
+    if (this.mutationBusy) return;
+    if (this.busy) this.cancelDraft();
+    if (this.overlay) this.overlay.hidden = true;
   }
 
   private setButtonState(mode: 'idle' | 'loading' | 'done' | 'error', label: string): void {
+    if (mode === 'idle' && this.busy) return;
     if (!(this.button instanceof HTMLButtonElement)) {
       return;
     }
@@ -471,7 +486,7 @@ export class DraftingOverlayController {
       this.restoreButton.disabled = nextBusy || !this.state.capturedJob;
     }
     if (this.closeButton) {
-      this.closeButton.disabled = nextBusy;
+      this.closeButton.disabled = this.mutationBusy;
     }
     this.audioGuardEl
       ?.querySelectorAll<HTMLButtonElement>('button[data-bgd-audio-action]')
@@ -563,7 +578,7 @@ export class DraftingOverlayController {
 
   private async captureAudioTracksWithStatus(): Promise<CapturedAudioTrack[]> {
     this.setStatus('Capturing available task audio...');
-    const tracks = await captureAudioTracksForDrafting().catch(() => []);
+    const tracks = await captureAudioTracksForDrafting();
     this.logCapturedAudioTracks(tracks);
     return tracks;
   }
@@ -708,6 +723,9 @@ export class DraftingOverlayController {
   }
 
   private async runMagicDraft(): Promise<void> {
+    this.draftAbort?.abort(new DOMException('Draft superseded', 'AbortError'));
+    const controller = new AbortController();
+    this.draftAbort = controller;
     this.dialogTask = { pathname: window.location.pathname, reviewActionId: readPublishedPageTaskId() };
     this.openDialog();
     this.activeDraftLabel = 'Gold / OpenRouter';
@@ -727,8 +745,10 @@ export class DraftingOverlayController {
       this.setButtonState('loading', 'Generating...');
       this.setStatus('Capturing transcript...');
 
-      let capturedJob = captureTranscriptJob();
+      let capturedJob: TranscriptJob = { ...captureTranscriptJob(), audioDependent: false };
+      if (capturedJob.readOnly) throw new Error('This transcript is read-only or the native editor is not ready.');
       const settings = await loadSettings();
+      controller.signal.throwIfAborted();
       if (!capturedJob.rows.length && settings.mode === 'advanced' && !settings.l0ReplacementPreviewEnabled) {
         throw new Error('No transcript rows detected on this page.');
       }
@@ -766,8 +786,10 @@ export class DraftingOverlayController {
           'OpenRouter API key is required. Add your key in the Babel Gold Drafting extension options. Setup guide: https://youtu.be/F-p45lvkzyU?si=2glvFn-iJnKEs8MI'
         );
       }
+      if (settings.audioInputEnabled) capturedJob = await this.prepareSelectedAudio(capturedJob);
       const audioTracks = settings.audioInputEnabled ? await this.captureAudioTracksWithStatus() : [];
       const audioIssue = settings.audioInputEnabled ? assessAudioCaptureForDrafting(capturedJob, audioTracks) : null;
+      this.requireCurrentTask(capturedJob);
       if (audioIssue) {
         this.showAudioGuard(capturedJob, settings, audioTracks, audioIssue);
         this.setButtonState('error', 'Audio Capture Needs Review');
@@ -777,20 +799,47 @@ export class DraftingOverlayController {
 
       await this.generateDraftFromCapture(capturedJob, settings, audioTracks);
     } catch (error) {
+      if (controller.signal.aborted) return;
       const message = error instanceof Error ? error.message : String(error);
       this.setStatus(message, true);
       this.setButtonState('error', 'Draft Failed');
       window.setTimeout(() => this.setButtonState('idle', 'Gold Draft'), 2200);
     } finally {
-      this.setBusy(false);
-      this.render();
+      if (!controller.signal.aborted) {
+        this.setBusy(false);
+        this.render();
+      }
     }
   }
 
   private requireCurrentTask(capturedJob: TranscriptJob): void {
-    if (buildCanonicalTaskIdentity(captureTranscriptJob()) !== buildCanonicalTaskIdentity(capturedJob)) {
+    if (capturedJob !== this.state.capturedJob || this.draftAbort?.signal.aborted) {
+      throw new DOMException('Draft cancelled or superseded', 'AbortError');
+    }
+    const current = { ...captureTranscriptJob(), audioDependent: capturedJob.audioDependent };
+    if (buildCanonicalTaskIdentity(current) !== buildCanonicalTaskIdentity(capturedJob)) {
       throw new Error('The task changed while drafting. Discard this draft and generate again for the current task.');
     }
+  }
+
+  private async prepareSelectedAudio(capturedJob: TranscriptJob): Promise<TranscriptJob> {
+    if (capturedJob !== this.state.capturedJob || this.draftAbort?.signal.aborted) {
+      throw new DOMException('Draft cancelled or superseded', 'AbortError');
+    }
+    const pendingJob = { ...capturedJob, audioDependent: false };
+    this.state.capturedJob = pendingJob;
+    this.requireCurrentTask(pendingJob);
+    this.setStatus('Waiting for the selected audio to finish preparing...');
+    const ready = await waitForAudioSelection(pendingJob, {
+      signal: this.draftAbort?.signal,
+      isCurrent: () => this.state.capturedJob === pendingJob
+    });
+    if (this.state.capturedJob !== pendingJob || this.draftAbort?.signal.aborted) {
+      throw new DOMException('Draft cancelled or superseded', 'AbortError');
+    }
+    this.state.capturedJob = ready;
+    this.requireCurrentTask(ready);
+    return ready;
   }
 
   private async requireCurrentDraft(capturedJob: TranscriptJob, settings: ExtensionSettings, timingGeneration?: number): Promise<void> {
@@ -809,13 +858,15 @@ export class DraftingOverlayController {
     settings: ExtensionSettings
   ): Promise<TranscriptJob> {
     this.setStatus('Checking Babel Helper availability...');
-    const helperConfirmed = await requireL0ReplacementConsumer();
+    const helperConfirmed = await requireL0ReplacementConsumer(this.draftAbort?.signal);
+    this.requireCurrentTask(capturedJob);
     if (settings.mode !== 'advanced' && !helperConfirmed) {
       throw new Error('Babel Helper is required for native editor integration. Install or enable Babel Helper and reload this task before transcribing.');
     }
     if (!helperConfirmed) {
       this.setStatus('Babel Helper did not confirm readiness; continuing with a direct replacement request...');
     }
+    capturedJob = await this.prepareSelectedAudio(capturedJob);
     await this.requireCurrentDraft(capturedJob, settings);
     this.setStatus(settings.mode === 'local'
       ? 'Preparing local GigaAM + C-denoise on WebGPU; no audio cloud fallback...'
@@ -842,7 +893,15 @@ export class DraftingOverlayController {
     await this.requireCurrentDraft(capturedJob, settings, timingGeneration);
 
     this.setStatus(`Replacing current transcript with ${response.rows.length} L0 segment(s) through Babel Helper...`);
-    const created = await replaceTranscriptWithL0Rows(response.rows);
+    this.mutationBusy = true;
+    this.setBusy(true);
+    let created;
+    try {
+      created = await replaceTranscriptWithL0Rows(response.rows, capturedJob);
+    } finally {
+      this.mutationBusy = false;
+      this.setBusy(this.busy);
+    }
     await this.requireCurrentDraft(capturedJob, settings, timingGeneration);
     const createdIds = new Set(created.map((mapping) => mapping.id));
     if (createdIds.size !== response.rows.length || response.rows.some((row) => !createdIds.has(row.id))) {
@@ -890,7 +949,14 @@ export class DraftingOverlayController {
     settings: ExtensionSettings,
     audioTracks: CapturedAudioTrack[]
   ): Promise<void> {
-    this.requireCurrentTask(capturedJob);
+    if (capturedJob !== this.state.capturedJob || this.draftAbort?.signal.aborted) {
+      throw new DOMException('Draft cancelled or superseded', 'AbortError');
+    }
+    if (!audioTracks.length && capturedJob.audioDependent !== false) {
+      capturedJob = { ...capturedJob, audioDependent: false };
+      this.state.capturedJob = capturedJob;
+    }
+    await this.requireCurrentDraft(capturedJob, settings);
     this.clearAudioGuard();
     const streamStatusLabel = audioTracks.length ? 'Streaming Gold draft with audio cues' : 'Streaming Gold draft';
     this.setStatus(
@@ -910,11 +976,13 @@ export class DraftingOverlayController {
       reasoningEffort: settings.reasoningEffort
     }, {
       onStarted: ({ totalRows }) => {
+        this.requireCurrentTask(capturedJob);
         this.streamedTotalRows = totalRows;
         this.setStatus(`${streamStatusLabel}... 0 / ${totalRows} rows complete.`);
         this.render();
       },
       onRow: ({ row, completedRows, totalRows, summary }) => {
+        this.requireCurrentTask(capturedJob);
         const existingIndex = this.streamedRows.findIndex((candidate) => candidate.rowId === row.rowId);
         if (existingIndex >= 0) {
           this.streamedRows[existingIndex] = row;
@@ -928,17 +996,19 @@ export class DraftingOverlayController {
         this.render();
       },
       onDone: (response) => {
+        this.requireCurrentTask(capturedJob);
         this.streamedRows = response.draftRows;
         this.streamedSummary = response.summary;
         this.streamedCompletedRows = response.summary.totalRows;
         this.streamedTotalRows = response.summary.totalRows;
       },
       onReconnect: () => {
+        this.requireCurrentTask(capturedJob);
         this.setStatus('Stream connection lost. Reconciling final draft response...');
         this.render();
       }
-    }, audioTracks);
-    this.requireCurrentTask(capturedJob);
+    }, audioTracks, this.draftAbort?.signal);
+    await this.requireCurrentDraft(capturedJob, settings);
 
     this.state.draftResponse = draftResponse;
     this.setStatus(
@@ -954,11 +1024,14 @@ export class DraftingOverlayController {
       this.setStatus('No pending audio capture to retry.', true);
       return;
     }
+    const signal = this.draftAbort?.signal;
 
     try {
       this.setBusy(true);
       this.setButtonState('loading', 'Retrying audio...');
+      pending.capturedJob = await this.prepareSelectedAudio(pending.capturedJob);
       const audioTracks = await this.captureAudioTracksWithStatus();
+      this.requireCurrentTask(pending.capturedJob);
       const audioIssue = assessAudioCaptureForDrafting(pending.capturedJob, audioTracks);
       if (audioIssue) {
         this.showAudioGuard(pending.capturedJob, pending.settings, audioTracks, audioIssue);
@@ -969,13 +1042,16 @@ export class DraftingOverlayController {
 
       await this.generateDraftFromCapture(pending.capturedJob, pending.settings, audioTracks);
     } catch (error) {
+      if (signal?.aborted) return;
       const message = error instanceof Error ? error.message : String(error);
       this.setStatus(message, true);
       this.setButtonState('error', 'Draft Failed');
       window.setTimeout(() => this.setButtonState('idle', 'Gold Draft'), 2200);
     } finally {
-      this.setBusy(false);
-      this.render();
+      if (!signal?.aborted) {
+        this.setBusy(false);
+        this.render();
+      }
     }
   }
 
@@ -985,6 +1061,7 @@ export class DraftingOverlayController {
       this.setStatus('No pending draft to continue.', true);
       return;
     }
+    const signal = this.draftAbort?.signal;
 
     try {
       this.setBusy(true);
@@ -995,13 +1072,16 @@ export class DraftingOverlayController {
         mode === 'captured-audio' ? pending.audioTracks : []
       );
     } catch (error) {
+      if (signal?.aborted) return;
       const message = error instanceof Error ? error.message : String(error);
       this.setStatus(message, true);
       this.setButtonState('error', 'Draft Failed');
       window.setTimeout(() => this.setButtonState('idle', 'Gold Draft'), 2200);
     } finally {
-      this.setBusy(false);
-      this.render();
+      if (!signal?.aborted) {
+        this.setBusy(false);
+        this.render();
+      }
     }
   }
 
@@ -1013,18 +1093,22 @@ export class DraftingOverlayController {
     if (!this.state.capturedJob) return;
     try {
       this.requireCurrentTask(this.state.capturedJob);
+      this.mutationBusy = true;
+      this.setBusy(true);
+      const result = await applyDraftRows(this.state.draftResponse.draftRows, this.state.capturedJob);
+      this.setStatus(`Applied draft to ${result.appliedCount} rows.`);
+      this.setButtonState('done', 'Applied');
+      this.mutationBusy = false;
+      this.setBusy(false);
+      this.closeDialog();
+      window.setTimeout(() => this.setButtonState('idle', 'Gold Draft'), 1600);
     } catch (error) {
       this.setStatus(error instanceof Error ? error.message : String(error), true);
-      return;
+    } finally {
+      this.mutationBusy = false;
+      this.setBusy(false);
+      this.render();
     }
-
-    const result = applyDraftRows(this.state.draftResponse.draftRows);
-    const missingNote = result.missingRowIds.length ? ` Missing ${result.missingRowIds.length} rows during apply.` : '';
-    this.setStatus(`Applied draft to ${result.appliedCount} rows.${missingNote}`);
-    this.setButtonState('done', 'Applied');
-    this.closeDialog();
-    window.setTimeout(() => this.setButtonState('idle', 'Gold Draft'), 1600);
-    this.render();
   }
 
   private async restoreOriginal(): Promise<void> {
@@ -1034,16 +1118,18 @@ export class DraftingOverlayController {
     }
     try {
       this.requireCurrentTask(this.state.capturedJob);
+      this.mutationBusy = true;
+      this.setBusy(true);
+      const result = await restoreCapturedRows(this.state.capturedJob, captureTranscriptJob());
+      this.setStatus(`Restored ${result.appliedCount} original rows.`);
+      this.setButtonState('done', 'Restored');
+      window.setTimeout(() => this.setButtonState('idle', 'Gold Draft'), 1600);
     } catch (error) {
       this.setStatus(error instanceof Error ? error.message : String(error), true);
-      return;
+    } finally {
+      this.mutationBusy = false;
+      this.setBusy(false);
+      this.render();
     }
-
-    const result = restoreCapturedRows(this.state.capturedJob);
-    const missingNote = result.missingRowIds.length ? ` Missing ${result.missingRowIds.length} rows during restore.` : '';
-    this.setStatus(`Restored ${result.appliedCount} original rows.${missingNote}`);
-    this.setButtonState('done', 'Restored');
-    window.setTimeout(() => this.setButtonState('idle', 'Gold Draft'), 1600);
-    this.render();
   }
 }

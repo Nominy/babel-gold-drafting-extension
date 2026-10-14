@@ -1,4 +1,4 @@
-import type { L0DraftRow } from './types';
+import type { L0DraftRow, TranscriptJob } from './types';
 
 export const L0_REPLACE_REQUEST_TYPE = 'babel-gold-drafting:l0-replace-request';
 export const L0_REPLACE_RESPONSE_TYPE = 'babel-gold-drafting:l0-replace-response';
@@ -89,44 +89,58 @@ function createRequestId(): string {
  * serve the replacement request itself, so the caller proceeds on the direct
  * request path exactly as before the ping existed.
  */
-export function requireL0ReplacementConsumer(): Promise<boolean> {
+export function requireL0ReplacementConsumer(signal?: AbortSignal): Promise<boolean> {
+  if (signal?.aborted) return Promise.reject(signal.reason);
   const requestId = createRequestId();
-  return new Promise((resolve) => {
-    const cleanup = (): void => {
-      window.clearTimeout(timeoutId);
-      window.removeEventListener('message', onMessage);
-    };
-    const onMessage = (event: MessageEvent): void => {
-      const data = event.data;
-      if (
-        (event.source && event.source !== window)
-        || !data || typeof data !== 'object'
-        || data.type !== L0_REPLACE_READY_RESPONSE_TYPE
-        || data.version !== L0_REPLACE_PROTOCOL_VERSION
-        || data.requestId !== requestId
-      ) return;
-      cleanup();
-      resolve(true);
-    };
-    const timeoutId = window.setTimeout(() => {
-      cleanup();
-      console.warn(
-        `[babel-gold-drafting] Babel Helper did not confirm L0 replacement readiness within ${L0_REPLACE_READY_TIMEOUT_MS}ms; sending the replacement request directly.`
-      );
-      resolve(false);
-    }, L0_REPLACE_READY_TIMEOUT_MS);
-    window.addEventListener('message', onMessage);
-    window.postMessage({
-      type: L0_REPLACE_READY_REQUEST_TYPE,
-      version: L0_REPLACE_PROTOCOL_VERSION,
-      requestId
-    }, '*');
-  });
+  const { promise, resolve, reject } = Promise.withResolvers<boolean>();
+  let settled = false;
+  const cleanup = (): void => {
+    settled = true;
+    window.clearTimeout(timeoutId);
+    window.removeEventListener('message', onMessage);
+    signal?.removeEventListener('abort', onAbort);
+  };
+  const onAbort = (): void => {
+    if (settled) return;
+    cleanup();
+    reject(signal?.reason ?? new DOMException('Draft cancelled', 'AbortError'));
+  };
+  const onMessage = (event: MessageEvent): void => {
+    const data = event.data;
+    if (
+      settled || (event.source && event.source !== window)
+      || !data || typeof data !== 'object'
+      || data.type !== L0_REPLACE_READY_RESPONSE_TYPE
+      || data.version !== L0_REPLACE_PROTOCOL_VERSION
+      || data.requestId !== requestId
+    ) return;
+    cleanup();
+    resolve(true);
+  };
+  const timeoutId = window.setTimeout(() => {
+    if (settled) return;
+    cleanup();
+    console.warn(
+      `[babel-gold-drafting] Babel Helper did not confirm L0 replacement readiness within ${L0_REPLACE_READY_TIMEOUT_MS}ms; sending the replacement request directly.`
+    );
+    resolve(false);
+  }, L0_REPLACE_READY_TIMEOUT_MS);
+  window.addEventListener('message', onMessage);
+  signal?.addEventListener('abort', onAbort, { once: true });
+  window.postMessage({
+    type: L0_REPLACE_READY_REQUEST_TYPE,
+    version: L0_REPLACE_PROTOCOL_VERSION,
+    requestId
+  }, '*');
+  return promise;
 }
 
-export function replaceTranscriptWithL0Rows(rows: L0DraftRow[]): Promise<L0CreatedRowMapping[]> {
+export function replaceTranscriptWithL0Rows(rows: L0DraftRow[], expected: TranscriptJob): Promise<L0CreatedRowMapping[]> {
   if (!rows.length) {
     throw new Error('L0 replacement requires at least one returned row.');
+  }
+  if (!expected.taskScoped || !expected.jobId || expected.readOnly) {
+    throw new Error('L0 replacement requires a current editable native task snapshot.');
   }
   const requestId = createRequestId();
 
@@ -148,6 +162,22 @@ export function replaceTranscriptWithL0Rows(rows: L0DraftRow[]): Promise<L0Creat
         reject(new Error(`L0 transcript replacement created ${event.data.created.length} of ${rows.length} rows.`));
         return;
       }
+      const expectedRows = new Map(rows.map((row) => [row.id, row]));
+      const returnedIds = new Set<string>();
+      const annotationIds = new Set<string>();
+      for (const mapping of event.data.created) {
+        const source = expectedRows.get(mapping.id);
+        if (!source || !mapping.annotationId.trim() || returnedIds.has(mapping.id) ||
+          annotationIds.has(mapping.annotationId) || mapping.lane !== source.lane ||
+          !Number.isFinite(mapping.startSeconds) || !Number.isFinite(mapping.endSeconds) ||
+          Math.abs(mapping.startSeconds - source.startSeconds) > 0.001 ||
+          Math.abs(mapping.endSeconds - source.endSeconds) > 0.001) {
+          reject(new Error('L0 transcript replacement returned invalid annotation identities or timings.'));
+          return;
+        }
+        returnedIds.add(mapping.id);
+        annotationIds.add(mapping.annotationId);
+      }
       resolve(event.data.created);
     };
     const timeoutId = window.setTimeout(() => {
@@ -161,6 +191,8 @@ export function replaceTranscriptWithL0Rows(rows: L0DraftRow[]): Promise<L0Creat
         type: L0_REPLACE_REQUEST_TYPE,
         version: L0_REPLACE_PROTOCOL_VERSION,
         requestId,
+        expectedReviewActionId: expected.jobId,
+        expectedRows: expected.rows,
         rows: rows.map(({ id, lane, startSeconds, endSeconds, text }) => ({
           id,
           lane,

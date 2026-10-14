@@ -3,7 +3,7 @@ import { publishGoldDraftingExtensionId, registerAiBrokerContentHandler } from '
 import { registerDomLifecycle } from '@nominy/babel-babel-runtime';
 import { enableL0TimingAudioCapture, registerL0TimingService } from './l0-timing-service';
 import { refreshPageTaskIdentity } from './page-task-identity';
-import { maybeShowLocalModelSuggestion } from './local-model-suggestion';
+import { ensureLocalModelSuggestionMounted, maybeShowLocalModelSuggestion } from './local-model-suggestion';
 
 declare global {
   interface Window {
@@ -25,6 +25,7 @@ function boot(): void {
   void maybeShowLocalModelSuggestion();
   registerDomLifecycle(() => {
     controller.ensureMagicButton();
+    void ensureLocalModelSuggestionMounted();
     void refreshPageTaskIdentity().then(() => timingService.onLifecycleOpportunity());
   });
 }

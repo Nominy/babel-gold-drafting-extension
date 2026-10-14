@@ -1,4 +1,5 @@
 import { readBabelEditorState } from '@nominy/babel-babel-runtime';
+import { registerTranscriptBridge } from './transcript-bridge';
 import {
   AUDIO_ENABLE_CAPTURE_MESSAGE_TYPE,
   AUDIO_FLUSH_REQUEST_MESSAGE_TYPE,
@@ -15,6 +16,8 @@ import {
   type PageTaskIdResponseMessage
 } from '../core/audio-intercept-protocol';
 import { isLikelyAudioSource } from '../core/audio-url';
+
+registerTranscriptBridge();
 
 declare global {
   interface Window {

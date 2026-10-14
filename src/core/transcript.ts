@@ -1,216 +1,8 @@
-import { getReactFiber, normalizeText, setEditableValue, readAudioEnhancementState } from '@nominy/babel-babel-runtime';
-import { PAGE_RECORDING_LANES_ATTRIBUTE, PAGE_TASK_ID_ATTRIBUTE } from './audio-intercept-protocol';
+import { readAudioEnhancementState } from '@nominy/babel-babel-runtime';
+import { PAGE_TASK_ID_ATTRIBUTE } from './audio-intercept-protocol';
+import { dispatchTranscriptEvent, parseTranscriptEvent, TRANSCRIPT_REQUEST_EVENT, TRANSCRIPT_RESPONSE_EVENT, type TranscriptRequest, type TranscriptResponse } from './transcript-protocol';
 import type { ApplyDraftResult, DiffPreviewItem, DraftRowResult, TranscriptJob, TranscriptRow } from './types';
 
-const TRANSCRIPT_ROW_SELECTOR = 'tbody tr';
-const ROW_TEXTAREA_SELECTOR = 'textarea[placeholder^="What was said"]';
-
-function parseTimeValue(value: string): number | null {
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return null;
-  }
-
-  const match = trimmed.match(/-?\d+(?::\d+)+(?:\.\d+)?/);
-  if (!match) {
-    return null;
-  }
-
-  return match[0].split(':').reduce<number | null>((total, part) => {
-    if (total === null) {
-      return null;
-    }
-
-    const numeric = Number(part);
-    return Number.isFinite(numeric) ? total * 60 + numeric : null;
-  }, 0);
-}
-
-function setControlledTextareaValue(textarea: HTMLTextAreaElement, value: string): void {
-  setEditableValue(textarea, value);
-  textarea.dispatchEvent(new Event('change', { bubbles: true, cancelable: false }));
-}
-
-function getTranscriptRowElements(root: ParentNode = document): HTMLTableRowElement[] {
-  return Array.from(root.querySelectorAll<HTMLTableRowElement>(TRANSCRIPT_ROW_SELECTOR)).filter((row) =>
-    row.querySelector(ROW_TEXTAREA_SELECTOR)
-  );
-}
-
-type RowIdentity = {
-  rowId: string | null;
-  speakerKey: string;
-  processedRecordingId: string;
-  startText: string;
-  endText: string;
-  startSeconds: number | null;
-  endSeconds: number | null;
-};
-
-type ReactFiberNode = {
-  memoizedProps?: unknown;
-  return?: ReactFiberNode | null;
-};
-
-function readFiniteNumber(value: unknown): number | null {
-  const numeric = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : Number.NaN;
-  return Number.isFinite(numeric) ? numeric : null;
-}
-
-function readVisibleTimeCells(row: HTMLTableRowElement): {
-  speakerKey: string;
-  startText: string;
-  endText: string;
-  startSeconds: number | null;
-  endSeconds: number | null;
-} {
-  const cells = Array.from(row.children).filter((child): child is HTMLElement => child instanceof HTMLElement);
-  const textarea = row.querySelector<HTMLTextAreaElement>(ROW_TEXTAREA_SELECTOR);
-  const textareaCell = textarea?.closest('td, th');
-  const textareaCellIndex = textareaCell ? cells.indexOf(textareaCell as HTMLElement) : -1;
-  const cellsBeforeText = textareaCellIndex >= 0 ? cells.slice(0, textareaCellIndex) : cells;
-  const timeCells = cellsBeforeText
-    .map((cell, index) => {
-      const text = normalizeText(cell);
-      return {
-        cell,
-        index,
-        text,
-        seconds: parseTimeValue(text)
-      };
-    })
-    .filter((item): item is { cell: HTMLElement; index: number; text: string; seconds: number } => item.seconds !== null);
-  const start = timeCells.at(-2);
-  const end = timeCells.at(-1);
-  const speakerCell = start
-    ? cellsBeforeText
-        .slice(0, start.index)
-        .reverse()
-        .find((cell) => normalizeText(cell) && parseTimeValue(normalizeText(cell)) === null)
-    : (row.children[1] as HTMLElement | undefined);
-
-  return {
-    speakerKey: normalizeText(speakerCell),
-    startText: start?.text || '',
-    endText: end?.text || '',
-    startSeconds: start?.seconds ?? null,
-    endSeconds: end?.seconds ?? null
-  };
-}
-
-function readRowIdentity(row: HTMLTableRowElement, laneIds: Map<string, string | null>): RowIdentity {
-  const visibleCells = readVisibleTimeCells(row);
-
-  const identity: RowIdentity = {
-    rowId: null,
-    speakerKey: visibleCells.speakerKey,
-    processedRecordingId: '',
-    startText: visibleCells.startText,
-    endText: visibleCells.endText,
-    startSeconds: visibleCells.startSeconds,
-    endSeconds: visibleCells.endSeconds
-  };
-
-  const fiber = (getReactFiber(row) || getReactFiber(row.querySelector(ROW_TEXTAREA_SELECTOR))) as
-    | { memoizedProps?: unknown; return?: unknown }
-    | null;
-
-  let current: { memoizedProps?: unknown; return?: unknown } | null = fiber;
-  let depth = 0;
-  while (current && depth < 12) {
-    const props = current.memoizedProps;
-    const annotation =
-      props &&
-      typeof props === 'object' &&
-      'annotation' in props &&
-      props.annotation &&
-      typeof props.annotation === 'object'
-        ? (props.annotation as Record<string, unknown>)
-        : null;
-
-    if (annotation && typeof annotation.id === 'string' && annotation.id.trim()) {
-      identity.rowId = annotation.id.trim();
-      identity.processedRecordingId =
-        annotation.processedRecordingId != null ? String(annotation.processedRecordingId).trim() : '';
-      const trackLabel = typeof annotation.trackLabel === 'string' ? annotation.trackLabel.trim() : '';
-      if (identity.processedRecordingId || trackLabel) {
-        identity.speakerKey = identity.processedRecordingId || trackLabel;
-      }
-      identity.startSeconds = readFiniteNumber(annotation.startTimeInSeconds) ?? identity.startSeconds;
-      identity.endSeconds = readFiniteNumber(annotation.endTimeInSeconds) ?? identity.endSeconds;
-      break;
-    }
-
-    current = current.return as { memoizedProps?: unknown; return?: unknown } | null;
-    depth += 1;
-  }
-  if (!identity.processedRecordingId) {
-    const recordingId = laneIds.get(identity.speakerKey.trim().replace(/\s+/g, ' ').toLocaleLowerCase());
-    if (recordingId) {
-      identity.processedRecordingId = recordingId;
-      identity.speakerKey = recordingId;
-    }
-  }
-
-  return identity;
-}
-
-function readReviewActionId(row: HTMLTableRowElement): string {
-  const textarea = row.querySelector<HTMLTextAreaElement>(ROW_TEXTAREA_SELECTOR);
-  const seeds = [getReactFiber(row), getReactFiber(textarea)].filter(Boolean) as ReactFiberNode[];
-  for (const seed of seeds) {
-    let current: ReactFiberNode | null = seed;
-    let depth = 0;
-    while (current && depth <= 30) {
-      const props = current.memoizedProps;
-      if (props && typeof props === 'object' && 'reviewActionId' in props) {
-        const reviewActionId = (props as Record<string, unknown>).reviewActionId;
-        if (typeof reviewActionId === 'string' && reviewActionId.trim()) {
-          return reviewActionId.trim();
-        }
-      }
-      current = current.return ?? null;
-      depth += 1;
-    }
-  }
-  return '';
-}
-
-function readPublishedReviewActionId(root: ParentNode): string {
-  const documentRef =
-    'documentElement' in root
-      ? (root as Document)
-      : ((root as Node).ownerDocument ?? null);
-  return documentRef?.documentElement?.getAttribute(PAGE_TASK_ID_ATTRIBUTE)?.trim() || '';
-}
-
-function readPublishedLaneIds(root: ParentNode): Map<string, string | null> {
-  const result = new Map<string, string | null>();
-  const documentRef = 'documentElement' in root ? root as Document : (root as Node).ownerDocument;
-  const raw = documentRef?.documentElement?.getAttribute(PAGE_RECORDING_LANES_ATTRIBUTE);
-  if (!raw) return result;
-  try {
-    const published: unknown = JSON.parse(raw);
-    if (!published || typeof published !== 'object' ||
-        !('reviewActionId' in published) || published.reviewActionId !== readPublishedReviewActionId(root) ||
-        !('tracks' in published) || !Array.isArray(published.tracks)) return result;
-    for (const track of published.tracks) {
-      if (!track || typeof track.id !== 'string' || !track.id.trim() ||
-          typeof track.label !== 'string' || !track.label.trim()) continue;
-      const label = track.label.trim().replace(/\s+/g, ' ').toLocaleLowerCase();
-      const id = track.id.trim();
-      // Duplicate display labels cannot identify a recording safely.
-      result.set(label, result.has(label) && result.get(label) !== id ? null : id);
-    }
-  } catch {
-    // An absent or invalid page snapshot must not invent a recording identity.
-  }
-  return result;
-}
-
-function makeFallbackRowId(identity: RowIdentity, rowIndex: number): string {
-  return `row:${identity.speakerKey}:${identity.startText}:${identity.endText}:${rowIndex}`;
-}
 
 export function buildJobId(locationLike: Pick<Location, 'pathname' | 'search'> = window.location): string {
   const search = locationLike.search || '';
@@ -224,7 +16,7 @@ export function buildJobId(locationLike: Pick<Location, 'pathname' | 'search'> =
 }
 
 export function buildCanonicalTaskIdentity(
-  job: Pick<TranscriptJob, 'jobId' | 'rows' | 'taskScoped' | 'audioVariantKey'>
+  job: Pick<TranscriptJob, 'jobId' | 'rows' | 'taskScoped' | 'audioVariantKey' | 'audioDependent'>
 ): string {
   const processedRecordingIds = job.rows
     .map((row) => row.processedRecordingId?.trim() || '')
@@ -237,7 +29,7 @@ export function buildCanonicalTaskIdentity(
     version: 1,
     baseTaskId: job.jobId.trim(),
     stableLaneIds,
-    ...(job.audioVariantKey ? { audioVariantKey: job.audioVariantKey } : {})
+    ...(job.audioDependent !== false && job.audioVariantKey ? { audioVariantKey: job.audioVariantKey } : {})
   });
 }
 
@@ -245,87 +37,87 @@ export function captureTranscriptJob(
   root: ParentNode = document,
   locationLike: Pick<Location, 'pathname' | 'search'> = window.location
 ): TranscriptJob {
-  const rowElements = getTranscriptRowElements(root);
-  const laneIds = readPublishedLaneIds(root);
-  const rows = rowElements.map<TranscriptRow>((row, index) => {
-    const identity = readRowIdentity(row, laneIds);
-    const textarea = row.querySelector<HTMLTextAreaElement>(ROW_TEXTAREA_SELECTOR);
-
-    return {
-      rowId: identity.rowId || makeFallbackRowId(identity, index),
-      speakerKey: identity.speakerKey,
-      ...(identity.processedRecordingId ? { processedRecordingId: identity.processedRecordingId } : {}),
-      startSeconds: identity.startSeconds,
-      endSeconds: identity.endSeconds,
-      text: textarea?.value || '',
-      index
-    };
-  });
-
-  const reviewActionId =
-    readPublishedReviewActionId(root)
-    || rowElements.map(readReviewActionId).find(Boolean)
-    || '';
   const documentRef = 'documentElement' in root ? root as Document : (root as Node).ownerDocument;
-  const audioState = readAudioEnhancementState(documentRef);
-  const audioVariantKey = audioState?.taskId === reviewActionId && audioState.strength > 0
-    ? audioState.variantKey : '';
-  return {
-    jobId: reviewActionId || buildJobId(locationLike),
-    ...(reviewActionId ? { taskScoped: true } : {}),
-    ...(audioVariantKey ? { audioVariantKey } : {}),
-    rows
+  if (!documentRef) throw new Error('Native transcript document is unavailable.');
+  const requestId = crypto.randomUUID();
+  const pending: { response?: TranscriptResponse } = {};
+  const receive = (event: Event): void => {
+    const value = parseTranscriptEvent(event) as TranscriptResponse | null;
+    if (value?.version === 1 && value.requestId === requestId) pending.response = value;
   };
+  documentRef.addEventListener(TRANSCRIPT_RESPONSE_EVENT, receive);
+  try {
+    dispatchTranscriptEvent(documentRef, TRANSCRIPT_REQUEST_EVENT, { version: 1, requestId, operation: 'capture' });
+  } finally {
+    documentRef.removeEventListener(TRANSCRIPT_RESPONSE_EVENT, receive);
+  }
+  const response = pending.response;
+  if (!response) {
+    // Audio identity remains available before transcript mount. This is not an
+    // editable snapshot: apply always requires a live MAIN-world capture.
+    const taskId = documentRef.documentElement?.getAttribute(PAGE_TASK_ID_ATTRIBUTE)?.trim();
+    const audio = readAudioEnhancementState(documentRef);
+    return {
+      jobId: taskId || buildJobId(locationLike), rows: [], readOnly: true,
+      ...(taskId ? { taskScoped: true } : {}),
+      ...(taskId && audio?.taskId === taskId && audio.strength > 0 ? { audioVariantKey: audio.variantKey } : {})
+    };
+  }
+  if (!response.ok) throw new Error(response.error);
+  if (!('job' in response)) throw new Error('Invalid native transcript capture response.');
+  return response.job;
 }
 
-function buildLocatorMap(root: ParentNode = document): Map<string, HTMLTextAreaElement> {
-  const map = new Map<string, HTMLTextAreaElement>();
-  const laneIds = readPublishedLaneIds(root);
-  for (const [index, row] of getTranscriptRowElements(root).entries()) {
-    const identity = readRowIdentity(row, laneIds);
-    const textarea = row.querySelector<HTMLTextAreaElement>(ROW_TEXTAREA_SELECTOR);
-    if (!textarea) {
-      continue;
-    }
-
-    const key = identity.rowId || makeFallbackRowId(identity, index);
-    map.set(key, textarea);
-  }
-  return map;
-}
-
-export function applyDraftRows(draftRows: DraftRowResult[], root: ParentNode = document): ApplyDraftResult {
-  const locatorMap = buildLocatorMap(root);
-  let appliedCount = 0;
-  const missingRowIds: string[] = [];
-
-  for (const row of draftRows) {
-    const textarea = locatorMap.get(row.rowId);
-    if (!textarea) {
-      missingRowIds.push(row.rowId);
-      continue;
-    }
-
-    setControlledTextareaValue(textarea, row.rewrittenText);
-    appliedCount += 1;
-  }
-
-  return {
-    appliedCount,
-    missingRowIds
+export function applyDraftRows(
+  draftRows: DraftRowResult[],
+  expected: TranscriptJob,
+  root: ParentNode = document
+): Promise<ApplyDraftResult> {
+  const documentRef = 'documentElement' in root ? root as Document : (root as Node).ownerDocument;
+  if (!documentRef) return Promise.reject(new Error('Native transcript document is unavailable.'));
+  const request: TranscriptRequest = {
+    version: 1, requestId: crypto.randomUUID(), operation: 'apply', expected, rows: draftRows
   };
+  const { promise, resolve, reject } = Promise.withResolvers<ApplyDraftResult>();
+  const cleanup = (): void => {
+    clearTimeout(timeout);
+    documentRef.removeEventListener(TRANSCRIPT_RESPONSE_EVENT, receive);
+  };
+  const receive = (event: Event): void => {
+    const response = parseTranscriptEvent(event) as TranscriptResponse | null;
+    if (response?.version !== 1 || response.requestId !== request.requestId) return;
+    cleanup();
+    if (!response.ok) reject(new Error(response.error));
+    else if ('result' in response) resolve(response.result);
+    else reject(new Error('Invalid native transcript apply response.'));
+  };
+  const timeout = setTimeout(() => {
+    cleanup();
+    reject(new Error('Native transcript apply timed out. Check the current transcript before retrying.'));
+  }, 30000);
+  documentRef.addEventListener(TRANSCRIPT_RESPONSE_EVENT, receive);
+  dispatchTranscriptEvent(documentRef, TRANSCRIPT_REQUEST_EVENT, request);
+  return promise;
 }
 
-export function restoreCapturedRows(job: TranscriptJob, root: ParentNode = document): ApplyDraftResult {
-  return applyDraftRows(
-    job.rows.map((row) => ({
-      rowId: row.rowId,
-      rewrittenText: row.text,
-      status: 'unchanged',
-      warnings: []
-    })),
-    root
-  );
+export function restoreCapturedRows(
+  job: TranscriptJob,
+  expected: TranscriptJob,
+  root: ParentNode = document
+): Promise<ApplyDraftResult> {
+  expected = { ...expected, audioDependent: job.audioDependent };
+  const currentById = new Map(expected.rows.map((row) => [row.rowId, row]));
+  if (buildCanonicalTaskIdentity(job) !== buildCanonicalTaskIdentity(expected) ||
+    job.rows.length !== expected.rows.length || job.rows.some((row) => {
+      const current = currentById.get(row.rowId);
+      return !current || current.processedRecordingId !== row.processedRecordingId ||
+        current.speakerKey !== row.speakerKey || current.startSeconds !== row.startSeconds || current.endSeconds !== row.endSeconds;
+    })) {
+    return Promise.reject(new Error('The task or transcript structure changed. The original snapshot cannot be restored.'));
+  }
+  return applyDraftRows(job.rows.map((row) => ({
+    rowId: row.rowId, rewrittenText: row.text, status: 'unchanged', warnings: []
+  })), expected, root);
 }
 
 export function buildDiffPreviewItems(originalRows: TranscriptRow[], draftRows: DraftRowResult[]): DiffPreviewItem[] {

@@ -72,13 +72,18 @@ test('broker transports preserve admission, failure policy and disconnect framin
   const onConnectExternal = event<[TestPort]>();
   const onMessage = event<[unknown, chrome.runtime.MessageSender, (response: AiBrokerResponse) => void]>();
   const onConnect = event<[TestPort]>();
+  const onInstalled = event<[]>();
+  let openedOptions = 0;
   let tabPort = port(AI_BROKER_INTERNAL_PORT_NAME);
   Object.assign(globalThis, {
     chrome: {
-      runtime: { onMessageExternal, onConnectExternal, onMessage, onConnect },
-      storage: { local: { get(_key: string, callback: (items: object) => void) {
+      runtime: { onMessageExternal, onConnectExternal, onMessage, onConnect, onInstalled,
+        openOptionsPage: async () => { openedOptions += 1; } },
+      storage: { local: { get(_key: string, callback?: (items: object) => void) {
         if (storageFailure) throw new Error('Storage unavailable');
-        callback({ [SETTINGS_STORAGE_KEY]: settings });
+        const items = { [SETTINGS_STORAGE_KEY]: settings };
+        if (callback) callback(items);
+        else return Promise.resolve(items);
       } } },
       tabs: {
         sendMessage: async () => { throw new Error('Tab unavailable'); },
@@ -107,6 +112,19 @@ test('broker transports preserve admission, failure policy and disconnect framin
     assert.ok(message && (message.type === 'result' || message.type === 'error'));
     return message;
   };
+
+  await t.test('install opens setup for Local without weights, but respects Simple and Advanced modes', async () => {
+    settings = { ...DEFAULT_SETTINGS, mode: 'local' };
+    onInstalled.emit();
+    await waitForImmediate();
+    assert.equal(openedOptions, 1);
+    for (const mode of ['simple', 'advanced'] as const) {
+      settings = { ...DEFAULT_SETTINGS, mode, localModelsEnabled: false };
+      onInstalled.emit();
+      await waitForImmediate();
+      assert.equal(openedOptions, 1);
+    }
+  });
 
   await t.test('ping and rejected admissions agree across transports, with accepted before port results', async () => {
     for (const scenario of [
@@ -233,7 +251,7 @@ test('broker transports preserve admission, failure policy and disconnect framin
           ? terminal(await sendPort(message, sender, true)).response
           : await sendMessage(message, sender, true);
         assert.deepEqual(response, {
-          ok: false, reason: 'broker-error', message: 'Backend rejected request', fallbackAllowed: reloadFails
+          ok: false, reason: 'broker-error', message: 'Backend rejected request', fallbackAllowed: false
         });
         assert.equal(logged.length, before + 1);
       }

@@ -44,6 +44,9 @@ export interface TranscriptJob {
   jobId: string;
   taskScoped?: boolean;
   audioVariantKey?: string;
+  /** False only when the operation consumes transcript text, not selected audio. */
+  audioDependent?: boolean;
+  readOnly?: boolean;
   rows: TranscriptRow[];
 }
 

@@ -1,6 +1,6 @@
 import { test, expect } from '@nominy/babel-extension-e2e/test'
+import { TEXT, editText, readText } from '@nominy/babel-extension-e2e/native-helpers';
 
-const MODEL_FILE = '/browser-model/asr/v3_ctc.onnx';
 const CACHE_PREFIX = 'babel-gold-local-models:bundle:';
 const STATUS = '[data-role="local-model-status"]';
 const download = (page) => page.locator('[data-role="local-model-download"]');
@@ -88,7 +88,7 @@ test.describe('Gold actual options, cache, and offscreen controls', () => {
     const options = await openOptions(babel);
     await expect(options.locator('#localModelsEnabled')).toBeDisabled();
     await expect(sample(options)).toBeDisabled();
-    await babel.control({ routes: { [MODEL_FILE]: { delayMs: 1000, corrupt: true, times: 1 } } });
+    await babel.control({ routes: { [`${babel.modelPath}/asr/v3_ctc.onnx`]: { delayMs: 1000, corrupt: true, times: 1 } } });
     await download(options).click();
     await expect(options.locator('[data-role="local-model-progress"]')).toBeVisible();
     await expect(options.locator('[data-role="save"]')).toBeDisabled();
@@ -115,7 +115,7 @@ test.describe('Gold actual options, cache, and offscreen controls', () => {
     await expect(options.locator(STATUS)).toContainText('verified and cached');
     await expect(sample(options)).toBeEnabled();
     await expect(options.locator('#localModelsEnabled')).toBeDisabled();
-    await babel.control({ routes: { '/browser-model/manifest.json': { error: { status: 503, message: 'E2E model supplier unavailable' }, times: 1 } } });
+    await babel.control({ routes: { [`${babel.modelPath}/manifest.json`]: { error: { status: 503, message: 'E2E model supplier unavailable' }, times: 1 } } });
     await download(options).click();
     await expect(options.locator(STATUS)).toContainText('HTTP 503');
     expect(await cachesIn(options)).toEqual(initialCache);
@@ -140,7 +140,7 @@ test.describe('Gold actual options, cache, and offscreen controls', () => {
   test('sample retrieval errors are actionable, allow retry, and never enable untested weights', { tag: '@browser-models' }, async ({ page, babel }) => {
     const options = await openOptions(babel);
     await install(options);
-    await babel.control({ routes: { '/browser-model/sample-russian-15s.wav': { error: { status: 502, message: 'E2E sample offline' }, times: 1 } } });
+    await babel.control({ routes: { [`${babel.modelPath}/sample-russian-15s.wav`]: { error: { status: 502, message: 'E2E sample offline' }, times: 1 } } });
     await sample(options).click();
     await expect(options.locator(STATUS)).toContainText('HTTP 502');
     await expect(options.locator('#localModelsEnabled')).toBeDisabled();
@@ -168,24 +168,23 @@ test.describe('Gold actual options, cache, and offscreen controls', () => {
 
   test.describe('offscreen recovery with the required replacement consumer', () => {
     test.use({ extensions: ['helper', 'gold'] });
-  test('persisted enabled but absent weights fail in a real offscreen document and recover after closure', { tag: '@browser-models' }, async ({ page, babel }) => {
+  test('persisted enabled but absent weights reject admission safely on each explicit retry', { tag: '@browser-models' }, async ({ page, babel }) => {
     const options = await openOptions(babel);
     await babel.setExtensionSettings('gold', { localModelsEnabled: true, l0ReplacementPreviewEnabled: true, l0DontRunLlm: true });
     await babel.reset();
     await expect(page.locator('#babel-gold-drafting-magic-button')).toBeVisible();
-    await page.locator('#babel-gold-drafting-magic-button').click();
-    await expect(page.locator('#babel-gold-drafting-overlay .bgd-status[data-error="true"]')).toContainText(/model|cache|download/i, { timeout: 60_000 });
-    await expect.poll(() => offscreens(options)).toHaveLength(1);
-    const old = (await offscreens(options))[0].documentId;
-    expect((await babel.state()).calls.filter((call) => call.path === '/v1/draft' || call.path.startsWith('/api/draft/'))).toEqual([]);
-    await options.evaluate(() => chrome.offscreen.closeDocument());
-    await expect.poll(() => offscreens(options)).toEqual([]);
-    await page.getByRole('button', { name: 'Close', exact: true }).click();
-    await page.locator('#babel-gold-drafting-magic-button').click();
-    await expect(page.locator('#babel-gold-drafting-overlay .bgd-status[data-error="true"]')).toContainText(/model|cache|download/i, { timeout: 60_000 });
-    await expect.poll(async () => (await offscreens(options)).map((item) => item.documentId)).not.toContain(old);
-    await expect.poll(() => offscreens(options)).toHaveLength(1);
-    await expect(page.getByRole('button', { name: 'Apply Draft', exact: true })).toBeDisabled();
+    const original = await page.evaluate(() => window.__BABEL_E2E__.snapshot().annotations);
+    expect(await cachesIn(options)).toEqual([]);
+    // Missing cached weights may reject admission before an offscreen document
+    // is needed. Retry the actual wand, not an assumed worker lifecycle.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await page.locator('#babel-gold-drafting-magic-button').click();
+      await expect(page.locator('#babel-gold-drafting-overlay .bgd-status[data-error="true"]')).toContainText(/model|cache|download/i, { timeout: 60_000 });
+      await expect(page.getByRole('button', { name: 'Apply Draft', exact: true })).toBeDisabled();
+      expect((await babel.state()).calls.filter((call) => call.path === '/v1/draft' || call.path.startsWith('/api/draft/'))).toEqual([]);
+      expect(await page.evaluate(() => window.__BABEL_E2E__.snapshot().annotations)).toEqual(original);
+      await page.getByRole('button', { name: 'Close', exact: true }).click();
+    }
     await options.close();
   });
   });
@@ -194,9 +193,12 @@ test.describe('Gold actual options, cache, and offscreen controls', () => {
 test.describe('Gold enabled browser models with real Helper replacement', () => {
   test.use({ extensions: ['helper', 'gold'] });
 
-  test('tests an installed sample, enables models, and replaces native rows through offscreen inference', { tag: '@browser-models' }, async ({ page, babel }) => {
-    test.setTimeout(180_000);
+  test('tests an installed sample and recreates offscreen inference for native replacement on a subsequent task', { tag: '@browser-models' }, async ({ page, babel }) => {
+    test.setTimeout(360_000);
     if (babel.browserModels === 'real') {
+      // This lane proves C-denoise on the supplied Original speech. Enhancement
+      // has its own paired-buffer coverage and must not alter this input.
+      await babel.setExtensionSettings('helper', { features: { audioEnhancement: false } });
       expect(babel.hasSpeechFixtures,
         'Real browser-model replacement requires explicit --speech-fixtures=DIR with speech WAVs and annotations; synthetic tones are not a transcription-success fixture.').toBe(true);
     }
@@ -215,48 +217,75 @@ test.describe('Gold enabled browser models with real Helper replacement', () => 
     await expect(options.locator('[data-role="status"]')).toContainText('Saved.');
     await options.reload();
     await expect(options.locator('#localModelsEnabled')).toBeChecked();
-    const state = await babel.reset('baseline',
-      babel.browserModels === 'real' ? { audio: { fixture: 'speech' } } : {});
-    const rows = page.locator('textarea[placeholder^="What was said"]');
-    await expect(rows).toHaveCount(state.action.annotations.length);
-    await page.evaluate(() => {
-      window.__goldModelReplacementObservations = [];
-      window.addEventListener('message', (event) => {
-        if (event.source === window && event.data?.version === 1
-          && ['babel-gold-drafting:l0-replace-request', 'babel-gold-drafting:l0-replace-response'].includes(event.data?.type)) {
-          window.__goldModelReplacementObservations.push(structuredClone(event.data));
-        }
+    const audio = babel.browserModels === 'real' ? { audio: { fixture: 'speech' } } : {};
+    const state = await babel.reset('baseline', audio);
+    const rows = page.locator(TEXT);
+    async function replaceAndCheckNative(task) {
+      await expect(rows).toHaveCount(task.action.annotations.length);
+      await page.evaluate(() => {
+        window.__goldModelReplacementObservations = [];
+        window.addEventListener('message', (event) => {
+          if (event.source === window && event.data?.version === 1
+            && ['babel-gold-drafting:l0-replace-request', 'babel-gold-drafting:l0-replace-response'].includes(event.data?.type)) {
+            window.__goldModelReplacementObservations.push(structuredClone(event.data));
+          }
+        });
       });
+      await page.locator('#babel-gold-drafting-magic-button').click();
+      await expect(page.locator('#babel-gold-drafting-overlay .bgd-status')).toContainText('L0 replacement complete', { timeout: 120_000 });
+      const observations = await page.evaluate(() => window.__goldModelReplacementObservations);
+      const requests = observations.filter((event) => event.type === 'babel-gold-drafting:l0-replace-request');
+      expect(requests).toHaveLength(1);
+      const request = requests[0];
+      expect(request.expectedReviewActionId).toBe(task.action.reviewActionId);
+      expect(request.rows.length).toBeGreaterThan(0);
+      const response = observations.find((event) => event.type === 'babel-gold-drafting:l0-replace-response'
+        && event.requestId === request.requestId);
+      expect(response?.ok).toBe(true);
+      expect(response.created).toHaveLength(request.rows.length);
+      const originalIds = new Set(task.action.annotations.map(({ id }) => id));
+      expect(response.created.every(({ annotationId }) => !originalIds.has(annotationId))).toBe(true);
+      const expectedRows = response.created.map((created) => {
+        const source = request.rows.find((row) => row.id === created.id);
+        return {
+          id: created.annotationId,
+          content: source.text,
+          processedRecordingId: source.lane,
+          startTimeInSeconds: source.startSeconds,
+          endTimeInSeconds: source.endSeconds,
+        };
+      }).sort((left, right) => left.id.localeCompare(right.id));
+      // Consume every actual ONNX row, including a legitimate unchanged transcript.
+      // Neither a completion label nor a new context alone proves model recovery.
+      await expect.poll(() => page.evaluate(() => window.__BABEL_E2E__.snapshot().annotations
+        .map(({ id, content, processedRecordingId, startTimeInSeconds, endTimeInSeconds }) => ({
+          id, content, processedRecordingId, startTimeInSeconds, endTimeInSeconds,
+        }))
+        .sort((left, right) => left.id.localeCompare(right.id)))).toEqual(expectedRows);
+      await expect.poll(() => offscreens(options)).toHaveLength(1);
+      expect((await babel.state()).calls.filter((call) => call.path === '/v1/draft' || call.path.startsWith('/api/draft/'))).toEqual([]);
+      await page.getByRole('button', { name: 'Close', exact: true }).click();
+      return (await offscreens(options))[0].documentId;
+    }
+    const originalDocumentId = await replaceAndCheckNative(state);
+    await options.evaluate(() => chrome.offscreen.closeDocument());
+    await expect.poll(() => offscreens(options)).toEqual([]);
+    // A different task requires fresh inference, rather than reusing the first
+    // task's completed result. Only the real model consumer recreates offscreen.
+    const nextId = '77777777-7777-4777-8777-777777777777';
+    const next = await babel.reset('baseline', {
+      ...audio,
+      action: {
+        actionId: nextId,
+        reviewActionId: nextId,
+        annotations: state.action.annotations.map((row, index) => ({
+          ...row, id: `recovery-row-${index}`, reviewActionId: nextId,
+        })),
+      },
     });
-    await page.locator('#babel-gold-drafting-magic-button').click();
-    await expect(page.locator('#babel-gold-drafting-overlay .bgd-status')).toContainText('L0 replacement complete', { timeout: 120_000 });
-    const observations = await page.evaluate(() => window.__goldModelReplacementObservations);
-    const requests = observations.filter((event) => event.type === 'babel-gold-drafting:l0-replace-request');
-    expect(requests).toHaveLength(1);
-    const request = requests[0];
-    const response = observations.find((event) => event.type === 'babel-gold-drafting:l0-replace-response'
-      && event.requestId === request.requestId);
-    expect(response?.ok).toBe(true);
-    expect(response.created).toHaveLength(request.rows.length);
-    const originalIds = new Set(state.action.annotations.map(({ id }) => id));
-    expect(response.created.every(({ annotationId }) => !originalIds.has(annotationId))).toBe(true);
-    const expectedRows = response.created.map((created) => ({
-      id: created.annotationId,
-      content: request.rows.find((row) => row.id === created.id).text,
-    })).sort((left, right) => left.id.localeCompare(right.id));
-    // Consume the actual ONNX result, including a legitimate unchanged transcript.
-    // A completion label alone does not prove Helper applied the returned rows.
-    await expect.poll(() => page.evaluate(() => window.__BABEL_E2E__.snapshot().annotations
-      .map(({ id, content }) => ({ id, content }))
-      .sort((left, right) => left.id.localeCompare(right.id)))).toEqual(expectedRows);
-    await expect.poll(() => offscreens(options)).toHaveLength(1);
-    expect((await babel.state()).calls.filter((call) => call.path === '/v1/draft' || call.path.startsWith('/api/draft/'))).toEqual([]);
-    await page.getByRole('button', { name: 'Close', exact: true }).click();
-    await rows.first().focus();
-    const nativeText = await rows.first().inputValue();
-    await rows.first().fill(`${nativeText} Проверка.`);
-    await rows.last().focus();
-    await expect(rows.first()).toHaveValue(`${nativeText} Проверка.`);
+    expect(await replaceAndCheckNative(next)).not.toBe(originalDocumentId);
+    const nativeText = await readText(rows.first());
+    await editText(page, 0, `${nativeText} Проверка.`);
     await options.close();
   });
 });

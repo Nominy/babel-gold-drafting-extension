@@ -1,12 +1,13 @@
 import {
   AUDIO_ENHANCEMENT_ACTIVE_REQUEST, AUDIO_ENHANCEMENT_ACTIVE_RESPONSE,
-  AUDIO_ENHANCEMENT_PROTOCOL_VERSION, readAudioEnhancementState, type ActiveAudioRequest, type AudioEnhancementState
+  AUDIO_ENHANCEMENT_PROTOCOL_VERSION, AUDIO_ENHANCEMENT_STATE_ATTRIBUTE, readAudioEnhancementState, type ActiveAudioRequest, type AudioEnhancementState
 } from '@nominy/babel-babel-runtime';
-import type { CapturedAudioTrack } from './types';
+import type { CapturedAudioTrack, TranscriptJob } from './types';
 import {
   AUDIO_FLUSH_REQUEST_MESSAGE_TYPE,
   AUDIO_RESPONSE_MESSAGE_TYPE,
   AUDIO_SOURCE_MESSAGE_TYPE,
+  PAGE_TASK_ID_ATTRIBUTE,
   type AudioSourceMessage,
   type AudioResponseMessage
 } from './audio-intercept-protocol';
@@ -351,10 +352,67 @@ function isPendingAudioSelection(state: AudioEnhancementState): boolean {
   return state.status === 'switching' || (state.desiredStrength !== state.strength && state.status !== 'error');
 }
 
-export function isAudioSelectionReady(root: ParentNode = document): boolean {
+export function isAudioSelectionReady(root: ParentNode = document, taskId = captureTranscriptJob(root).jobId): boolean {
   const documentRef = 'documentElement' in root ? root as Document : (root as Node).ownerDocument;
   const state = readAudioEnhancementState(documentRef);
-  return !state || state.taskId !== captureTranscriptJob(root).jobId || !isPendingAudioSelection(state);
+  if (!state || state.taskId !== taskId) {
+    // The enabled Helper surface mounts before its async MAIN bridge has both
+    // native tracks. Missing state here is initialization, not Original selection.
+    return !documentRef?.querySelector('[data-babel-helper-audio-enhancement]');
+  }
+  return !isPendingAudioSelection(state);
+}
+
+/** Wait only before consuming audio; never substitute Original for a pending selection. */
+export function waitForAudioSelection(
+  job: TranscriptJob,
+  options: { root?: ParentNode; signal?: AbortSignal; isCurrent?: () => boolean } = {}
+): Promise<TranscriptJob> {
+  const root = options.root ?? document;
+  const documentRef = 'documentElement' in root ? root as Document : (root as Node).ownerDocument;
+  if (!documentRef?.documentElement) return Promise.reject(new Error('The native audio document is unavailable.'));
+  const pathname = window.location.pathname;
+  const queryTaskId = readQueryTaskId();
+  const identity = buildCanonicalTaskIdentity({ ...job, audioDependent: false });
+  const { promise, resolve, reject } = Promise.withResolvers<TranscriptJob>();
+  let settled = false;
+  const finish = (error?: unknown, current?: TranscriptJob): void => {
+    if (settled) return;
+    settled = true;
+    observer.disconnect();
+    window.clearInterval(interval);
+    window.clearTimeout(timeout);
+    options.signal?.removeEventListener('abort', check);
+    if (error) reject(error);
+    else resolve({ ...job, audioVariantKey: current!.audioVariantKey, audioDependent: true });
+  };
+  const check = (): void => {
+    if (settled) return;
+    try {
+      options.signal?.throwIfAborted();
+      const current = captureTranscriptJob(root);
+      if (window.location.pathname !== pathname || readQueryTaskId() !== queryTaskId ||
+        options.isCurrent?.() === false ||
+        buildCanonicalTaskIdentity({ ...current, audioDependent: false }) !== identity) {
+        throw new Error('The task changed while waiting for the selected audio.');
+      }
+      if (isAudioSelectionReady(root, current.jobId)) finish(undefined, current);
+    } catch (error) {
+      finish(error instanceof Error ? error : new Error(String(error)));
+    }
+  };
+  const Observer = (documentRef.defaultView as Window & typeof globalThis).MutationObserver;
+  const observer = new Observer(check);
+  observer.observe(documentRef.documentElement, {
+    attributes: true, attributeFilter: [AUDIO_ENHANCEMENT_STATE_ATTRIBUTE, PAGE_TASK_ID_ATTRIBUTE],
+    childList: true, subtree: true
+  });
+  // Native routing and port disconnects can precede the next published state.
+  const interval = window.setInterval(check, 100);
+  const timeout = window.setTimeout(() => finish(new Error('The selected audio did not finish preparing. Originals were not substituted.')), 15 * 60_000);
+  options.signal?.addEventListener('abort', check, { once: true });
+  check();
+  return promise;
 }
 
 function captureHelperSelectedAudio(root: ParentNode, selection: 'active' | 'original'): Promise<CapturedAudioTrack[]> | null {

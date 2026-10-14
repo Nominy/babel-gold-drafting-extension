@@ -163,7 +163,8 @@ export async function redistributeTextWithBroker(
 async function reconcileDraftWithFormPayload(
   backendBaseUrl: string,
   payload: GenerateDraftRequest,
-  audioTracks: CapturedAudioTrack[] = []
+  audioTracks: CapturedAudioTrack[] = [],
+  signal?: AbortSignal
 ): Promise<GenerateDraftResponse> {
   const body = createRequestFormData(payload, audioTracks);
 
@@ -172,7 +173,8 @@ async function reconcileDraftWithFormPayload(
     headers: {
       Accept: 'application/json'
     },
-    body
+    body,
+    signal
   });
 
   return parseObjectResponse<GenerateDraftResponse>(response);
@@ -182,10 +184,19 @@ function normalizeError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
+  const { promise, resolve, reject } = Promise.withResolvers<void>();
+  const abort = (): void => {
+    clearTimeout(timeout);
+    reject(signal?.reason ?? new DOMException('Draft cancelled', 'AbortError'));
+  };
+  const timeout = setTimeout(() => {
+    signal?.removeEventListener('abort', abort);
+    resolve();
+  }, ms);
+  signal?.addEventListener('abort', abort, { once: true });
+  return promise;
 }
 
 function isReconnectableGenerateError(error: Error): boolean {
@@ -203,20 +214,26 @@ async function reconcileDraftSession(
   payload: GenerateDraftRequest,
   handlers: GenerateDraftStreamHandlers,
   streamError: Error,
-  audioTracks: CapturedAudioTrack[] = []
+  audioTracks: CapturedAudioTrack[] = [],
+  signal?: AbortSignal
 ): Promise<GenerateDraftResponse> {
   let lastError = streamError;
+  signal?.throwIfAborted();
   handlers.onReconnect?.(streamError);
 
   for (let attempt = 0; attempt <= RECONCILE_RETRY_DELAYS_MS.length; attempt += 1) {
     if (attempt > 0) {
-      await delay(RECONCILE_RETRY_DELAYS_MS[attempt - 1]);
+      await delay(RECONCILE_RETRY_DELAYS_MS[attempt - 1], signal);
       handlers.onReconnect?.(lastError);
     }
 
     try {
-      return await reconcileDraftWithFormPayload(backendBaseUrl, payload, audioTracks);
+      signal?.throwIfAborted();
+      const response = await reconcileDraftWithFormPayload(backendBaseUrl, payload, audioTracks, signal);
+      signal?.throwIfAborted();
+      return response;
     } catch (error) {
+      signal?.throwIfAborted();
       const normalizedError = normalizeError(error);
       if (!isReconnectableGenerateError(normalizedError)) {
         throw normalizedError;
@@ -232,8 +249,10 @@ async function generateDraftStreamCore(
   backendBaseUrl: string,
   payload: GenerateDraftRequest,
   handlers: GenerateDraftStreamHandlers,
-  audioTracks: CapturedAudioTrack[] = []
+  audioTracks: CapturedAudioTrack[] = [],
+  signal?: AbortSignal
 ): Promise<GenerateDraftResponse> {
+  signal?.throwIfAborted();
   const hasAudioTracks = audioTracks.length > 0;
   const body = hasAudioTracks ? createRequestFormData(payload, audioTracks) : JSON.stringify(payload);
   const headers: Record<string, string> = {
@@ -247,7 +266,8 @@ async function generateDraftStreamCore(
   const response = await fetch(getEndpointUrl(backendBaseUrl, '/api/draft/generate/stream'), {
     method: 'POST',
     headers,
-    body
+    body,
+    signal
   });
 
   if (!response.ok) {
@@ -264,6 +284,7 @@ async function generateDraftStreamCore(
   let finalResponse: GenerateDraftResponse | null = null;
 
   const processEventBlock = (block: string): void => {
+    signal?.throwIfAborted();
     const lines = block.split(/\r?\n/);
     let eventName = 'message';
     const dataLines: string[] = [];
@@ -310,28 +331,28 @@ async function generateDraftStreamCore(
     }
   };
 
-  while (true) {
-    const { value, done } = await reader.read();
-    buffer += decoder.decode(value, { stream: !done });
-
-    let separatorIndex = buffer.indexOf('\n\n');
-    while (separatorIndex >= 0) {
-      const block = buffer.slice(0, separatorIndex).trim();
-      buffer = buffer.slice(separatorIndex + 2);
-      if (block) {
-        processEventBlock(block);
+  const abort = (): void => { void reader.cancel().catch(() => undefined); };
+  signal?.addEventListener('abort', abort, { once: true });
+  try {
+    while (true) {
+      signal?.throwIfAborted();
+      const { value, done } = await reader.read();
+      signal?.throwIfAborted();
+      buffer += decoder.decode(value, { stream: !done });
+      let separator = /\r?\n\r?\n/.exec(buffer);
+      while (separator) {
+        const block = buffer.slice(0, separator.index).trim();
+        buffer = buffer.slice(separator.index + separator[0].length);
+        if (block) processEventBlock(block);
+        separator = /\r?\n\r?\n/.exec(buffer);
       }
-      separatorIndex = buffer.indexOf('\n\n');
+      if (done) break;
     }
-
-    if (done) {
-      break;
-    }
-  }
-
-  const trailing = buffer.trim();
-  if (trailing) {
-    processEventBlock(trailing);
+    if (buffer.trim()) processEventBlock(buffer.trim());
+  } finally {
+    signal?.removeEventListener('abort', abort);
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
   }
 
   if (!finalResponse) {
@@ -345,16 +366,18 @@ export async function generateDraftStream(
   backendBaseUrl: string,
   payload: GenerateDraftRequest,
   handlers: GenerateDraftStreamHandlers,
-  audioTracks: CapturedAudioTrack[] = []
+  audioTracks: CapturedAudioTrack[] = [],
+  signal?: AbortSignal
 ): Promise<GenerateDraftResponse> {
   try {
-    return await generateDraftStreamCore(backendBaseUrl, payload, handlers, audioTracks);
+    return await generateDraftStreamCore(backendBaseUrl, payload, handlers, audioTracks, signal);
   } catch (error) {
+    signal?.throwIfAborted();
     if (error instanceof DraftStreamHttpError || error instanceof DraftStreamServerError || !payload.draftSessionId) {
       throw error;
     }
 
     const normalizedError = normalizeError(error);
-    return reconcileDraftSession(backendBaseUrl, payload, handlers, normalizedError, audioTracks);
+    return reconcileDraftSession(backendBaseUrl, payload, handlers, normalizedError, audioTracks, signal);
   }
 }

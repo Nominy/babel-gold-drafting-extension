@@ -8,7 +8,7 @@ import {
   type AiBrokerPortMessage,
   type AiBrokerResponse
 } from '../core/ai-broker-protocol';
-import { captureAudioTracksForDrafting, captureOriginalAudioTracksForEnhancement } from '../core/audio-cues';
+import { captureAudioTracksForDrafting, captureOriginalAudioTracksForEnhancement, waitForAudioSelection } from '../core/audio-cues';
 import { redistributeTextWithBroker, transcribeSegmentWithBroker } from '../core/backend-client';
 import { generateL0SegmentDraft } from '../core/l0-client';
 import { enhanceLocalAudio, generateLocalL0SegmentDraft, LocalModelBridgeError } from '../core/local-model-client';
@@ -48,7 +48,7 @@ function allowsBrokerFallback(message: AiBrokerInternalRequest, settings: Extens
   if (message.operation === 'transcribeSegmentL0' && settings && isBrowserLocalMode(settings)) {
     return false;
   }
-  return settings === null || providerAllowsLocalFallback(settings.aiBrokerProvider);
+  return settings !== null && providerAllowsLocalFallback(settings.aiBrokerProvider);
 }
 
 async function withBrokerBackendProgress<T>(
@@ -225,7 +225,9 @@ async function handleBrokerRequest(
       if (message.operation !== 'transcribeSegment' && message.operation !== 'transcribeSegmentL0') {
         return brokerError('invalid-request', 'Unsupported local browser model operation.', false);
       }
-      const job = captureTranscriptJob();
+      const captured = captureTranscriptJob();
+      const job = message.operation === 'transcribeSegment'
+        ? await waitForAudioSelection(captured, { isCurrent: isConnected }) : captured;
       const taskId = buildCanonicalTaskIdentity(job);
       const requested = message.operation === 'transcribeSegmentL0' ? message.row : message.segment;
       const known = job.rows.find((row) => row.rowId === requested.rowId);
@@ -269,7 +271,9 @@ async function handleBrokerRequest(
       if (message.operation !== 'transcribeSegmentL0' && message.operation !== 'transcribeSegment') {
         return brokerError('invalid-request', 'Unsupported Helper AI broker operation.', false);
       }
-      const job = captureTranscriptJob();
+      const captured = captureTranscriptJob();
+      const job = message.operation === 'transcribeSegment'
+        ? await waitForAudioSelection(captured, { isCurrent: isConnected }) : captured;
       const taskId = buildCanonicalTaskIdentity(job);
       const requestedRow = message.operation === 'transcribeSegmentL0' ? message.row : message.segment;
       const knownRow = job.rows.find((row) => row.rowId === requestedRow.rowId);
@@ -376,7 +380,12 @@ async function handleBrokerRequest(
     if (emit) {
       emit({ type: 'event', event: 'capturing-audio', operation: message.operation, message: 'Capturing Babel segment audio.' });
     }
+    const job = await waitForAudioSelection(captureTranscriptJob(), { isCurrent: isConnected });
+    const taskId = buildCanonicalTaskIdentity(job);
     const audioTracks = await captureAudioTracksForDrafting();
+    if (!isConnected() || captureCurrentCanonicalTaskId() !== taskId) {
+      return brokerError('stale-task', 'The selected audio task changed during capture.', false);
+    }
     if (emit) {
       emit({ type: 'event', event: 'calling-backend', operation: message.operation, message: 'Calling Gold Drafting backend.' });
     }
@@ -392,6 +401,9 @@ async function handleBrokerRequest(
         audioTracks
       )
     );
+    if (!isConnected() || captureCurrentCanonicalTaskId() !== taskId) {
+      return brokerError('stale-task', 'The selected audio task changed during transcription.', false);
+    }
     return {
       ok: true,
       provider: 'remote-openrouter',
