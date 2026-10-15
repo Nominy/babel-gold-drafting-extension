@@ -63,66 +63,214 @@ function dependencies(overrides: Partial<L0TimingServiceDependencies> = {}): L0T
   };
 }
 
-test('strength commits discard stale publication and never reuse another strength timing cache', async () => {
+test('startup Original timing survives Generate and mix commits without inferring another source', async () => {
   let currentJob = job;
   let ready = true;
-  const mixed35Job = { ...job, audioVariantKey: 'c'.repeat(64) };
-  const mixed65Job = { ...job, audioVariantKey: 'd'.repeat(64) };
-  const mixed35Id = buildCanonicalTaskIdentity(mixed35Job);
-  const mixed65Id = buildCanonicalTaskIdentity(mixed65Job);
   const lookedUp: string[] = [];
   const first = Promise.withResolvers<L0TimingResponse>();
   const published: string[] = [];
   const requested: string[] = [];
+  const captures: string[] = [];
   const service = new L0TimingService(dependencies({
     captureTranscript: () => currentJob,
     currentTaskId: () => buildCanonicalTaskIdentity(currentJob),
     isAudioSelectionReady: () => ready,
-    lookupTiming: async (_settings, key) => {
-      lookedUp.push(key);
-      // A cache hit is usable only for the exact committed-strength identity.
-      return key === mixed65Id ? { ...response, taskId: mixed35Id } : null;
-    },
+    captureAudio: async selection => { captures.push(selection); return tracks; },
+    lookupTiming: async (_settings, key) => { lookedUp.push(key); return null; },
     requestTiming: async (_settings, captured) => {
-      const key = buildCanonicalTaskIdentity(captured);
-      requested.push(key);
-      return requested.length === 1 ? first.promise : { ...response, taskId: key };
+      requested.push(buildCanonicalTaskIdentity(captured));
+      return first.promise;
     },
     publish: message => published.push(message.taskId)
   }));
   service.onLifecycleOpportunity();
   await flushAsyncWork();
   ready = false;
+  currentJob = { ...job, audioVariantKey: 'c'.repeat(64) };
+  service.onLifecycleOpportunity();
   first.resolve(response);
   await flushAsyncWork();
-  assert.deepEqual(published, []);
-  service.onLifecycleOpportunity();
-  await flushAsyncWork();
+  assert.deepEqual(published, [taskId], 'late timing retains its Original source while enhancement is pending');
+  for (const audioVariantKey of ['c'.repeat(64), 'd'.repeat(64), '']) {
+    currentJob = { ...job, audioVariantKey };
+    ready = true;
+    service.onLifecycleOpportunity();
+    await flushAsyncWork();
+  }
+  assert.deepEqual(captures, ['original']);
+  assert.deepEqual(lookedUp, [taskId]);
   assert.deepEqual(requested, [taskId]);
-  currentJob = mixed35Job;
-  ready = true;
-  service.onLifecycleOpportunity();
-  await flushAsyncWork();
-  assert.deepEqual(requested, [taskId, mixed35Id]);
-  assert.deepEqual(published, [mixed35Id]);
-  ready = false;
-  service.onLifecycleOpportunity();
-  await flushAsyncWork();
-  assert.deepEqual(lookedUp, [taskId, mixed35Id]);
-  currentJob = mixed65Job;
-  ready = true;
-  service.onLifecycleOpportunity();
-  await flushAsyncWork();
-  assert.deepEqual(lookedUp, [taskId, mixed35Id, mixed65Id]);
-  assert.deepEqual(requested, [taskId, mixed35Id, mixed65Id]);
-  assert.deepEqual(published, [mixed35Id, mixed65Id]);
-  currentJob = mixed35Job;
-  service.onLifecycleOpportunity();
-  await flushAsyncWork();
-  assert.deepEqual(requested, [taskId, mixed35Id, mixed65Id]);
-  assert.deepEqual(published, [mixed35Id, mixed65Id]);
-  assert.deepEqual(getL0TimingAvailability(), { taskId: mixed35Id, status: 'available' });
+  assert.deepEqual(published, [taskId]);
+  assert.deepEqual(getL0TimingAvailability(), { taskId, status: 'available' });
 });
+
+test('Original Draft rejects a new selection while its startup timing can still finish truthfully', async () => {
+  const settings: ExtensionSettings = { ...DEFAULT_SETTINGS, mode: 'advanced', localModelsEnabled: false };
+  let currentJob = job;
+  const pending = Promise.withResolvers<L0TimingResponse>();
+  const published: string[] = [];
+  const service = new L0TimingService(dependencies({
+    captureTranscript: () => currentJob,
+    currentTaskId: () => buildCanonicalTaskIdentity(currentJob),
+    getSettings: async () => settings,
+    requestTiming: async () => pending.promise,
+    publish: message => published.push(message.taskId)
+  }));
+  const waiting = service.waitForTiming(job, settings);
+  const rejection = assert.rejects(waiting, /task changed/);
+  await flushAsyncWork();
+  currentJob = { ...job, audioVariantKey: 'c'.repeat(64) };
+  service.onLifecycleOpportunity();
+  await rejection;
+  pending.resolve(response);
+  await flushAsyncWork();
+  assert.deepEqual(published, [taskId]);
+});
+
+test('explicit timing regeneration still publishes genuinely inferred selected-source pins', async () => {
+  const selectedJob = { ...job, audioVariantKey: 'c'.repeat(64) };
+  const selectedId = buildCanonicalTaskIdentity(selectedJob);
+  const published: string[] = [];
+  const service = new L0TimingService(dependencies({
+    captureTranscript: () => selectedJob,
+    currentTaskId: () => selectedId,
+    captureAudio: async selection => { assert.equal(selection, 'active'); return tracks; },
+    requestTiming: async (_settings, captured) => {
+      assert.equal(buildCanonicalTaskIdentity(captured), selectedId);
+      return { ...response, taskId: selectedId };
+    },
+    publish: message => published.push(message.taskId)
+  }));
+  assert.equal(service.retryCurrentTask(), true);
+  await flushAsyncWork();
+  assert.deepEqual(published, [selectedId]);
+});
+
+for (const engine of ['remote', 'advanced-local', 'local', 'mai'] as const) {
+  test(`${engine} prepares only the explicitly requested selected-source cache and never reuses Original ASR`, async () => {
+    const settings: ExtensionSettings = {
+      ...DEFAULT_SETTINGS,
+      mode: engine === 'mai' ? 'simple' : engine === 'local' ? 'local' : 'advanced',
+      localModelsEnabled: engine === 'advanced-local',
+      openRouterApiKey: 'test-key'
+    };
+    let currentJob = job;
+    const selectedJob = { ...job, audioVariantKey: 'c'.repeat(64) };
+    const selectedId = buildCanonicalTaskIdentity(selectedJob);
+    const cache = new Map<string, L0TimingResponse>([[taskId, response]]);
+    const captures: string[] = [];
+    const requested: string[] = [];
+    const published: string[] = [];
+    const selectedTracks = tracks.map(track => ({ ...track, source: `selected:${track.source}`, blob: new Blob(['selected']) }));
+    const service = new L0TimingService(dependencies({
+      captureTranscript: () => currentJob,
+      currentTaskId: () => buildCanonicalTaskIdentity(currentJob),
+      getSettings: async () => settings,
+      captureAudio: async selection => {
+        captures.push(selection);
+        return selection === 'original' ? tracks : selectedTracks;
+      },
+      lookupTiming: async (_settings, key) => cache.get(key) ?? null,
+      requestTiming: async (_settings, captured, audio) => {
+        const key = buildCanonicalTaskIdentity(captured);
+        requested.push(key);
+        assert.deepEqual(audio, key === selectedId ? selectedTracks : tracks);
+        const result = { ...response, taskId: key };
+        cache.set(key, result);
+        return result;
+      },
+      publish: message => published.push(message.taskId)
+    }));
+    service.onLifecycleOpportunity();
+    await flushAsyncWork();
+    const initialRequests = requested.length;
+    currentJob = selectedJob;
+    service.onLifecycleOpportunity();
+    await flushAsyncWork();
+    assert.equal(requested.length, initialRequests, 'changing the selected mix is not a transcription request');
+    await service.waitForTiming(selectedJob, settings);
+    assert.deepEqual(requested.slice(initialRequests), [selectedId]);
+    assert.equal(captures.at(-1), 'active');
+    assert.ok(!published.includes(selectedId), 'Draft preparation must not overwrite Original playback pins');
+    await service.waitForTiming(selectedJob, settings);
+    assert.equal(requested.length, initialRequests + 1, 'repeat Draft reuses only its exact source cache');
+    assert.equal(service.retryCurrentTask(), true, 'explicit timing publication remains available after cache-only Draft preparation');
+    await flushAsyncWork();
+    assert.equal(published.at(-1), selectedId);
+    assert.equal(requested.length, initialRequests + 1, 'publishing genuine cached pins does not re-infer');
+    currentJob = { ...job, audioVariantKey: 'd'.repeat(64) };
+    service.onLifecycleOpportunity();
+    await flushAsyncWork();
+    assert.equal(requested.length, initialRequests + 1);
+  });
+}
+
+for (const originalLookupPending of [false, true]) {
+  test(`Simple enhanced Draft publishes its genuine first pins after a ${originalLookupPending ? 'pending' : 'completed'} Original cache miss`, async () => {
+    const settings: ExtensionSettings = { ...DEFAULT_SETTINGS, mode: 'simple', openRouterApiKey: 'test-key' };
+    const selectedJob = { ...job, audioVariantKey: 'c'.repeat(64) };
+    const selectedId = buildCanonicalTaskIdentity(selectedJob);
+    const originalLookup = Promise.withResolvers<L0TimingResponse | null>();
+    const published: string[] = [];
+    const requested: string[] = [];
+    const service = new L0TimingService(dependencies({
+      captureTranscript: () => selectedJob,
+      currentTaskId: () => selectedId,
+      getSettings: async () => settings,
+      lookupTiming: async (_settings, key) => originalLookupPending && key === taskId ? originalLookup.promise : null,
+      captureAudio: async selection => { assert.equal(selection, 'active'); return tracks; },
+      requestTiming: async (_settings, captured) => {
+        requested.push(buildCanonicalTaskIdentity(captured));
+        return { ...response, taskId: selectedId };
+      },
+      publish: message => published.push(message.taskId)
+    }));
+    service.onLifecycleOpportunity();
+    await flushAsyncWork();
+    assert.deepEqual(requested, [], 'startup cannot start paid inference');
+    await service.waitForTiming(selectedJob, settings);
+    if (originalLookupPending) {
+      assert.deepEqual(published, [], 'preserve the pending startup anchor until its cache lookup finishes');
+      originalLookup.resolve(null);
+      await flushAsyncWork();
+    }
+    assert.deepEqual(requested, [selectedId]);
+    assert.deepEqual(published, [selectedId], 'never relabel selected ASR as Original');
+  });
+}
+
+for (const interruption of ['selected-source', 'pending-source', 'abort'] as const) {
+  test(`explicit selected-source preparation rejects ${interruption} before inference completes`, async () => {
+    const selectedJob = { ...job, audioVariantKey: 'c'.repeat(64) };
+    const selectedId = buildCanonicalTaskIdentity(selectedJob);
+    const settings: ExtensionSettings = { ...DEFAULT_SETTINGS, mode: 'advanced', localModelsEnabled: false };
+    let currentJob = selectedJob;
+    let ready = true;
+    const pending = Promise.withResolvers<L0TimingResponse>();
+    const controller = new AbortController();
+    const published: string[] = [];
+    const service = new L0TimingService(dependencies({
+      captureTranscript: () => currentJob,
+      currentTaskId: () => buildCanonicalTaskIdentity(currentJob),
+      isAudioSelectionReady: () => ready,
+      getSettings: async () => settings,
+      lookupTiming: async (_settings, key) => key === taskId ? response : null,
+      requestTiming: async () => pending.promise,
+      publish: message => published.push(message.taskId)
+    }));
+    const waiting = service.waitForTiming(selectedJob, settings, { signal: controller.signal });
+    const rejection = assert.rejects(waiting, /task changed|cancelled/);
+    await flushAsyncWork();
+    if (interruption === 'selected-source') currentJob = { ...job, audioVariantKey: 'd'.repeat(64) };
+    else if (interruption === 'pending-source') ready = false;
+    else controller.abort(new Error('Draft cancelled'));
+    service.onLifecycleOpportunity();
+    await rejection;
+    pending.resolve({ ...response, taskId: selectedId });
+    await flushAsyncWork();
+    if (interruption !== 'abort') assert.ok(!published.includes(selectedId));
+  });
+}
 
 test('Local timing failures retain the cause in the popup and Draft rejection', async () => {
   const settings: ExtensionSettings = { ...DEFAULT_SETTINGS, mode: 'local' };

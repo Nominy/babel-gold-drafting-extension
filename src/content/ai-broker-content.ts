@@ -8,7 +8,7 @@ import {
   type AiBrokerPortMessage,
   type AiBrokerResponse
 } from '../core/ai-broker-protocol';
-import { captureAudioTracksForDrafting, captureOriginalAudioTracksForEnhancement, waitForAudioSelection } from '../core/audio-cues';
+import { captureAudioTracksForDrafting, captureOriginalAudioTracksForEnhancement, isAudioSelectionReady, waitForAudioSelection } from '../core/audio-cues';
 import { redistributeTextWithBroker, transcribeSegmentWithBroker } from '../core/backend-client';
 import { generateL0SegmentDraft } from '../core/l0-client';
 import { enhanceLocalAudio, generateLocalL0SegmentDraft, LocalModelBridgeError } from '../core/local-model-client';
@@ -142,8 +142,9 @@ function isValidL0TargetRow(row: TranscriptRow): boolean {
   );
 }
 
-function captureCurrentCanonicalTaskId(): string {
-  return buildCanonicalTaskIdentity(captureTranscriptJob());
+function isCurrentAudioTask(taskId: string): boolean {
+  const job = captureTranscriptJob();
+  return isAudioSelectionReady(document, job.jobId) && buildCanonicalTaskIdentity(job) === taskId;
 }
 
 export type L0SegmentGenerators = {
@@ -240,7 +241,7 @@ async function handleBrokerRequest(
       emit?.({ type: 'event', event: 'calling-backend', operation: message.operation, message: 'Using local GigaAM + C-denoise on WebGPU; no cloud audio fallback.' });
       await waitForCurrentL0Timing(job, settings);
       const generation = getCurrentL0TimingGeneration();
-      const isCurrent = async () => captureCurrentCanonicalTaskId() === taskId &&
+      const isCurrent = async () => isConnected() && isCurrentAudioTask(taskId) &&
         (await loadSettings()).mode === 'local' && getCurrentL0TimingGeneration() === generation;
       if (!(await isCurrent())) return brokerError('stale-task', 'The task or model mode changed while preparing local timing.', false);
       const text = await generateConfiguredL0SegmentText(settings, taskId, row);
@@ -294,7 +295,7 @@ async function handleBrokerRequest(
       emit?.({ type: 'event', event: 'calling-backend', operation: message.operation, message: 'Using MAI native transcription and timing; cached source audio results are reused.' });
       await waitForCurrentL0Timing(job, settings);
       const timingGeneration = getCurrentL0TimingGeneration();
-      const isCurrent = async () => captureCurrentCanonicalTaskId() === taskId &&
+      const isCurrent = async () => isConnected() && isCurrentAudioTask(taskId) &&
         (await loadSettings()).mode === 'simple' && getCurrentL0TimingGeneration() === timingGeneration;
       if (!(await isCurrent())) return brokerError('stale-task', 'The transcript task or drafting mode changed while transcribing.', false);
       let text: string;
@@ -323,14 +324,14 @@ async function handleBrokerRequest(
       typeof message.taskId !== 'string' ||
       !message.taskId.trim() ||
       !isValidL0TargetRow(message.row) ||
-      captureCurrentCanonicalTaskId() !== message.taskId
+      !isCurrentAudioTask(message.taskId)
     ) {
       return brokerError('stale-task', 'The requested transcript task is no longer current.', false);
     }
     if (emit && isBrowserLocalMode(settings)) {
       emit({ type: 'event', event: 'calling-backend', operation: message.operation, message: 'Using cached full-lane C-denoise WebGPU labels.' });
     }
-    if (captureCurrentCanonicalTaskId() !== message.taskId) {
+    if (!isConnected() || !isCurrentAudioTask(message.taskId)) {
       return brokerError('stale-task', 'The transcript task changed before its cached segment could be read.', false);
     }
     const targetRow: TranscriptRow = {
@@ -341,6 +342,9 @@ async function handleBrokerRequest(
       index: 0
     };
     await waitForCurrentL0Timing(captureTranscriptJob(), settings);
+    if (!isConnected() || !isCurrentAudioTask(message.taskId)) {
+      return brokerError('stale-task', 'The selected audio task changed while preparing L0 transcription.', false);
+    }
     if (emit) {
       emit({
         type: 'event',
@@ -357,7 +361,7 @@ async function handleBrokerRequest(
       () => generateConfiguredL0SegmentText(settings, message.taskId, targetRow),
       isBrowserLocalMode(settings) ? 'local WebGPU C-denoise' : 'Gold Drafting backend'
     );
-    if (captureCurrentCanonicalTaskId() !== message.taskId) {
+    if (!isConnected() || !isCurrentAudioTask(message.taskId)) {
       return brokerError('stale-task', 'The transcript task changed before L0 drafting completed.', false);
     }
     return {
@@ -383,7 +387,7 @@ async function handleBrokerRequest(
     const job = await waitForAudioSelection(captureTranscriptJob(), { isCurrent: isConnected });
     const taskId = buildCanonicalTaskIdentity(job);
     const audioTracks = await captureAudioTracksForDrafting();
-    if (!isConnected() || captureCurrentCanonicalTaskId() !== taskId) {
+    if (!isConnected() || !isCurrentAudioTask(taskId)) {
       return brokerError('stale-task', 'The selected audio task changed during capture.', false);
     }
     if (emit) {
@@ -401,7 +405,7 @@ async function handleBrokerRequest(
         audioTracks
       )
     );
-    if (!isConnected() || captureCurrentCanonicalTaskId() !== taskId) {
+    if (!isConnected() || !isCurrentAudioTask(taskId)) {
       return brokerError('stale-task', 'The selected audio task changed during transcription.', false);
     }
     return {

@@ -51,27 +51,34 @@ test('L0 routing uses the hosted default and normalizes custom self-host bases',
   );
 });
 
-test('generateL0Draft requests punctuation using canonical task identity without audio', async () => {
-  let requestUrl = '';
-  let requestInit: RequestInit | undefined;
+test('generateL0Draft reads the exact selected-source cache without reusing Original or another mix', async () => {
   const originalFetch = globalThis.fetch;
+  const cache = new Map<string, typeof canonicalResponse>();
+  for (const audioVariantKey of ['', 'c'.repeat(64), 'd'.repeat(64)]) {
+    const selected = { ...job, audioVariantKey };
+    cache.set(buildCanonicalTaskIdentity(selected), {
+      ...canonicalResponse,
+      rows: canonicalResponse.rows.map(row => ({ ...row, text: `${audioVariantKey || 'Original'} ${row.text}` }))
+    });
+  }
   globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
-    requestUrl = String(url);
-    requestInit = init;
-    return new Response(JSON.stringify(canonicalResponse), { status: 200 });
+    assert.equal(String(url), 'https://engine.test/v1/draft');
+    assert.equal(init?.method, 'POST');
+    assert.equal(new Headers(init?.headers).get('Content-Type'), 'application/json');
+    assert.equal(new Headers(init?.headers).get('Authorization'), `Bearer ${'a'.repeat(43)}`);
+    const payload = JSON.parse(String(init?.body));
+    assert.deepEqual(Object.keys(payload), ['taskId'], 'draft depends on the explicitly prepared source cache');
+    return new Response(JSON.stringify(cache.get(payload.taskId)), { status: 200 });
   }) as typeof fetch;
-
   try {
-    const response = await generateL0Draft(
-      { ...DEFAULT_SETTINGS, l0CustomBaseUrl: 'https://engine.test/' },
-      job
-    );
-    assert.deepEqual(response, canonicalResponse);
-    assert.equal(requestUrl, 'https://engine.test/v1/draft');
-    assert.equal(requestInit?.method, 'POST');
-    assert.deepEqual(JSON.parse(String(requestInit?.body)), { taskId: buildCanonicalTaskIdentity(job) });
-    assert.equal(new Headers(requestInit?.headers).get('Content-Type'), 'application/json');
-    assert.equal(new Headers(requestInit?.headers).get('Authorization'), `Bearer ${'a'.repeat(43)}`);
+    for (const audioVariantKey of ['', 'c'.repeat(64), 'd'.repeat(64)]) {
+      const selected = { ...job, audioVariantKey };
+      const response = await generateL0Draft(
+        { ...DEFAULT_SETTINGS, l0CustomBaseUrl: 'https://engine.test/' }, selected
+      );
+      assert.deepEqual(response, cache.get(buildCanonicalTaskIdentity(selected)));
+      assert.ok(response.rows[0].text.startsWith(audioVariantKey || 'Original'));
+    }
   } finally {
     globalThis.fetch = originalFetch;
   }

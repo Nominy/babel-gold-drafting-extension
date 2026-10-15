@@ -5,7 +5,7 @@ import { generateMaiL0Draft, MaiBridgeError } from '../core/mai-client';
 import { replaceTranscriptWithL0Rows, requireL0ReplacementConsumer } from '../core/l0-replacement-bridge';
 import { matchL0CreatedRows } from '../core/l0-created-row-matcher';
 import { assessAudioCaptureForDrafting, type AudioCaptureIssue } from '../core/audio-capture-guard';
-import { captureAudioTracksForDrafting, waitForAudioSelection } from '../core/audio-cues';
+import { captureAudioTracksForDrafting, isAudioSelectionReady, waitForAudioSelection } from '../core/audio-cues';
 import { isBrowserLocalMode, loadSettings } from '../core/settings';
 import { applyDraftRows, buildCanonicalTaskIdentity, buildDiffPreviewItems, captureTranscriptJob, restoreCapturedRows } from '../core/transcript';
 import { generateCurrentLocalL0Draft, getCurrentL0TimingGeneration, waitForCurrentL0Timing } from './l0-timing-service';
@@ -817,8 +817,9 @@ export class DraftingOverlayController {
       throw new DOMException('Draft cancelled or superseded', 'AbortError');
     }
     const current = { ...captureTranscriptJob(), audioDependent: capturedJob.audioDependent };
-    if (buildCanonicalTaskIdentity(current) !== buildCanonicalTaskIdentity(capturedJob)) {
-      throw new Error('The task changed while drafting. Discard this draft and generate again for the current task.');
+    if (buildCanonicalTaskIdentity(current) !== buildCanonicalTaskIdentity(capturedJob) ||
+        (capturedJob.audioDependent !== false && !isAudioSelectionReady(document, capturedJob.jobId))) {
+      throw new Error('The task or selected audio changed while drafting. Discard this draft and generate again for the current source.');
     }
   }
 
@@ -872,8 +873,8 @@ export class DraftingOverlayController {
       ? 'Preparing local GigaAM + C-denoise on WebGPU; no audio cloud fallback...'
       : settings.mode === 'simple'
         ? 'Transcribing with MAI native punctuation and word timing (cached results are reused)...'
-        : 'Waiting for shared L0 word timing...');
-    await waitForCurrentL0Timing(capturedJob, settings);
+        : 'Preparing L0 transcription for the selected audio source...');
+    await waitForCurrentL0Timing(capturedJob, settings, this.draftAbort?.signal);
     const timingGeneration = getCurrentL0TimingGeneration();
     await this.requireCurrentDraft(capturedJob, settings, timingGeneration);
     this.setStatus(settings.mode === 'simple'
@@ -886,7 +887,7 @@ export class DraftingOverlayController {
       response = await generateConfiguredL0Draft(settings, capturedJob);
     } catch (error) {
       if (settings.mode !== 'simple' || !(error instanceof MaiBridgeError) || error.code !== 'timing-unavailable') throw error;
-      await waitForCurrentL0Timing(capturedJob, settings);
+      await waitForCurrentL0Timing(capturedJob, settings, this.draftAbort?.signal);
       await this.requireCurrentDraft(capturedJob, settings, timingGeneration);
       response = await generateConfiguredL0Draft(settings, capturedJob);
     }

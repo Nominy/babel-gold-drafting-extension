@@ -62,14 +62,14 @@ function isCurrentAudioCaptureSession(session: AudioCaptureSession): boolean {
   return (
     session.pathname === window.location.pathname &&
     session.queryTaskId === readQueryTaskId() &&
-    session.taskId === buildCanonicalTaskIdentity(captureTranscriptJob())
+    session.taskId === buildCanonicalTaskIdentity({ ...captureTranscriptJob(), audioDependent: false })
   );
 }
 
 function getAudioCaptureSession(): AudioCaptureSession {
   if (!audioCaptureSession || !isCurrentAudioCaptureSession(audioCaptureSession)) {
     audioCaptureSession = {
-      taskId: buildCanonicalTaskIdentity(captureTranscriptJob()),
+      taskId: buildCanonicalTaskIdentity({ ...captureTranscriptJob(), audioDependent: false }),
       pathname: window.location.pathname,
       queryTaskId: readQueryTaskId(),
       interceptedAudioByUrl: new Map(),
@@ -355,11 +355,9 @@ function isPendingAudioSelection(state: AudioEnhancementState): boolean {
 export function isAudioSelectionReady(root: ParentNode = document, taskId = captureTranscriptJob(root).jobId): boolean {
   const documentRef = 'documentElement' in root ? root as Document : (root as Node).ownerDocument;
   const state = readAudioEnhancementState(documentRef);
-  if (!state || state.taskId !== taskId) {
-    // The enabled Helper surface mounts before its async MAIN bridge has both
-    // native tracks. Missing state here is initialization, not Original selection.
-    return !documentRef?.querySelector('[data-babel-helper-audio-enhancement]');
-  }
+  // The Generate surface is not a pending selection. Until Helper publishes an
+  // explicit request for this task, native Original audio is ready to consume.
+  if (!state || state.taskId !== taskId) return true;
   return !isPendingAudioSelection(state);
 }
 
@@ -420,6 +418,10 @@ function captureHelperSelectedAudio(root: ParentNode, selection: 'active' | 'ori
   const state = readAudioEnhancementState(documentRef);
   const job = captureTranscriptJob(root);
   if (!state || state.taskId !== job.jobId) return null;
+  // Before Generate, Helper deliberately has no copied/encoded source buffers.
+  // Read the native Original URLs instead of waking its enhancement capture.
+  if (state.status === 'idle' && state.strength === 0 && state.desiredStrength === 0 &&
+      !state.variantKey && !state.pairedVariantKey) return null;
   if (selection === 'active' && isPendingAudioSelection(state)) {
     return Promise.reject(new Error('The selected audio is preparing or switching. Wait for its paired source commit.'));
   }
@@ -487,8 +489,15 @@ function captureHelperSelectedAudio(root: ParentNode, selection: 'active' | 'ori
 
 export async function captureAudioTracksForDrafting(root: ParentNode = document): Promise<CapturedAudioTrack[]> {
   ensureAudioRequestCaptureInstalled();
+  const job = captureTranscriptJob(root);
   const selected = captureHelperSelectedAudio(root, 'active');
-  return selected ?? captureNetworkAudio(root);
+  if (selected) return selected;
+  const tracks = await captureNetworkAudio(root);
+  if (!isAudioSelectionReady(root, job.jobId) ||
+      buildCanonicalTaskIdentity(captureTranscriptJob(root)) !== buildCanonicalTaskIdentity(job)) {
+    throw new Error('The selected audio changed during capture.');
+  }
+  return tracks;
 }
 
 export async function captureOriginalAudioTracksForEnhancement(root: ParentNode = document): Promise<CapturedAudioTrack[]> {

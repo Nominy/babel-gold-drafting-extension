@@ -48,7 +48,17 @@ function installNative(t: TestContext) {
       onChangeAnnotationContent,
       onSave() {}, onChangeAnnotationTrack() {}, onChangeAnnotationTime() {}, onDeleteAnnotation() {}, onMergeAnnotations() {}, onCreateAnnotation() {}
     },
-    transcript: { get turns() { return annotations.slice(0, 1); }, handlers: { onChangeText: onChangeAnnotationContent } },
+    transcript: {
+      get turns() { return annotations.slice(0, 1); },
+      editingId: null,
+      localEdits: false,
+      handlers: {
+        onChangeText: onChangeAnnotationContent,
+        onActivate() { throw new Error('Unexpected native activation during transcript mutation'); },
+        onDeactivate() { throw new Error('Unexpected native deactivation during transcript mutation'); },
+        onSelect() { throw new Error('Unexpected native selection during transcript mutation'); }
+      }
+    },
     controller: null, history
   };
   const dispose = registerTranscriptBridge(dom.window.document, () => ({ ...bindings, history: { ...history, undoStack: [...undoStack] } }));

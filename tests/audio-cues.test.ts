@@ -905,6 +905,41 @@ for (const strength of [0, 35, 100]) {
   });
 }
 
+test('idle Generate leaves Original ready and captures existing native sources without requesting enhancement buffers', async (t) => {
+  const fixture = installSelectedAudioFixture(0);
+  t.after(() => fixture.dom.window.close());
+  fixture.publish({ status: 'idle', pairedVariantKey: undefined });
+  assert.equal(isAudioSelectionReady(), true);
+  const selected = await waitForAudioSelection(captureTranscriptJob());
+  assert.equal(selected.audioVariantKey, undefined);
+  assert.equal(selected.audioDependent, true);
+  const tracks = await captureAudioTracksForDrafting();
+  assert.equal(tracks[0]?.source, 'https://dashboard.babel.audio/original.wav');
+  assert.deepEqual(await readCapturedBytes(fixture.dom, tracks[0]!.blob), [1, 2, 3]);
+  assert.deepEqual(fixture.requests, [], 'Draft must not start Helper capture or Generate');
+});
+
+test('Original timing capture survives an enhancement selection change during native capture', async (t) => {
+  const fixture = installSelectedAudioFixture(0);
+  t.after(() => fixture.dom.window.close());
+  fixture.publish({ status: 'idle', pairedVariantKey: undefined });
+  const capture = captureOriginalAudioTracksForEnhancement();
+  fixture.publish({ status: 'processing', desiredStrength: 90 });
+  const tracks = await capture;
+  assert.equal(tracks[0]?.source, 'https://dashboard.babel.audio/original.wav');
+  assert.deepEqual(fixture.requests, []);
+});
+
+test('Original Draft capture rejects a selection requested during native capture', async (t) => {
+  const fixture = installSelectedAudioFixture(0);
+  t.after(() => fixture.dom.window.close());
+  fixture.publish({ status: 'idle', pairedVariantKey: undefined });
+  const capture = captureAudioTracksForDrafting();
+  fixture.publish({ status: 'processing', desiredStrength: 90 });
+  await assert.rejects(capture, /selected audio changed/);
+  assert.deepEqual(fixture.requests, []);
+});
+
 test('enhancement input captures exact retained Originals during a pending blend commit', async (t) => {
   const fixture = installSelectedAudioFixture();
   t.after(() => fixture.dom.window.close());
@@ -1086,7 +1121,7 @@ for (const interruption of ['abort', 'task', 'route', 'disconnect'] as const) {
 }
 
 for (const initialState of ['missing', 'previous-task'] as const) {
-  test(`enabled enhancement waits for current-task initialization when state is ${initialState}`, async (t) => {
+  test(`Generate UI does not block Original drafting when state is ${initialState}`, async (t) => {
     const fixture = installSelectedAudioFixture(0);
     t.after(() => fixture.dom.window.close());
     const control = fixture.dom.window.document.createElement('span');
@@ -1094,36 +1129,13 @@ for (const initialState of ['missing', 'previous-task'] as const) {
     fixture.dom.window.document.body.append(control);
     if (initialState === 'missing') fixture.root.removeAttribute(AUDIO_ENHANCEMENT_STATE_ATTRIBUTE);
     else fixture.publish({ taskId: 'previous-review-action' });
-    assert.equal(isAudioSelectionReady(), false);
-    let ready = false;
-    const waiting = waitForAudioSelection(captureTranscriptJob()).then((job) => { ready = true; return job; });
-    await Promise.resolve();
-    assert.equal(ready, false);
+    assert.equal(isAudioSelectionReady(), true);
+    const selected = await waitForAudioSelection(captureTranscriptJob());
+    assert.equal(selected.audioVariantKey, undefined);
+    assert.equal(selected.audioDependent, true);
+    const tracks = await captureAudioTracksForDrafting();
+    assert.equal(tracks[0]?.source, 'https://dashboard.babel.audio/original.wav');
     assert.deepEqual(fixture.requests, []);
     assert.deepEqual(fixture.fetches, []);
-    fixture.publish({ taskId: 'review-action-42', status: 'idle', strength: 0, desiredStrength: 90, variantKey: '' });
-    await Promise.resolve();
-    assert.equal(ready, false);
-    const variantKey = 'e'.repeat(64);
-    fixture.publish({ status: 'ready', strength: 90, desiredStrength: 90, variantKey });
-    assert.equal((await waiting).audioVariantKey, variantKey);
-    assert.equal(isAudioSelectionReady(), true);
   });
 }
-
-test('removing an uninitialized enhancement feature releases Original readiness without fabricating its state', async (t) => {
-  const fixture = installSelectedAudioFixture(0);
-  t.after(() => fixture.dom.window.close());
-  fixture.root.removeAttribute(AUDIO_ENHANCEMENT_STATE_ATTRIBUTE);
-  const control = fixture.dom.window.document.createElement('span');
-  control.setAttribute('data-babel-helper-audio-enhancement', '');
-  fixture.dom.window.document.body.append(control);
-  const waiting = waitForAudioSelection(captureTranscriptJob());
-  assert.equal(isAudioSelectionReady(), false);
-  control.remove();
-  const original = await waiting;
-  assert.equal(original.audioVariantKey, undefined);
-  assert.equal(isAudioSelectionReady(), true);
-  assert.deepEqual(fixture.requests, []);
-  assert.deepEqual(fixture.fetches, []);
-});

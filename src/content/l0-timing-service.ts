@@ -1,5 +1,5 @@
 import { AUDIO_ENHANCEMENT_STATE_ATTRIBUTE, AUDIO_ENHANCEMENT_STATE_EVENT, readAudioEnhancementState } from '@nominy/babel-babel-runtime';
-import { captureAudioTracksForDrafting, isAudioSelectionReady } from '../core/audio-cues';
+import { captureAudioTracksForDrafting, captureOriginalAudioTracksForEnhancement, isAudioSelectionReady } from '../core/audio-cues';
 import { AUDIO_ENABLE_CAPTURE_MESSAGE_TYPE } from '../core/audio-intercept-protocol';
 import { generateL0Timing, lookupL0Timing, prepareL0TimingTracks, type L0TimingQueueStatus, type L0TimingRequestCallbacks } from '../core/l0-timing-client';
 import { generateLocalL0Draft, generateLocalL0Timing, LocalModelBridgeError } from '../core/local-model-client';
@@ -30,6 +30,7 @@ type TimingTaskState = {
   generation: number;
   attempt: Promise<void> | null;
   explicitAttempt: boolean;
+  publishPlayback: boolean;
   error: Error | null;
 };
 export type L0TimingGenerators = {
@@ -62,7 +63,7 @@ export interface L0TimingServiceDependencies {
   captureTranscript: () => TranscriptJob;
   currentTaskId: () => string;
   currentPathname: () => string;
-  captureAudio: () => Promise<CapturedAudioTrack[]>;
+  captureAudio: (selection: 'original' | 'active') => Promise<CapturedAudioTrack[]>;
   getSettings: () => Promise<ExtensionSettings>;
   isAudioSelectionReady?: () => boolean;
   localModelStatus?: typeof getLocalModelStatus;
@@ -96,6 +97,7 @@ export class L0TimingService {
   private activeEngine = '';
   private generation = 0;
   private currentSettings: ExtensionSettings | null = null;
+  private draftTiming: L0TimingResponse | null = null;
   private readonly manualRequests = new Set<string>();
 
   constructor(private readonly dependencies: L0TimingServiceDependencies) {}
@@ -119,6 +121,7 @@ export class L0TimingService {
     if (engine === this.activeEngine) return;
     this.activeEngine = engine;
     this.generation += 1;
+    this.draftTiming = null;
     for (const check of this.taskChecks) check();
   }
 
@@ -128,15 +131,14 @@ export class L0TimingService {
   }
 
   private async lifecycleOpportunity(): Promise<void> {
-    const job = this.dependencies.captureTranscript();
+    // Automatic timing belongs to the Original source, never to a slider mix.
+    const captured = this.dependencies.captureTranscript();
+    if (this.draftTiming && this.draftTiming.taskId !== buildCanonicalTaskIdentity(captured)) this.draftTiming = null;
+    const job = { ...captured, audioVariantKey: undefined };
     const taskId = buildCanonicalTaskIdentity(job);
     const settings = await this.dependencies.getSettings();
     this.activateSettings(settings);
-    if (!this.isTaskCurrent(taskId)) return;
-    if (this.dependencies.isAudioSelectionReady?.() === false) {
-      publishL0TimingAvailability({ taskId, status: 'preparing' });
-      return;
-    }
+    if (!this.isBaseTaskCurrent(taskId)) return;
     const state = this.getTaskState(taskId, settings);
     // Babel temporarily redraws rows without speaker labels. The canonical task
     // remains the same; its valid request/cache must survive that DOM transition.
@@ -173,7 +175,7 @@ export class L0TimingService {
     const created: TimingTaskState = {
       completed: false, inFlight: false, failureCount: 0, retryNotBefore: 0,
       retryScheduled: false, audioWaitCount: 0, generation: this.generation,
-      attempt: null, error: null, explicitAttempt: false
+      attempt: null, error: null, explicitAttempt: false, publishPlayback: false
     };
     this.taskStates.set(key, created);
     return created;
@@ -187,9 +189,18 @@ export class L0TimingService {
     }
   }
 
+  private isBaseTaskCurrent(taskId: string): boolean {
+    try {
+      const { audioVariantKey: _variant, ...identity } = JSON.parse(this.dependencies.currentTaskId());
+      return JSON.stringify(identity) === taskId;
+    } catch {
+      return false;
+    }
+  }
+
   private isOwnerCurrent(taskId: string, state: TimingTaskState): boolean {
-    return state.generation === this.generation && this.isTaskCurrent(taskId) &&
-      this.dependencies.isAudioSelectionReady?.() !== false;
+    return state.generation === this.generation && (this.isBaseTaskCurrent(taskId) ||
+      (this.isTaskCurrent(taskId) && this.dependencies.isAudioSelectionReady?.() !== false));
   }
 
   private async verifyOwner(taskId: string, state: TimingTaskState): Promise<boolean> {
@@ -221,11 +232,12 @@ export class L0TimingService {
 
   private startAttempt(
     job: TranscriptJob, taskId: string, settings: ExtensionSettings,
-    state: TimingTaskState, explicit: boolean
+    state: TimingTaskState, explicit: boolean, publishPlayback = false
   ): Promise<void> {
     if (state.attempt) return state.attempt;
     state.inFlight = true;
     state.explicitAttempt = explicit;
+    state.publishPlayback = !job.audioVariantKey || publishPlayback;
     state.error = null;
     if (explicit || settings.mode === 'advanced') publishL0TimingAvailability({ taskId, status: 'preparing' });
     const attempt = this.runAttempt(job, taskId, settings, state, explicit);
@@ -261,12 +273,13 @@ export class L0TimingService {
         }
       }
       if (!(await this.verifyOwner(taskId, state))) return;
-      const audioTracks = (await this.dependencies.captureAudio()).filter((track) => track.blob.size > 0);
+      const selection = job.audioDependent !== false && job.audioVariantKey ? 'active' : 'original';
+      const audioTracks = (await this.dependencies.captureAudio(selection)).filter((track) => track.blob.size > 0);
       if (!(await this.verifyOwner(taskId, state))) return;
       try {
         prepareL0TimingTracks(job, audioTracks);
       } catch (error) {
-        if (settings.mode === 'simple') throw error;
+        if (settings.mode === 'simple' || job.audioVariantKey) throw error;
         // Advanced retains its existing audio-readiness lifecycle.
         state.audioWaitCount += 1;
         publishL0TimingAvailability({ taskId, status: 'preparing' });
@@ -297,7 +310,7 @@ export class L0TimingService {
     } catch (error) {
       if (!(await this.verifyOwner(taskId, state))) return;
       state.error = error instanceof Error ? error : new Error(String(error));
-      if (settings.mode === 'simple') {
+      if (settings.mode === 'simple' || job.audioVariantKey) {
         publishL0TimingAvailability({ taskId, status: 'unavailable', error: state.error.message });
       } else if (settings.mode === 'local') {
         state.failureCount = MAX_AUTOMATIC_RETRIES + 1;
@@ -309,21 +322,48 @@ export class L0TimingService {
     } finally {
       state.inFlight = false;
       state.attempt = null;
+      // A free Original lookup may have been pending when explicit Draft
+      // completed. If it found no pins, expose that real selected-source result.
+      if (state.generation === this.generation && !state.completed && !state.retryScheduled &&
+          this.isBaseTaskCurrent(taskId) && this.draftTiming) {
+        const draft = this.draftTiming;
+        const draftState = this.getTaskState(draft.taskId, settings);
+        if (draftState.completed && !draftState.publishPlayback && this.isOwnerCurrent(draft.taskId, draftState)) {
+          this.publishTiming(draft.taskId, draft, draftState);
+        }
+      }
     }
   }
 
   private publishTiming(taskId: string, response: L0TimingResponse, state: TimingTaskState): void {
-    this.dependencies.publish({
+    // Preserve any completed or pending Original startup anchor. If there is
+    // none (notably Simple's free cache miss), an explicit Draft can provide the
+    // first real playback pins, under its genuine selected-source identity.
+    if (!state.publishPlayback) {
+      const { audioVariantKey: _variant, ...base } = JSON.parse(taskId);
+      const original = this.taskStates.get(`${this.activeEngine}:${JSON.stringify(base)}`);
+      state.publishPlayback = !original || original.generation !== this.generation ||
+        !(original.completed || original.inFlight || original.retryScheduled);
+    }
+    if (state.publishPlayback) this.dependencies.publish({
       type: L0_TIMING_UPDATE_MESSAGE_TYPE, version: 1, taskId,
       tracks: response.tracks.map(({ lane, tokens }) => ({ lane, tokens }))
     });
+    // Retain only the latest unpublished source, not every slider mix, so an
+    // explicit timestamp action can publish its genuine pins without re-inference.
+    if (!state.publishPlayback) this.draftTiming = response;
+    else if (this.draftTiming?.taskId === taskId) this.draftTiming = null;
     state.completed = true;
     publishL0TimingAvailability({ taskId, status: 'available' });
   }
 
-  async waitForTiming(job: TranscriptJob, settings: ExtensionSettings): Promise<void> {
+  async waitForTiming(
+    job: TranscriptJob, settings: ExtensionSettings,
+    { signal, publishPlayback = false }: { signal?: AbortSignal; publishPlayback?: boolean } = {}
+  ): Promise<void> {
     const taskId = buildCanonicalTaskIdentity(job);
     const pathname = this.dependencies.currentPathname();
+    signal?.throwIfAborted();
     if (this.dependencies.isAudioSelectionReady?.() === false) {
       throw new Error('Audio enhancement is preparing or switching. Wait for the selected audio to finish loading, then generate again.');
     }
@@ -337,17 +377,25 @@ export class L0TimingService {
     }
     this.activateSettings(saved);
     const state = this.getTaskState(taskId, settings);
-    const isCurrent = () => this.dependencies.currentPathname() === pathname && this.isOwnerCurrent(taskId, state);
-    const changedError = () => new Error('The task changed or drafting mode changed while waiting for L0 timing.');
+    const isCurrent = () => !signal?.aborted && this.dependencies.currentPathname() === pathname &&
+      this.isTaskCurrent(taskId) && this.dependencies.isAudioSelectionReady?.() !== false &&
+      this.isOwnerCurrent(taskId, state);
+    const changedError = () => signal?.aborted ? signal.reason as Error :
+      new Error('The task changed or drafting mode changed while waiting for L0 timing.');
     if (!isCurrent()) throw changedError();
-    if (settings.mode === 'local' && state.completed) return;
-    if (settings.mode === 'simple' || settings.mode === 'local') {
+    if (publishPlayback && settings.mode !== 'simple' && state.completed && this.draftTiming?.taskId === taskId) {
+      state.publishPlayback = true;
+      this.publishTiming(taskId, this.draftTiming, state);
+      return;
+    }
+    if (isBrowserLocalMode(settings) && state.completed && (!publishPlayback || state.publishPlayback)) return;
+    if (settings.mode === 'simple' || settings.mode === 'local' || job.audioVariantKey) {
       // A free lifecycle lookup may already be running. Await it, then explicitly
       // recheck durable cache and generate only if absent; never trust completed.
       const existing = state.attempt;
       const alreadyExplicit = state.explicitAttempt;
       if (existing) {
-        await this.waitWithOwnership(existing, isCurrent, changedError);
+        await this.waitWithOwnership(existing, isCurrent, changedError, signal);
         if (!isCurrent()) throw changedError();
         if (alreadyExplicit) {
           if (state.error) throw state.error;
@@ -356,8 +404,8 @@ export class L0TimingService {
         }
       }
       if (!isCurrent()) throw changedError();
-      const attempt = this.startAttempt(job, taskId, saved, state, true);
-      await this.waitWithOwnership(attempt, isCurrent, changedError);
+      const attempt = this.startAttempt(job, taskId, saved, state, true, publishPlayback);
+      await this.waitWithOwnership(attempt, isCurrent, changedError, signal);
       if (!isCurrent()) throw changedError();
       if (state.error) throw state.error;
       if (!state.completed) throw new Error(`L0 timing for task ${taskId} is unavailable.`);
@@ -371,6 +419,7 @@ export class L0TimingService {
         settled = true;
         unsubscribe?.();
         this.taskChecks.delete(checkTask);
+        signal?.removeEventListener('abort', checkTask);
         if (error) reject(error); else resolve();
       };
       const checkTask = () => { if (!isCurrent()) finish(changedError()); };
@@ -381,6 +430,7 @@ export class L0TimingService {
           (!isBrowserLocalMode(settings) && (availability.status === 'queued' || availability.status === 'running'))) finish();
       };
       this.taskChecks.add(checkTask);
+      signal?.addEventListener('abort', checkTask, { once: true });
       // Reset an unrelated engine's replay before subscribing.
       if (!state.completed && !state.inFlight) publishL0TimingAvailability({ taskId, status: 'preparing' });
       unsubscribe = subscribeL0TimingAvailability(onAvailability);
@@ -390,7 +440,7 @@ export class L0TimingService {
   }
 
   private waitWithOwnership(
-    attempt: Promise<void>, isCurrent: () => boolean, changedError: () => Error
+    attempt: Promise<void>, isCurrent: () => boolean, changedError: () => Error, signal?: AbortSignal
   ): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       let settled = false;
@@ -399,6 +449,7 @@ export class L0TimingService {
         if (settled) return;
         settled = true;
         this.taskChecks.delete(check);
+        signal?.removeEventListener('abort', check);
         unsubscribe();
         if (error) reject(error); else resolve();
       };
@@ -406,6 +457,8 @@ export class L0TimingService {
         if (!isCurrent()) queueMicrotask(check);
       });
       this.taskChecks.add(check);
+      signal?.addEventListener('abort', check, { once: true });
+      check();
       void attempt.then(() => finish(), (error: Error) => finish(error));
     });
   }
@@ -444,7 +497,8 @@ export class L0TimingService {
     const settings = this.currentSettings;
     if (settings) {
       const state = this.getTaskState(taskId, settings);
-      if (state.inFlight || state.retryScheduled || (settings.mode === 'advanced' && state.completed)) return false;
+      if (state.inFlight || state.retryScheduled ||
+          (settings.mode === 'advanced' && state.completed && state.publishPlayback)) return false;
       state.failureCount = 0;
       state.audioWaitCount = 0;
       state.retryNotBefore = 0;
@@ -453,7 +507,7 @@ export class L0TimingService {
     publishL0TimingAvailability({ taskId, status: 'preparing' });
     void this.dependencies.getSettings().then(async (saved) => {
       this.activateSettings(saved);
-      if (saved.mode === 'simple') await this.waitForTiming(job, saved);
+      if (saved.mode === 'simple' || job.audioVariantKey) await this.waitForTiming(job, saved, { publishPlayback: true });
       else this.onLifecycleOpportunity();
     }).catch((error) => {
       if (this.isTaskCurrent(taskId)) {
@@ -480,9 +534,9 @@ export function getCurrentL0TimingGeneration(): number {
   return activeTimingService.generationId;
 }
 
-export function waitForCurrentL0Timing(job: TranscriptJob, settings: ExtensionSettings): Promise<void> {
+export function waitForCurrentL0Timing(job: TranscriptJob, settings: ExtensionSettings, signal?: AbortSignal): Promise<void> {
   if (!activeTimingService) throw new Error('L0 timing service is not initialized.');
-  return activeTimingService.waitForTiming(job, settings);
+  return activeTimingService.waitForTiming(job, settings, { signal });
 }
 
 export function recoverCurrentLocalL0Timing(settings: ExtensionSettings, job: TranscriptJob): Promise<void> {
@@ -500,7 +554,8 @@ export function registerL0TimingService(): L0TimingService {
     captureTranscript: () => captureTranscriptJob(),
     currentTaskId: () => buildCanonicalTaskIdentity(captureTranscriptJob()),
     currentPathname: () => window.location.pathname,
-    captureAudio: () => captureAudioTracksForDrafting(),
+    captureAudio: (selection) => selection === 'original'
+      ? captureOriginalAudioTracksForEnhancement() : captureAudioTracksForDrafting(),
     getSettings: () => loadSettings(),
     isAudioSelectionReady: () => isAudioSelectionReady(),
     lookupTiming: (settings, taskId) => settings.mode === 'simple'
